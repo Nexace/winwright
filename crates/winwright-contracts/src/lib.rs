@@ -4,14 +4,18 @@
 //! platform adapters convert native data into these DTOs at their boundary.
 
 pub mod backend;
+pub mod capture;
 pub mod config;
 pub mod element;
 pub mod error;
 pub mod geometry;
 pub mod ids;
+pub mod input;
 pub mod locator;
+pub mod overlay;
 pub mod security;
 pub mod snapshot;
+pub mod system;
 pub mod window;
 
 pub use error::{ErrorCode, ErrorPayload, WinwrightError, WinwrightResult};
