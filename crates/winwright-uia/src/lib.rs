@@ -4,6 +4,7 @@
 //! bounded channel and await oneshot replies. No COM interface ever leaves the worker thread.
 
 mod com;
+mod patterns;
 mod props;
 mod worker;
 
@@ -12,8 +13,8 @@ use std::time::Instant;
 
 use tokio::sync::{mpsc, oneshot};
 use winwright_contracts::backend::{
-    BackendFuture, ElementKey, InspectTarget, OperationContext, UiAutomationBackend, UiInspection,
-    UiTree, UiTreeRequest,
+    BackendFuture, ElementKey, InspectTarget, OperationContext, UiActionOutcome,
+    UiAutomationBackend, UiInspection, UiPatternAction, UiProps, UiTree, UiTreeRequest,
 };
 use winwright_contracts::{WinwrightError, WinwrightResult};
 
@@ -89,6 +90,22 @@ impl UiaBackend {
     }
 }
 
+/// Once a mutating command reached the worker, a timeout cannot prove it did not run.
+fn outcome_unknown_on_timeout<T>(
+    operation: &str,
+    result: WinwrightResult<T>,
+) -> WinwrightResult<T> {
+    match result {
+        Err(WinwrightError::Timeout { elapsed_ms, .. }) if elapsed_ms > 0 => {
+            Err(WinwrightError::ActionOutcomeUnknown {
+                operation: operation.to_owned(),
+                reason: format!("no reply after {elapsed_ms} ms; the action may have run"),
+            })
+        }
+        other => other,
+    }
+}
+
 impl UiAutomationBackend for UiaBackend {
     fn worker_epoch(&self) -> u64 {
         self.epoch
@@ -131,6 +148,43 @@ impl UiAutomationBackend for UiaBackend {
                 .send(Command::Release { keys })
                 .await
                 .map_err(|_| unavailable())
+        })
+    }
+
+    fn refresh<'a>(
+        &'a self,
+        key: ElementKey,
+        ctx: &'a OperationContext,
+    ) -> BackendFuture<'a, UiProps> {
+        Box::pin(self.call(ctx, "refresh", move |_, reply| Command::Refresh {
+            key,
+            reply,
+        }))
+    }
+
+    fn execute_pattern<'a>(
+        &'a self,
+        key: ElementKey,
+        action: UiPatternAction,
+        ctx: &'a OperationContext,
+    ) -> BackendFuture<'a, UiActionOutcome> {
+        let mutating = !matches!(
+            action,
+            UiPatternAction::GetText { .. } | UiPatternAction::ClickablePoint
+        );
+        Box::pin(async move {
+            let result = self
+                .call(ctx, "execute_pattern", move |_, reply| Command::Execute {
+                    key,
+                    action,
+                    reply,
+                })
+                .await;
+            if mutating {
+                outcome_unknown_on_timeout("execute_pattern", result)
+            } else {
+                result
+            }
         })
     }
 }

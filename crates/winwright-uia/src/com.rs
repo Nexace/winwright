@@ -10,7 +10,7 @@ use windows::Win32::System::Ole::{
     SafeArrayAccessData, SafeArrayDestroy, SafeArrayGetDim, SafeArrayGetLBound, SafeArrayGetUBound,
     SafeArrayUnaccessData,
 };
-use windows::Win32::System::Variant::{VARIANT, VT_BOOL, VT_BSTR, VT_I4, VariantClear};
+use windows::Win32::System::Variant::{VARIANT, VT_BOOL, VT_BSTR, VT_I4, VT_R8, VariantClear};
 use winwright_contracts::WinwrightError;
 
 pub fn platform(operation: &str, err: &windows::core::Error) -> WinwrightError {
@@ -60,6 +60,11 @@ impl OwnedVariant {
         // SAFETY: `boolVal` is the active union arm when vt == VT_BOOL.
         (self.vt() == VT_BOOL.0)
             .then(|| unsafe { self.0.Anonymous.Anonymous.Anonymous.boolVal }.as_bool())
+    }
+
+    pub fn as_f64(&self) -> Option<f64> {
+        // SAFETY: `dblVal` is the active union arm when vt == VT_R8.
+        (self.vt() == VT_R8.0).then(|| unsafe { self.0.Anonymous.Anonymous.Anonymous.dblVal })
     }
 
     pub fn as_i32(&self) -> Option<i32> {

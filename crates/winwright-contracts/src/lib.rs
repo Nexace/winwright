@@ -3,6 +3,7 @@
 //! Nothing in this crate references COM, HWND wrappers, or UI-toolkit types:
 //! platform adapters convert native data into these DTOs at their boundary.
 
+pub mod action;
 pub mod backend;
 pub mod capture;
 pub mod config;

@@ -24,11 +24,14 @@ const BASE_PROPERTIES: &[UIA_PROPERTY_ID] = &[
     UIA_HasKeyboardFocusPropertyId,
     UIA_IsKeyboardFocusablePropertyId,
     UIA_IsPasswordPropertyId,
+    UIA_LabeledByPropertyId,
     UIA_IsDialogPropertyId,
     UIA_ValueIsReadOnlyPropertyId,
     UIA_ToggleToggleStatePropertyId,
     UIA_ExpandCollapseExpandCollapseStatePropertyId,
     UIA_SelectionItemIsSelectedPropertyId,
+    UIA_ScrollHorizontalScrollPercentPropertyId,
+    UIA_ScrollVerticalScrollPercentPropertyId,
 ];
 
 const PATTERN_AVAILABILITY: &[(UIA_PROPERTY_ID, UiPattern)] = &[
@@ -177,6 +180,13 @@ pub fn read_props(el: &IUIAutomationElement) -> UiProps {
                 .map(|b| b.as_bool())
                 .unwrap_or(false),
             is_password: el.CachedIsPassword().map(|b| b.as_bool()).unwrap_or(false),
+            // Only labelled elements pay for the extra cross-process name read.
+            labeled_by: el
+                .CachedLabeledBy()
+                .ok()
+                .and_then(|label| label.CurrentName().ok())
+                .map(|b| b.to_string())
+                .filter(|s| !s.trim().is_empty()),
             ..UiProps::default()
         }
     };
@@ -210,6 +220,13 @@ pub fn read_props(el: &IUIAutomationElement) -> UiProps {
                 3 => Some(ExpandState::LeafNode),
                 _ => None,
             });
+    }
+    if props.has_pattern(UiPattern::Scroll) {
+        let percent = |id| cached(el, id).and_then(|v| v.as_f64()).unwrap_or(-1.0);
+        props.scroll_percent = Some((
+            percent(UIA_ScrollHorizontalScrollPercentPropertyId),
+            percent(UIA_ScrollVerticalScrollPercentPropertyId),
+        ));
     }
     if props.has_pattern(UiPattern::SelectionItem) {
         props.selected =

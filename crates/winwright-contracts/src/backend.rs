@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use tokio_util::sync::CancellationToken;
 
+use crate::action::WindowVisualState;
 use crate::element::{ControlRole, ExpandState, ToggleState, UiPattern};
 use crate::error::{WinwrightError, WinwrightResult};
 use crate::geometry::{PhysicalPoint, PhysicalRect};
@@ -82,6 +83,8 @@ pub struct UiProps {
     pub focused: bool,
     pub keyboard_focusable: bool,
     pub is_password: bool,
+    /// Name of the element referenced by UIA `LabeledBy`, when the provider sets it.
+    pub labeled_by: Option<String>,
     pub patterns: Vec<UiPattern>,
     /// Never populated for password fields: the backend does not read them at all.
     pub value: Option<String>,
@@ -89,6 +92,8 @@ pub struct UiProps {
     pub toggle_state: Option<ToggleState>,
     pub expand_state: Option<ExpandState>,
     pub selected: Option<bool>,
+    /// `(horizontal, vertical)` scroll percent from `ScrollPattern`; -1 means not scrollable.
+    pub scroll_percent: Option<(f64, f64)>,
 }
 
 impl UiProps {
@@ -197,13 +202,88 @@ pub struct UiInspection {
     pub ancestors: Vec<UiProps>,
 }
 
-/// Top-level window enumeration. Fast Win32 calls that never block on hung apps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScrollAmount {
+    LargeDecrement,
+    SmallDecrement,
+    NoAmount,
+    LargeIncrement,
+    SmallIncrement,
+}
+
+/// One control-pattern operation executed on the UIA worker.
+#[derive(Clone, PartialEq)]
+pub enum UiPatternAction {
+    Invoke,
+    /// `SelectionItemPattern.Select`.
+    Select,
+    Toggle,
+    Expand,
+    Collapse,
+    SetValue(String),
+    ScrollIntoView,
+    Scroll {
+        horizontal: ScrollAmount,
+        vertical: ScrollAmount,
+    },
+    SetFocus,
+    /// `TextPattern` document text, falling back to `ValuePattern` then `Name`.
+    GetText {
+        max_chars: u32,
+    },
+    ClickablePoint,
+}
+
+impl std::fmt::Debug for UiPatternAction {
+    /// Never prints a value being set: it may be a secret.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SetValue(v) => write!(f, "SetValue(chars={})", v.chars().count()),
+            Self::Invoke => f.write_str("Invoke"),
+            Self::Select => f.write_str("Select"),
+            Self::Toggle => f.write_str("Toggle"),
+            Self::Expand => f.write_str("Expand"),
+            Self::Collapse => f.write_str("Collapse"),
+            Self::ScrollIntoView => f.write_str("ScrollIntoView"),
+            Self::Scroll {
+                horizontal,
+                vertical,
+            } => write!(f, "Scroll({horizontal:?}, {vertical:?})"),
+            Self::SetFocus => f.write_str("SetFocus"),
+            Self::GetText { max_chars } => write!(f, "GetText({max_chars})"),
+            Self::ClickablePoint => f.write_str("ClickablePoint"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct UiActionOutcome {
+    /// Fresh properties after the operation; `None` when the element disappeared.
+    pub props_after: Option<UiProps>,
+    /// For `GetText`: the text and which source provided it (`TextPattern`/`ValuePattern`/`Name`).
+    pub text: Option<(String, &'static str)>,
+    /// For `ClickablePoint`: the provider's clickable point, if it has one.
+    pub point: Option<PhysicalPoint>,
+}
+
+/// Top-level window enumeration and control. Fast Win32 calls that never block on hung apps.
 pub trait WindowBackend: Send + Sync {
     fn list_windows(&self) -> WinwrightResult<Vec<WindowInfo>>;
     fn foreground_window(&self) -> WinwrightResult<Option<WindowInfo>>;
     fn window(&self, hwnd: u64) -> WinwrightResult<Option<WindowInfo>>;
     fn cursor_position(&self) -> WinwrightResult<PhysicalPoint>;
     fn process_name(&self, pid: u32) -> String;
+
+    /// Restores if minimized and brings to the foreground. Fails with `WINDOW_NOT_FOCUSED`
+    /// when Windows refuses the foreground change.
+    fn focus_window(&self, hwnd: u64) -> WinwrightResult<()>;
+    fn set_window_state(&self, hwnd: u64, state: WindowVisualState) -> WinwrightResult<()>;
+    /// Moves/resizes so the *visible frame* (DWM bounds) equals `bounds`.
+    fn set_window_bounds(&self, hwnd: u64, bounds: PhysicalRect) -> WinwrightResult<()>;
+    /// Posts `WM_CLOSE`; the application may still prompt (e.g. unsaved changes).
+    fn close_window(&self, hwnd: u64) -> WinwrightResult<()>;
+    /// True when `pid` runs at a higher integrity level than this process (UIPI blocks input).
+    fn is_more_privileged(&self, pid: u32) -> bool;
 }
 
 /// Thread-safe mailbox proxy to the dedicated MTA UIA worker.
@@ -225,4 +305,20 @@ pub trait UiAutomationBackend: Send + Sync {
 
     /// Drops worker slots the caller no longer references.
     fn release<'a>(&'a self, keys: Vec<ElementKey>) -> BackendFuture<'a, ()>;
+
+    /// Re-reads the element's properties. `ELEMENT_STALE` when it no longer exists.
+    fn refresh<'a>(
+        &'a self,
+        key: ElementKey,
+        ctx: &'a OperationContext,
+    ) -> BackendFuture<'a, UiProps>;
+
+    /// Runs one control-pattern operation. Providers can block; a timeout after dispatch is
+    /// reported as `ACTION_OUTCOME_UNKNOWN`, never retried.
+    fn execute_pattern<'a>(
+        &'a self,
+        key: ElementKey,
+        action: UiPatternAction,
+        ctx: &'a OperationContext,
+    ) -> BackendFuture<'a, UiActionOutcome>;
 }

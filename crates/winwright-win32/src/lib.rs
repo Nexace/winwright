@@ -1,15 +1,18 @@
 //! Win32 adapters. All unsafe interop is confined to this crate's small private functions;
 //! callers only see owned [`WindowInfo`] values.
 
+mod control;
 mod dpi;
 mod process;
 mod windows_enum;
 
+pub use control::current_integrity;
 pub use dpi::enable_per_monitor_dpi_awareness;
 
 use winwright_contracts::WinwrightResult;
+use winwright_contracts::action::WindowVisualState;
 use winwright_contracts::backend::WindowBackend;
-use winwright_contracts::geometry::PhysicalPoint;
+use winwright_contracts::geometry::{PhysicalPoint, PhysicalRect};
 use winwright_contracts::window::WindowInfo;
 
 /// Top-level window enumeration backed by `EnumWindows` and DWM.
@@ -35,5 +38,25 @@ impl WindowBackend for Win32Windows {
 
     fn process_name(&self, pid: u32) -> String {
         process::process_name(pid).unwrap_or_default()
+    }
+
+    fn focus_window(&self, hwnd: u64) -> WinwrightResult<()> {
+        control::focus_window(hwnd)
+    }
+
+    fn set_window_state(&self, hwnd: u64, state: WindowVisualState) -> WinwrightResult<()> {
+        control::set_window_state(hwnd, state)
+    }
+
+    fn set_window_bounds(&self, hwnd: u64, bounds: PhysicalRect) -> WinwrightResult<()> {
+        control::set_window_bounds(hwnd, bounds)
+    }
+
+    fn close_window(&self, hwnd: u64) -> WinwrightResult<()> {
+        control::close_window(hwnd)
+    }
+
+    fn is_more_privileged(&self, pid: u32) -> bool {
+        control::is_more_privileged(pid)
     }
 }

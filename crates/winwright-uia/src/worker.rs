@@ -14,11 +14,13 @@ use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
 use windows::Win32::UI::Accessibility::*;
 use windows::core::Interface;
 use winwright_contracts::backend::{
-    ElementKey, InspectTarget, TreeRoot, UiInspection, UiNode, UiTree, UiTreeRequest,
+    ElementKey, InspectTarget, TreeRoot, UiActionOutcome, UiInspection, UiNode, UiPatternAction,
+    UiProps, UiTree, UiTreeRequest,
 };
 use winwright_contracts::{WinwrightError, WinwrightResult};
 
 use crate::com::{ComApartment, platform};
+use crate::patterns;
 use crate::props::{cache_request, read_props, read_value, skip_children};
 
 /// HRESULTs meaning "the element went away", which are expected mid-walk.
@@ -46,6 +48,15 @@ pub enum Command {
     },
     Release {
         keys: Vec<ElementKey>,
+    },
+    Refresh {
+        key: ElementKey,
+        reply: oneshot::Sender<WinwrightResult<UiProps>>,
+    },
+    Execute {
+        key: ElementKey,
+        action: UiPatternAction,
+        reply: oneshot::Sender<WinwrightResult<UiActionOutcome>>,
     },
 }
 
@@ -111,6 +122,12 @@ pub fn run(
                 }
             }
             Command::Release { keys } => worker.release(&keys),
+            Command::Refresh { key, reply } => {
+                let _ = reply.send(worker.refresh(key));
+            }
+            Command::Execute { key, action, reply } => {
+                let _ = reply.send(worker.execute(key, &action));
+            }
         }
     }
     tracing::debug!(epoch, slots = worker.slots.len(), "UIA worker stopping");
@@ -222,6 +239,49 @@ impl Worker {
         for key in keys.iter().filter(|k| k.worker_epoch == self.epoch) {
             self.slots.remove(&key.slot);
         }
+    }
+
+    /// Fresh properties for a stored element; the slot keeps the updated element.
+    fn fresh(&mut self, key: ElementKey) -> WinwrightResult<(IUIAutomationElement, UiProps)> {
+        let el = self.slot(key)?.clone();
+        // SAFETY: COM call on an element owned by this thread.
+        let fresh = unsafe { el.BuildUpdatedCache(&self.cache_element) }
+            .map_err(|e| patterns::action_error("refresh", &format!("slot {}", key.slot), &e))?;
+        let mut props = read_props(&fresh);
+        read_value(&fresh, &mut props);
+        self.slots.insert(key.slot, fresh.clone());
+        Ok((fresh, props))
+    }
+
+    fn refresh(&mut self, key: ElementKey) -> WinwrightResult<UiProps> {
+        self.fresh(key).map(|(_, props)| props)
+    }
+
+    fn execute(
+        &mut self,
+        key: ElementKey,
+        action: &UiPatternAction,
+    ) -> WinwrightResult<UiActionOutcome> {
+        let (el, props) = self.fresh(key)?;
+        let output = patterns::execute(&el, &props, action)?;
+        // Read-only operations report the state we already have; mutating ones re-read.
+        let props_after = match action {
+            UiPatternAction::GetText { .. } | UiPatternAction::ClickablePoint => Some(props),
+            // SAFETY: COM call on an element owned by this thread.
+            _ => unsafe { el.BuildUpdatedCache(&self.cache_element) }
+                .ok()
+                .map(|updated| {
+                    let mut p = read_props(&updated);
+                    read_value(&updated, &mut p);
+                    self.slots.insert(key.slot, updated);
+                    p
+                }),
+        };
+        Ok(UiActionOutcome {
+            props_after,
+            text: output.text,
+            point: output.point,
+        })
     }
 
     fn capture(&mut self, request: &UiTreeRequest, deadline: &Deadline) -> WinwrightResult<UiTree> {

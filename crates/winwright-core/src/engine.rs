@@ -1,33 +1,39 @@
-//! The engine every transport calls: windows, snapshots, inspection.
+//! The engine every transport calls: windows, snapshots, inspection. Finding, actions and
+//! waits live in sibling modules as further `impl Engine` blocks.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use winwright_contracts::backend::{
-    ElementIdentity, InspectTarget, TreeRoot, UiAutomationBackend, UiTree, UiTreeRequest,
-    WindowBackend,
+    ElementIdentity, InspectTarget, OperationContext, TreeRoot, UiAutomationBackend, UiTree,
+    UiTreeRequest, WindowBackend,
 };
+use winwright_contracts::capture::CaptureService;
 use winwright_contracts::config::Config;
 use winwright_contracts::element::ElementDetails;
 use winwright_contracts::geometry::PhysicalPoint;
 use winwright_contracts::ids::{SessionId, format_element_ref, format_generation};
+use winwright_contracts::input::InputBackend;
+use winwright_contracts::overlay::OverlayService;
 use winwright_contracts::security::{ActionRisk, Capability, PermissionDecision, ProposedAction};
 use winwright_contracts::snapshot::{
     DesktopSnapshot, SnapshotRequest, SnapshotTarget, WindowSummary,
 };
+use winwright_contracts::system::{FileService, ProcessService};
 use winwright_contracts::window::{WindowInfo, WindowSelector};
 use winwright_contracts::{WinwrightError, WinwrightResult};
 use winwright_security::Policy;
 
 use crate::lease::ActionLease;
+use crate::refs::NewRef;
 use crate::session::{Session, SessionRegistry};
 use crate::snapshot::{Compressor, element_info, fingerprint_step};
 
 /// Snapshots older than this many generations may be pruned once past their TTL.
-const KEEP_GENERATIONS: u64 = 3;
+pub(crate) const KEEP_GENERATIONS: u64 = 3;
 /// Raw nodes captured per emitted node, before filtering.
 const RAW_NODE_FACTOR: u32 = 6;
-const RAW_NODE_LIMIT: u32 = 5_000;
+pub(crate) const RAW_NODE_LIMIT: u32 = 5_000;
 const MAX_ALL_WINDOWS: usize = 24;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -38,13 +44,40 @@ pub enum InspectRequest {
     Ref(String),
 }
 
+/// One capture root plus the top-level window it belongs to (if known).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Root {
+    pub tree: TreeRoot,
+    pub window: Option<u64>,
+}
+
+/// Raw capture limits for one call.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Limits {
+    pub max_depth: u32,
+    pub max_nodes: u32,
+    pub max_children: u32,
+    pub include_offscreen: bool,
+}
+
+pub(crate) struct Captured {
+    pub trees: Vec<(UiTree, Option<u64>)>,
+    pub active: Option<WindowInfo>,
+    pub warnings: Vec<String>,
+}
+
 pub struct Engine {
-    config: Config,
-    policy: Policy,
-    windows: Arc<dyn WindowBackend>,
-    uia: Arc<dyn UiAutomationBackend>,
-    sessions: SessionRegistry,
-    lease: ActionLease,
+    pub(crate) config: Config,
+    pub(crate) policy: Policy,
+    pub(crate) windows: Arc<dyn WindowBackend>,
+    pub(crate) uia: Arc<dyn UiAutomationBackend>,
+    pub(crate) input: Option<Arc<dyn InputBackend>>,
+    pub(crate) capture: Option<Arc<dyn CaptureService>>,
+    pub(crate) overlay: Option<Arc<dyn OverlayService>>,
+    pub(crate) processes: Option<Arc<dyn ProcessService>>,
+    pub(crate) files: Option<Arc<dyn FileService>>,
+    pub(crate) sessions: SessionRegistry,
+    pub(crate) lease: ActionLease,
 }
 
 impl Engine {
@@ -58,9 +91,39 @@ impl Engine {
             config,
             windows,
             uia,
+            input: None,
+            capture: None,
+            overlay: None,
+            processes: None,
+            files: None,
             sessions: SessionRegistry::default(),
             lease: ActionLease::default(),
         }
+    }
+
+    pub fn with_input(mut self, input: Arc<dyn InputBackend>) -> Self {
+        self.input = Some(input);
+        self
+    }
+
+    pub fn with_capture(mut self, capture: Arc<dyn CaptureService>) -> Self {
+        self.capture = Some(capture);
+        self
+    }
+
+    pub fn with_overlay(mut self, overlay: Arc<dyn OverlayService>) -> Self {
+        self.overlay = Some(overlay);
+        self
+    }
+
+    pub fn with_processes(mut self, processes: Arc<dyn ProcessService>) -> Self {
+        self.processes = Some(processes);
+        self
+    }
+
+    pub fn with_files(mut self, files: Arc<dyn FileService>) -> Self {
+        self.files = Some(files);
+        self
     }
 
     pub fn config(&self) -> &Config {
@@ -79,15 +142,15 @@ impl Engine {
         self.sessions.get_or_create(id, owner)
     }
 
-    fn timeout(&self) -> Duration {
+    pub(crate) fn timeout(&self) -> Duration {
         Duration::from_millis(self.config.automation.default_timeout_ms)
     }
 
-    fn ref_ttl(&self) -> Duration {
+    pub(crate) fn ref_ttl(&self) -> Duration {
         Duration::from_secs(self.config.automation.reference_ttl_seconds)
     }
 
-    fn authorize(&self, action: ProposedAction) -> WinwrightResult<()> {
+    pub(crate) fn authorize(&self, action: ProposedAction) -> WinwrightResult<()> {
         let verdict = self.policy.evaluate(&action);
         match verdict.decision {
             PermissionDecision::Allow => Ok(()),
@@ -100,7 +163,7 @@ impl Engine {
         }
     }
 
-    fn observe(&self, tool: &str) -> WinwrightResult<()> {
+    pub(crate) fn observe(&self, tool: &str) -> WinwrightResult<()> {
         self.authorize(ProposedAction {
             tool: tool.into(),
             capability: Capability::Observe,
@@ -157,72 +220,88 @@ impl Engine {
         }
     }
 
-    pub async fn snapshot(
+    /// Resolves a snapshot/find scope into capture roots.
+    pub(crate) fn resolve_roots(
         &self,
         session: &Session,
-        request: SnapshotRequest,
-    ) -> WinwrightResult<DesktopSnapshot> {
-        request.validate().map_err(WinwrightError::invalid)?;
-        self.observe("desktop_snapshot")?;
-        let ctx = session.operation(self.timeout())?;
-        let epoch = self.uia.worker_epoch();
-
-        let mut active = None;
-        let roots: Vec<TreeRoot> = match &request.target {
+        target: &SnapshotTarget,
+    ) -> WinwrightResult<(Vec<Root>, Option<WindowInfo>)> {
+        Ok(match target {
             SnapshotTarget::Active => {
                 let w = self.active_window()?;
-                let root = TreeRoot::Window(w.hwnd);
-                active = Some(w);
-                vec![root]
+                let root = Root {
+                    tree: TreeRoot::Window(w.hwnd),
+                    window: Some(w.hwnd),
+                };
+                (vec![root], Some(w))
             }
             SnapshotTarget::Window(selector) => {
                 let w = self.find_window(selector)?;
-                let root = TreeRoot::Window(w.hwnd);
-                active = Some(w);
-                vec![root]
+                let root = Root {
+                    tree: TreeRoot::Window(w.hwnd),
+                    window: Some(w.hwnd),
+                };
+                (vec![root], Some(w))
             }
-            SnapshotTarget::AllWindows => self
-                .list_windows()?
-                .iter()
-                .filter(|w| !w.minimized)
-                .take(MAX_ALL_WINDOWS)
-                .map(|w| TreeRoot::Window(w.hwnd))
-                .collect(),
+            SnapshotTarget::AllWindows => (
+                self.list_windows()?
+                    .iter()
+                    .filter(|w| !w.minimized)
+                    .take(MAX_ALL_WINDOWS)
+                    .map(|w| Root {
+                        tree: TreeRoot::Window(w.hwnd),
+                        window: Some(w.hwnd),
+                    })
+                    .collect(),
+                None,
+            ),
             SnapshotTarget::Subtree { reference } => {
-                let key = session.state().refs.get_live(reference, epoch)?.key;
-                vec![TreeRoot::Element(key)]
+                let state = session.state();
+                let entry = state.refs.get_live(reference, self.uia.worker_epoch())?;
+                (
+                    vec![Root {
+                        tree: TreeRoot::Element(entry.key),
+                        window: entry.window,
+                    }],
+                    None,
+                )
             }
-        };
+        })
+    }
 
-        let raw_budget = request
-            .max_nodes
-            .saturating_mul(RAW_NODE_FACTOR)
-            .clamp(request.max_nodes, RAW_NODE_LIMIT.max(request.max_nodes));
-        let max_children = (request.max_list_items + 30).max(50);
-        let mut trees: Vec<UiTree> = Vec::with_capacity(roots.len());
+    /// Captures every root within a shared raw-node budget. In multi-window captures a window
+    /// that vanished mid-capture becomes a warning instead of failing the whole call.
+    pub(crate) async fn capture_roots(
+        &self,
+        roots: Vec<Root>,
+        limits: Limits,
+        ctx: &OperationContext,
+    ) -> WinwrightResult<(Vec<(UiTree, Option<u64>)>, Vec<String>)> {
+        let tolerant = roots.len() > 1;
+        let mut trees = Vec::with_capacity(roots.len());
         let mut warnings = Vec::new();
         let mut used = 0u32;
         let started = Instant::now();
         for root in roots {
-            let remaining = raw_budget.saturating_sub(used);
+            let remaining = limits.max_nodes.saturating_sub(used);
             if remaining == 0 {
                 warnings.push("raw capture budget exhausted before all windows".into());
                 break;
             }
-            let tree_request = UiTreeRequest {
-                root,
-                max_depth: request.max_depth,
+            let request = UiTreeRequest {
+                root: root.tree,
+                max_depth: limits.max_depth,
                 max_nodes: remaining,
-                max_children,
-                include_offscreen: request.include_offscreen,
+                max_children: limits.max_children,
+                include_offscreen: limits.include_offscreen,
             };
-            match self.uia.capture_tree(tree_request, &ctx).await {
+            match self.uia.capture_tree(request, ctx).await {
                 Ok(tree) => {
                     used += tree.node_count;
-                    trees.push(tree);
+                    trees.push((tree, root.window));
                 }
                 Err(err)
-                    if request.target == SnapshotTarget::AllWindows
+                    if tolerant
                         && matches!(
                             err,
                             WinwrightError::WindowNotFound { .. } | WinwrightError::Platform { .. }
@@ -238,6 +317,60 @@ impl Engine {
             elapsed_ms = started.elapsed().as_millis() as u64,
             "captured UIA trees"
         );
+        Ok((trees, warnings))
+    }
+
+    /// Resolve + capture in one step.
+    pub(crate) async fn capture_scope(
+        &self,
+        session: &Session,
+        target: &SnapshotTarget,
+        limits: Limits,
+        ctx: &OperationContext,
+    ) -> WinwrightResult<Captured> {
+        let (roots, active) = self.resolve_roots(session, target)?;
+        let (trees, warnings) = self.capture_roots(roots, limits, ctx).await?;
+        Ok(Captured {
+            trees,
+            active,
+            warnings,
+        })
+    }
+
+    pub(crate) async fn release(&self, keys: Vec<winwright_contracts::backend::ElementKey>) {
+        if keys.is_empty() {
+            return;
+        }
+        if let Err(err) = self.uia.release(keys).await {
+            tracing::warn!(%err, "failed to release UIA slots");
+        }
+    }
+
+    pub async fn snapshot(
+        &self,
+        session: &Session,
+        request: SnapshotRequest,
+    ) -> WinwrightResult<DesktopSnapshot> {
+        request.validate().map_err(WinwrightError::invalid)?;
+        self.observe("desktop_snapshot")?;
+        let ctx = session.operation(self.timeout())?;
+        let epoch = self.uia.worker_epoch();
+        let limits = Limits {
+            max_depth: request.max_depth,
+            max_nodes: request
+                .max_nodes
+                .saturating_mul(RAW_NODE_FACTOR)
+                .clamp(request.max_nodes, RAW_NODE_LIMIT.max(request.max_nodes)),
+            max_children: (request.max_list_items + 30).max(50),
+            include_offscreen: request.include_offscreen,
+        };
+        let Captured {
+            trees,
+            active,
+            mut warnings,
+        } = self
+            .capture_scope(session, &request.target, limits, &ctx)
+            .await?;
 
         let now = Instant::now();
         let (snapshot, release) = {
@@ -245,10 +378,11 @@ impl Engine {
             state.generation += 1;
             let generation = state.generation;
             let mut compressor = Compressor::new(&request, generation, now);
-            for tree in &trees {
-                compressor.add_tree(tree, &mut state.refs);
+            for (tree, window) in &trees {
+                compressor.add_tree(tree, &mut state.refs, *window);
             }
-            let mut release = compressor.unreferenced_keys(&trees);
+            let plain: Vec<UiTree> = trees.into_iter().map(|(t, _)| t).collect();
+            let mut release = compressor.unreferenced_keys(&plain);
             release.extend(state.refs.prune(
                 generation,
                 KEEP_GENERATIONS,
@@ -277,9 +411,7 @@ impl Engine {
             };
             (snapshot, release)
         };
-        if let Err(err) = self.uia.release(release).await {
-            tracing::warn!(%err, "failed to release UIA slots");
-        }
+        self.release(release).await;
         Ok(snapshot)
     }
 
@@ -291,12 +423,16 @@ impl Engine {
         self.observe("desktop_inspect")?;
         let ctx = session.operation(self.timeout())?;
         let epoch = self.uia.worker_epoch();
-        let target = match &request {
-            InspectRequest::UnderCursor => InspectTarget::Point(self.windows.cursor_position()?),
-            InspectRequest::Focused => InspectTarget::Focused,
-            InspectRequest::Point(p) => InspectTarget::Point(*p),
+        let (target, known_window) = match &request {
+            InspectRequest::UnderCursor => {
+                (InspectTarget::Point(self.windows.cursor_position()?), None)
+            }
+            InspectRequest::Focused => (InspectTarget::Focused, None),
+            InspectRequest::Point(p) => (InspectTarget::Point(*p), None),
             InspectRequest::Ref(r) => {
-                InspectTarget::Element(session.state().refs.get_live(r, epoch)?.key)
+                let state = session.state();
+                let entry = state.refs.get_live(r, epoch)?;
+                (InspectTarget::Element(entry.key), entry.window)
             }
         };
         let inspection = self.uia.inspect(target, &ctx).await?;
@@ -304,24 +440,31 @@ impl Engine {
         let fingerprint = inspection.ancestors.iter().fold(0, fingerprint_step);
         let fingerprint = fingerprint_step(fingerprint, &inspection.props);
         let props = &inspection.props;
+        // The outermost ancestor is the top-level window when it has a native handle.
+        let window = known_window.or_else(|| {
+            inspection
+                .ancestors
+                .first()
+                .unwrap_or(props)
+                .native_window_handle
+        });
         let (number, replaced) = {
             let mut state = session.state();
             let generation = state.generation;
             let up = state.refs.upsert(
-                ElementIdentity::from_props(props, fingerprint),
-                inspection.key,
-                props.bounds,
-                props.label(),
+                NewRef {
+                    identity: ElementIdentity::from_props(props, fingerprint),
+                    key: inspection.key,
+                    bounds: props.bounds,
+                    label: props.label(),
+                    window,
+                },
                 generation,
                 Instant::now(),
             );
             (up.number, up.replaced_key)
         };
-        if let Some(old) = replaced
-            && let Err(err) = self.uia.release(vec![old]).await
-        {
-            tracing::warn!(%err, "failed to release UIA slot");
-        }
+        self.release(replaced.into_iter().collect()).await;
 
         let ancestors: Vec<String> = inspection.ancestors.iter().map(|a| a.label()).collect();
         let mut path = ancestors.join(" > ");

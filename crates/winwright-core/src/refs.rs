@@ -20,8 +20,19 @@ pub struct RefEntry {
     pub bounds: Option<PhysicalRect>,
     /// `Button "Save"`, for error messages.
     pub label: String,
+    /// Top-level window the element was found in; the scope for re-resolution.
+    pub window: Option<u64>,
     pub generation: u64,
     pub last_seen: Instant,
+}
+
+/// Everything needed to record an element under a ref.
+pub struct NewRef {
+    pub identity: ElementIdentity,
+    pub key: ElementKey,
+    pub bounds: Option<PhysicalRect>,
+    pub label: String,
+    pub window: Option<u64>,
 }
 
 impl RefEntry {
@@ -60,28 +71,16 @@ impl RefTable {
     }
 
     /// Assigns (or reuses) the ref for an element seen in snapshot `generation`.
-    pub fn upsert(
-        &mut self,
-        identity: ElementIdentity,
-        key: ElementKey,
-        bounds: Option<PhysicalRect>,
-        label: String,
-        generation: u64,
-        now: Instant,
-    ) -> Upserted {
-        let runtime_key = (identity.process_id, identity.runtime_id.clone());
-        if !identity.runtime_id.is_empty()
+    pub fn upsert(&mut self, new: NewRef, generation: u64, now: Instant) -> Upserted {
+        let runtime_key = (new.identity.process_id, new.identity.runtime_id.clone());
+        if !new.identity.runtime_id.is_empty()
             && let Some(&number) = self.by_runtime.get(&runtime_key)
-            && let Some(entry) = self.entries.get_mut(&number)
-            && entry.identity.same_element(&identity)
+            && self
+                .entries
+                .get(&number)
+                .is_some_and(|e| e.identity.same_element(&new.identity))
         {
-            let replaced = (entry.key != key).then_some(entry.key);
-            entry.key = key;
-            entry.identity = identity;
-            entry.bounds = bounds;
-            entry.label = label;
-            entry.generation = generation;
-            entry.last_seen = now;
+            let replaced = self.rebind(number, new, generation, now);
             return Upserted {
                 number,
                 replaced_key: replaced,
@@ -90,7 +89,7 @@ impl RefTable {
 
         self.next += 1;
         let number = self.next;
-        if !identity.runtime_id.is_empty() {
+        if !new.identity.runtime_id.is_empty() {
             // A recreated element with a recycled runtime id gets a fresh ref.
             self.by_runtime.insert(runtime_key, number);
         }
@@ -98,10 +97,11 @@ impl RefTable {
             number,
             RefEntry {
                 number,
-                key,
-                identity,
-                bounds,
-                label,
+                key: new.key,
+                identity: new.identity,
+                bounds: new.bounds,
+                label: new.label,
+                window: new.window,
                 generation,
                 last_seen: now,
             },
@@ -110,6 +110,41 @@ impl RefTable {
             number,
             replaced_key: None,
         }
+    }
+
+    /// Points an existing ref at a (possibly re-resolved) element. Returns the old slot when
+    /// it changed. The ref number is preserved so the model can keep using it.
+    pub fn rebind(
+        &mut self,
+        number: u64,
+        new: NewRef,
+        generation: u64,
+        now: Instant,
+    ) -> Option<ElementKey> {
+        let entry = self.entries.get_mut(&number)?;
+        let old_runtime = (entry.identity.process_id, entry.identity.runtime_id.clone());
+        let replaced = (entry.key != new.key).then_some(entry.key);
+        if old_runtime.1 != new.identity.runtime_id
+            && self.by_runtime.get(&old_runtime) == Some(&number)
+        {
+            self.by_runtime.remove(&old_runtime);
+        }
+        if !new.identity.runtime_id.is_empty() {
+            self.by_runtime.insert(
+                (new.identity.process_id, new.identity.runtime_id.clone()),
+                number,
+            );
+        }
+        entry.key = new.key;
+        entry.identity = new.identity;
+        entry.bounds = new.bounds;
+        entry.label = new.label;
+        if new.window.is_some() {
+            entry.window = new.window;
+        }
+        entry.generation = generation;
+        entry.last_seen = now;
+        replaced
     }
 
     pub fn get(&self, reference: &str) -> WinwrightResult<&RefEntry> {
@@ -210,6 +245,26 @@ mod tests {
         }
     }
 
+    fn put(
+        t: &mut RefTable,
+        identity: ElementIdentity,
+        key: ElementKey,
+        generation: u64,
+        now: Instant,
+    ) -> Upserted {
+        t.upsert(
+            NewRef {
+                identity,
+                key,
+                bounds: None,
+                label: "x".into(),
+                window: None,
+            },
+            generation,
+            now,
+        )
+    }
+
     fn key(slot: u64) -> ElementKey {
         ElementKey {
             worker_epoch: 1,
@@ -221,28 +276,51 @@ mod tests {
     fn same_element_keeps_its_ref_across_snapshots() {
         let mut t = RefTable::default();
         let now = Instant::now();
-        let a = t.upsert(identity(&[42, 1], "save"), key(1), None, "b".into(), 1, now);
-        let b = t.upsert(
-            identity(&[42, 2], "cancel"),
-            key(2),
-            None,
-            "b".into(),
-            1,
-            now,
-        );
+        let a = put(&mut t, identity(&[42, 1], "save"), key(1), 1, now);
+        let b = put(&mut t, identity(&[42, 2], "cancel"), key(2), 1, now);
         assert_eq!((a.number, b.number), (1, 2));
-        let again = t.upsert(identity(&[42, 1], "save"), key(9), None, "b".into(), 2, now);
+        let again = put(&mut t, identity(&[42, 1], "save"), key(9), 2, now);
         assert_eq!(again.number, 1);
         assert_eq!(again.replaced_key, Some(key(1)));
         assert_eq!(t.get("e1").unwrap().key, key(9));
     }
 
     #[test]
+    fn rebind_keeps_number_and_moves_runtime_index() {
+        let mut t = RefTable::default();
+        let now = Instant::now();
+        let a = put(&mut t, identity(&[1], "target"), key(1), 1, now);
+        let replaced = t.rebind(
+            a.number,
+            NewRef {
+                identity: identity(&[2], "target"),
+                key: key(2),
+                bounds: None,
+                label: "x".into(),
+                window: Some(9),
+            },
+            2,
+            now,
+        );
+        assert_eq!(replaced, Some(key(1)));
+        assert_eq!(t.get("e1").unwrap().window, Some(9));
+        assert_eq!(
+            put(&mut t, identity(&[2], "target"), key(3), 3, now).number,
+            1
+        );
+        assert_eq!(
+            put(&mut t, identity(&[1], "target"), key(4), 3, now).number,
+            2,
+            "the old runtime id no longer maps to e1"
+        );
+    }
+
+    #[test]
     fn recycled_runtime_id_with_different_identity_gets_new_ref() {
         let mut t = RefTable::default();
         let now = Instant::now();
-        t.upsert(identity(&[5], "old"), key(1), None, "x".into(), 1, now);
-        let n = t.upsert(identity(&[5], "new"), key(2), None, "x".into(), 2, now);
+        put(&mut t, identity(&[5], "old"), key(1), 1, now);
+        let n = put(&mut t, identity(&[5], "new"), key(2), 2, now);
         assert_eq!(n.number, 2);
         assert!(n.replaced_key.is_none());
     }
@@ -251,8 +329,8 @@ mod tests {
     fn elements_without_runtime_ids_are_never_merged() {
         let mut t = RefTable::default();
         let now = Instant::now();
-        let a = t.upsert(identity(&[], "a"), key(1), None, "x".into(), 1, now);
-        let b = t.upsert(identity(&[], "a"), key(2), None, "x".into(), 2, now);
+        let a = put(&mut t, identity(&[], "a"), key(1), 1, now);
+        let b = put(&mut t, identity(&[], "a"), key(2), 2, now);
         assert_ne!(a.number, b.number);
     }
 
@@ -260,7 +338,7 @@ mod tests {
     fn lookup_errors_are_typed() {
         let mut t = RefTable::default();
         let now = Instant::now();
-        t.upsert(identity(&[1], "a"), key(1), None, "x".into(), 1, now);
+        put(&mut t, identity(&[1], "a"), key(1), 1, now);
         assert_eq!(
             t.get("nonsense").unwrap_err().code().as_str(),
             "INVALID_REQUEST"
@@ -277,13 +355,13 @@ mod tests {
     fn prune_evicts_old_expired_and_dead_epoch_refs() {
         let mut t = RefTable::default();
         let start = Instant::now();
-        t.upsert(identity(&[1], "old"), key(1), None, "x".into(), 1, start);
-        t.upsert(identity(&[2], "fresh"), key(2), None, "x".into(), 5, start);
+        put(&mut t, identity(&[1], "old"), key(1), 1, start);
+        put(&mut t, identity(&[2], "fresh"), key(2), 5, start);
         let dead = ElementKey {
             worker_epoch: 0,
             slot: 3,
         };
-        t.upsert(identity(&[3], "dead"), dead, None, "x".into(), 5, start);
+        put(&mut t, identity(&[3], "dead"), dead, 5, start);
 
         let later = start + Duration::from_secs(60);
         let released = t.prune(5, 2, later, Duration::from_secs(30), 1);
@@ -302,7 +380,7 @@ mod tests {
     fn recent_generations_survive_ttl() {
         let mut t = RefTable::default();
         let start = Instant::now();
-        t.upsert(identity(&[1], "a"), key(1), None, "x".into(), 4, start);
+        put(&mut t, identity(&[1], "a"), key(1), 4, start);
         let released = t.prune(
             5,
             2,

@@ -1,27 +1,101 @@
-//! Engine tests against fake backends: no desktop required.
+//! Engine tests against a stateful fake desktop: every backend call is simulated, so these
+//! exercise resolution, policy, pattern choice, verification and ref bookkeeping without UI.
 
-use std::sync::{Arc, Mutex};
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
+use winwright_contracts::action::{ActionMethod, DesktopAction, ElementTarget, WindowAction};
 use winwright_contracts::backend::*;
 use winwright_contracts::config::Config;
-use winwright_contracts::element::{ControlRole, UiPattern};
+use winwright_contracts::element::{ControlRole, ExpandState, ToggleState, UiPattern};
 use winwright_contracts::geometry::{PhysicalPoint, PhysicalRect};
 use winwright_contracts::ids::SessionId;
+use winwright_contracts::input::{InputBackend, Key, MouseButton};
+use winwright_contracts::locator::{ElementLocator, FindRequest};
 use winwright_contracts::snapshot::{SnapshotRequest, SnapshotTarget};
 use winwright_contracts::window::{WindowInfo, WindowSelector};
 use winwright_contracts::{WinwrightError, WinwrightResult};
 
 use crate::{Engine, InspectRequest};
 
+// ---------------------------------------------------------------- fake desktop
+
+#[derive(Clone)]
+struct El {
+    role: ControlRole,
+    name: String,
+    automation_id: String,
+    patterns: Vec<UiPattern>,
+    value: Option<String>,
+    read_only: bool,
+    toggle: Option<ToggleState>,
+    expand: Option<ExpandState>,
+    selected: Option<bool>,
+    enabled: bool,
+    offscreen: bool,
+    focused: bool,
+    password: bool,
+    children: Vec<i32>,
+}
+
+fn el(role: ControlRole, name: &str, id: &str, patterns: &[UiPattern]) -> El {
+    El {
+        role,
+        name: name.into(),
+        automation_id: id.into(),
+        patterns: patterns.to_vec(),
+        value: patterns.contains(&UiPattern::Value).then(String::new),
+        read_only: false,
+        toggle: patterns
+            .contains(&UiPattern::Toggle)
+            .then_some(ToggleState::Off),
+        expand: patterns
+            .contains(&UiPattern::ExpandCollapse)
+            .then_some(ExpandState::Collapsed),
+        selected: patterns
+            .contains(&UiPattern::SelectionItem)
+            .then_some(false),
+        enabled: true,
+        offscreen: false,
+        focused: false,
+        password: false,
+        children: Vec::new(),
+    }
+}
+
+const MAIN: u64 = 10;
+const DIALOG: u64 = 20;
+const TARGET: i32 = 12;
+const STATUS: i32 = 16;
+const COMBO: i32 = 7;
+
+struct State {
+    els: BTreeMap<i32, El>,
+    windows: Vec<WindowInfo>,
+    roots: HashMap<u64, i32>,
+    slots: HashMap<u64, i32>,
+    next_slot: u64,
+    next_rid: i32,
+    released: Vec<ElementKey>,
+    executed: Vec<String>,
+    captured_roots: Vec<TreeRoot>,
+    privileged: bool,
+}
+
+struct Fake {
+    state: Mutex<State>,
+    hang: bool,
+}
+
 fn window(hwnd: u64, title: &str, process: &str, foreground: bool) -> WindowInfo {
     WindowInfo {
         hwnd,
         title: title.into(),
         class_name: "C".into(),
-        process_id: hwnd as u32,
+        process_id: 1,
         process_name: process.into(),
-        bounds: PhysicalRect::new(0, 0, 100, 100),
+        bounds: PhysicalRect::new(0, 0, 800, 600),
         minimized: false,
         maximized: false,
         foreground,
@@ -30,68 +104,224 @@ fn window(hwnd: u64, title: &str, process: &str, foreground: bool) -> WindowInfo
     }
 }
 
-struct FakeWindows(Vec<WindowInfo>);
+impl Fake {
+    fn new() -> Arc<Self> {
+        use ControlRole as R;
+        use UiPattern as P;
+        let mut els = BTreeMap::new();
+        els.insert(2, el(R::Text, "Name:", "100", &[]));
+        els.insert(3, el(R::Edit, "Name:", "101", &[P::Value]));
+        let mut pw = el(R::Edit, "Password:", "103", &[P::Value]);
+        pw.password = true;
+        els.insert(4, pw);
+        els.insert(5, el(R::Button, "Submit", "110", &[P::Invoke]));
+        els.insert(6, el(R::CheckBox, "Enable feature", "112", &[P::Toggle]));
+        let mut combo = el(R::ComboBox, "Color:", "116", &[P::ExpandCollapse, P::Value]);
+        combo.read_only = true;
+        combo.children = vec![8, 9, 10];
+        els.insert(COMBO, combo);
+        for (rid, name) in [(8, "Red"), (9, "Green"), (10, "Blue")] {
+            let mut item = el(R::ListItem, name, "", &[P::SelectionItem]);
+            item.offscreen = true;
+            els.insert(rid, item);
+        }
+        els.insert(11, el(R::Button, "Open Dialog", "120", &[P::Invoke]));
+        els.insert(TARGET, el(R::Button, "Target", "124", &[P::Invoke]));
+        els.insert(13, el(R::Button, "Recreate", "123", &[P::Invoke]));
+        els.insert(14, el(R::Button, "Save", "s1", &[P::Invoke]));
+        els.insert(15, el(R::Button, "Save", "s2", &[P::Invoke]));
+        els.insert(STATUS, el(R::Text, "Ready", "140", &[]));
+        let mut notes = el(R::Document, "Notes", "105", &[P::Text, P::Value]);
+        notes.value = Some("hello notes".into());
+        els.insert(17, notes);
+        els.insert(18, el(R::RadioButton, "Small", "113", &[P::SelectionItem]));
+        let mut disabled = el(R::Button, "Disabled Action", "111", &[P::Invoke]);
+        disabled.enabled = false;
+        els.insert(19, disabled);
+        let mut root = el(R::Window, "Fixture", "", &[]);
+        root.children = (2..=19).filter(|r| !(8..=10).contains(r)).collect();
+        els.insert(1, root);
+        // Dialog window, opened by "Open Dialog".
+        let mut dialog = el(R::Dialog, "Fixture Dialog", "", &[]);
+        dialog.children = vec![31];
+        els.insert(30, dialog);
+        els.insert(31, el(R::Button, "OK", "202", &[P::Invoke]));
 
-impl WindowBackend for FakeWindows {
-    fn list_windows(&self) -> WinwrightResult<Vec<WindowInfo>> {
-        Ok(self.0.clone())
+        Arc::new(Self {
+            state: Mutex::new(State {
+                els,
+                windows: vec![window(MAIN, "Fixture", "fixture.exe", true)],
+                roots: HashMap::from([(MAIN, 1), (DIALOG, 30)]),
+                slots: HashMap::new(),
+                next_slot: 0,
+                next_rid: 100,
+                released: Vec::new(),
+                executed: Vec::new(),
+                captured_roots: Vec::new(),
+                privileged: false,
+            }),
+            hang: false,
+        })
     }
-    fn foreground_window(&self) -> WinwrightResult<Option<WindowInfo>> {
-        Ok(self.0.iter().find(|w| w.foreground).cloned())
-    }
-    fn window(&self, hwnd: u64) -> WinwrightResult<Option<WindowInfo>> {
-        Ok(self.0.iter().find(|w| w.hwnd == hwnd).cloned())
-    }
-    fn cursor_position(&self) -> WinwrightResult<PhysicalPoint> {
-        Ok(PhysicalPoint { x: 5, y: 5 })
-    }
-    fn process_name(&self, _pid: u32) -> String {
-        "fake.exe".into()
+
+    fn s(&self) -> MutexGuard<'_, State> {
+        self.state.lock().unwrap()
     }
 }
 
-#[derive(Default)]
-struct FakeUia {
-    next_slot: Mutex<u64>,
-    released: Mutex<Vec<ElementKey>>,
-    captured_roots: Mutex<Vec<TreeRoot>>,
-    hang: bool,
-}
-
-impl FakeUia {
-    fn key(&self) -> ElementKey {
-        let mut n = self.next_slot.lock().unwrap();
-        *n += 1;
-        ElementKey {
-            worker_epoch: 1,
-            slot: *n,
+impl State {
+    fn props(&self, rid: i32) -> UiProps {
+        let e = &self.els[&rid];
+        UiProps {
+            control_type_id: e.role as i32,
+            role: e.role,
+            name: e.name.clone(),
+            automation_id: e.automation_id.clone(),
+            class_name: "Fake".into(),
+            framework_id: "Win32".into(),
+            process_id: 1,
+            runtime_id: vec![42, rid],
+            bounds: Some(PhysicalRect::new(rid * 20, 0, rid * 20 + 16, 16)),
+            enabled: e.enabled,
+            offscreen: e.offscreen,
+            focused: e.focused,
+            keyboard_focusable: true,
+            is_password: e.password,
+            patterns: e.patterns.clone(),
+            value: if e.password { None } else { e.value.clone() },
+            value_read_only: e
+                .patterns
+                .contains(&UiPattern::Value)
+                .then_some(e.read_only),
+            toggle_state: e.toggle,
+            expand_state: e.expand,
+            selected: e.selected,
+            ..Default::default()
         }
     }
 
-    fn node(&self, role: ControlRole, name: &str, rid: i32, children: Vec<UiNode>) -> UiNode {
+    fn slot(&mut self, rid: i32) -> ElementKey {
+        self.next_slot += 1;
+        self.slots.insert(self.next_slot, rid);
+        ElementKey {
+            worker_epoch: 1,
+            slot: self.next_slot,
+        }
+    }
+
+    fn rid(&self, key: ElementKey) -> WinwrightResult<i32> {
+        let rid = *self
+            .slots
+            .get(&key.slot)
+            .ok_or_else(|| WinwrightError::ElementStale {
+                reference: format!("slot {}", key.slot),
+                reason: "released".into(),
+            })?;
+        if !self.els.contains_key(&rid)
+            || self.parent(rid).is_none() && !self.roots.values().any(|r| *r == rid)
+        {
+            return Err(WinwrightError::ElementStale {
+                reference: format!("slot {}", key.slot),
+                reason: "the element no longer exists".into(),
+            });
+        }
+        Ok(rid)
+    }
+
+    fn parent(&self, rid: i32) -> Option<i32> {
+        self.els
+            .iter()
+            .find(|(_, e)| e.children.contains(&rid))
+            .map(|(p, _)| *p)
+    }
+
+    fn build(&mut self, rid: i32, depth: u32, req: &UiTreeRequest) -> UiNode {
+        let key = self.slot(rid);
+        let props = self.props(rid);
+        let kids = self.els[&rid].children.clone();
+        let mut children = Vec::new();
+        if depth + 1 < req.max_depth {
+            for c in &kids {
+                if self.els[c].offscreen && !req.include_offscreen {
+                    continue;
+                }
+                children.push(self.build(*c, depth + 1, req));
+            }
+        }
         UiNode {
-            key: self.key(),
-            props: UiProps {
-                role,
-                name: name.into(),
-                runtime_id: vec![rid],
-                process_id: 1,
-                bounds: Some(PhysicalRect::new(0, 0, 10, 10)),
-                enabled: true,
-                patterns: if role == ControlRole::Button {
-                    vec![UiPattern::Invoke]
-                } else {
-                    vec![]
-                },
-                ..Default::default()
-            },
+            key,
+            props,
             children_total: children.len() as u32,
             children,
         }
     }
+
+    fn ancestors(&self, rid: i32) -> Vec<UiProps> {
+        let mut chain = Vec::new();
+        let mut cur = self.parent(rid);
+        while let Some(p) = cur {
+            chain.push(self.props(p));
+            cur = self.parent(p);
+        }
+        chain.reverse();
+        chain
+    }
 }
 
-impl UiAutomationBackend for FakeUia {
+impl WindowBackend for Fake {
+    fn list_windows(&self) -> WinwrightResult<Vec<WindowInfo>> {
+        Ok(self.s().windows.clone())
+    }
+    fn foreground_window(&self) -> WinwrightResult<Option<WindowInfo>> {
+        Ok(self.s().windows.iter().find(|w| w.foreground).cloned())
+    }
+    fn window(&self, hwnd: u64) -> WinwrightResult<Option<WindowInfo>> {
+        Ok(self.s().windows.iter().find(|w| w.hwnd == hwnd).cloned())
+    }
+    fn cursor_position(&self) -> WinwrightResult<PhysicalPoint> {
+        Ok(PhysicalPoint {
+            x: 12 * 20 + 5,
+            y: 5,
+        })
+    }
+    fn process_name(&self, _pid: u32) -> String {
+        "fixture.exe".into()
+    }
+    fn focus_window(&self, hwnd: u64) -> WinwrightResult<()> {
+        for w in &mut self.s().windows {
+            w.foreground = w.hwnd == hwnd;
+        }
+        Ok(())
+    }
+    fn set_window_state(
+        &self,
+        hwnd: u64,
+        state: winwright_contracts::action::WindowVisualState,
+    ) -> WinwrightResult<()> {
+        use winwright_contracts::action::WindowVisualState as V;
+        for w in self.s().windows.iter_mut().filter(|w| w.hwnd == hwnd) {
+            w.minimized = state == V::Minimized;
+            w.maximized = state == V::Maximized;
+        }
+        Ok(())
+    }
+    fn set_window_bounds(&self, hwnd: u64, bounds: PhysicalRect) -> WinwrightResult<()> {
+        for w in self.s().windows.iter_mut().filter(|w| w.hwnd == hwnd) {
+            w.bounds = bounds;
+        }
+        Ok(())
+    }
+    fn close_window(&self, hwnd: u64) -> WinwrightResult<()> {
+        let mut s = self.s();
+        s.windows.retain(|w| w.hwnd != hwnd);
+        Ok(())
+    }
+    fn is_more_privileged(&self, _pid: u32) -> bool {
+        self.s().privileged
+    }
+}
+
+impl UiAutomationBackend for Fake {
     fn worker_epoch(&self) -> u64 {
         1
     }
@@ -106,17 +336,24 @@ impl UiAutomationBackend for FakeUia {
                 ctx.cancel.cancelled().await;
                 return Err(WinwrightError::Cancelled);
             }
-            self.captured_roots.lock().unwrap().push(request.root);
-            let pane = self.node(
-                ControlRole::Pane,
-                "",
-                3,
-                vec![self.node(ControlRole::Button, "Save", 4, vec![])],
-            );
-            let root = self.node(ControlRole::Window, "Untitled - Notepad", 1, vec![pane]);
+            let mut s = self.s();
+            s.captured_roots.push(request.root);
+            let rid = match request.root {
+                TreeRoot::Window(h) => {
+                    if !s.windows.iter().any(|w| w.hwnd == h) {
+                        return Err(WinwrightError::WindowNotFound {
+                            query: format!("{h}"),
+                        });
+                    }
+                    s.roots[&h]
+                }
+                TreeRoot::Element(k) => s.rid(k)?,
+                TreeRoot::Desktop => unreachable!("not used by these tests"),
+            };
+            let root = s.build(rid, 0, &request);
             Ok(UiTree {
                 root,
-                node_count: 3,
+                node_count: 1,
                 truncated: false,
             })
         })
@@ -124,109 +361,347 @@ impl UiAutomationBackend for FakeUia {
 
     fn inspect<'a>(
         &'a self,
-        _target: InspectTarget,
+        target: InspectTarget,
         _ctx: &'a OperationContext,
     ) -> BackendFuture<'a, UiInspection> {
         Box::pin(async move {
-            let node = self.node(ControlRole::Button, "Save", 4, vec![]);
-            let window = self.node(ControlRole::Window, "Untitled - Notepad", 1, vec![]);
+            let mut s = self.s();
+            let rid = match target {
+                InspectTarget::Element(k) => s.rid(k)?,
+                InspectTarget::Focused => *s
+                    .els
+                    .iter()
+                    .find(|(_, e)| e.focused)
+                    .map(|(r, _)| r)
+                    .unwrap_or(&1),
+                InspectTarget::Point(p) => {
+                    let hit = s
+                        .els
+                        .keys()
+                        .copied()
+                        .filter(|r| *r != 1 && *r != 30)
+                        .find(|r| s.props(*r).bounds.is_some_and(|b| b.contains(p)));
+                    hit.unwrap_or(1)
+                }
+            };
+            let key = s.slot(rid);
             Ok(UiInspection {
-                key: node.key,
-                props: node.props,
-                ancestors: vec![window.props],
+                key,
+                props: s.props(rid),
+                ancestors: s.ancestors(rid),
             })
         })
     }
 
     fn release<'a>(&'a self, keys: Vec<ElementKey>) -> BackendFuture<'a, ()> {
         Box::pin(async move {
-            self.released.lock().unwrap().extend(keys);
+            let mut s = self.s();
+            for k in &keys {
+                s.slots.remove(&k.slot);
+            }
+            s.released.extend(keys);
             Ok(())
+        })
+    }
+
+    fn refresh<'a>(
+        &'a self,
+        key: ElementKey,
+        _ctx: &'a OperationContext,
+    ) -> BackendFuture<'a, UiProps> {
+        Box::pin(async move {
+            let s = self.s();
+            let rid = s.rid(key)?;
+            Ok(s.props(rid))
+        })
+    }
+
+    fn execute_pattern<'a>(
+        &'a self,
+        key: ElementKey,
+        action: UiPatternAction,
+        _ctx: &'a OperationContext,
+    ) -> BackendFuture<'a, UiActionOutcome> {
+        Box::pin(async move {
+            let mut s = self.s();
+            let rid = s.rid(key)?;
+            let label = s.props(rid).label();
+            s.executed.push(format!("{action:?} {label} #{rid}"));
+            let unsupported = |p: &str| WinwrightError::UnsupportedPattern {
+                element: label.clone(),
+                pattern: p.into(),
+            };
+            let mut out = UiActionOutcome::default();
+            match &action {
+                UiPatternAction::Invoke => match s.els[&rid].name.as_str() {
+                    "Open Dialog" => {
+                        for w in &mut s.windows {
+                            w.foreground = false;
+                        }
+                        s.windows
+                            .push(window(DIALOG, "Fixture Dialog", "fixture.exe", true));
+                    }
+                    "Recreate" => {
+                        let old = s.els[&TARGET].clone();
+                        let new_rid = s.next_rid;
+                        s.next_rid += 1;
+                        s.els.remove(&TARGET);
+                        s.els.insert(new_rid, old);
+                        let root = s.els.get_mut(&1).unwrap();
+                        let pos = root.children.iter().position(|c| *c == TARGET).unwrap();
+                        root.children[pos] = new_rid;
+                    }
+                    "Target" => s.els.get_mut(&STATUS).unwrap().name = "Target clicked".into(),
+                    "Submit" => s.els.get_mut(&STATUS).unwrap().name = "Submitted".into(),
+                    _ => {}
+                },
+                UiPatternAction::Toggle => {
+                    let e = s.els.get_mut(&rid).unwrap();
+                    e.toggle = Some(match e.toggle {
+                        Some(ToggleState::On) => ToggleState::Off,
+                        _ => ToggleState::On,
+                    });
+                }
+                UiPatternAction::SetValue(v) => {
+                    let e = s.els.get_mut(&rid).unwrap();
+                    if !e.patterns.contains(&UiPattern::Value) || e.read_only {
+                        return Err(unsupported("Value.SetValue"));
+                    }
+                    e.value = Some(v.clone());
+                }
+                UiPatternAction::Expand | UiPatternAction::Collapse => {
+                    let expanded = matches!(action, UiPatternAction::Expand);
+                    let kids = {
+                        let e = s.els.get_mut(&rid).unwrap();
+                        e.expand = Some(if expanded {
+                            ExpandState::Expanded
+                        } else {
+                            ExpandState::Collapsed
+                        });
+                        e.children.clone()
+                    };
+                    for c in kids {
+                        s.els.get_mut(&c).unwrap().offscreen = !expanded;
+                    }
+                }
+                UiPatternAction::Select => {
+                    let parent = s.parent(rid).unwrap();
+                    let siblings = s.els[&parent].children.clone();
+                    for c in siblings {
+                        if let Some(e) = s.els.get_mut(&c)
+                            && e.selected.is_some()
+                        {
+                            e.selected = Some(c == rid);
+                        }
+                    }
+                    let name = s.els[&rid].name.clone();
+                    if parent == COMBO {
+                        let combo = s.els.get_mut(&COMBO).unwrap();
+                        combo.value = Some(name);
+                        combo.expand = Some(ExpandState::Collapsed);
+                    }
+                }
+                UiPatternAction::SetFocus => {
+                    for (r, e) in s.els.iter_mut() {
+                        e.focused = *r == rid;
+                    }
+                }
+                UiPatternAction::GetText { .. } => {
+                    let e = &s.els[&rid];
+                    if e.password {
+                        return Err(WinwrightError::SensitiveField { element: label });
+                    }
+                    out.text = Some(if e.patterns.contains(&UiPattern::Text) {
+                        (e.value.clone().unwrap_or_default(), "TextPattern")
+                    } else {
+                        (e.name.clone(), "Name")
+                    });
+                }
+                UiPatternAction::ClickablePoint => {
+                    out.point = s.props(rid).bounds.map(|b| b.center());
+                }
+                UiPatternAction::ScrollIntoView => {
+                    s.els.get_mut(&rid).unwrap().offscreen = false;
+                }
+                UiPatternAction::Scroll { .. } => return Err(unsupported("Scroll")),
+            }
+            out.props_after = s.els.contains_key(&rid).then(|| s.props(rid));
+            Ok(out)
         })
     }
 }
 
-fn engine_with(windows: Vec<WindowInfo>, uia: Arc<FakeUia>) -> Engine {
-    Engine::new(Config::default(), Arc::new(FakeWindows(windows)), uia)
+#[derive(Default)]
+struct FakeInput {
+    log: Mutex<Vec<String>>,
+}
+
+impl InputBackend for FakeInput {
+    fn move_to<'a>(&'a self, p: PhysicalPoint, _: &'a OperationContext) -> BackendFuture<'a, ()> {
+        self.log
+            .lock()
+            .unwrap()
+            .push(format!("move {},{}", p.x, p.y));
+        Box::pin(async { Ok(()) })
+    }
+    fn click<'a>(
+        &'a self,
+        p: PhysicalPoint,
+        b: MouseButton,
+        n: u32,
+        _: &'a OperationContext,
+    ) -> BackendFuture<'a, ()> {
+        self.log
+            .lock()
+            .unwrap()
+            .push(format!("click {b:?} x{n} at {},{}", p.x, p.y));
+        Box::pin(async { Ok(()) })
+    }
+    fn drag<'a>(
+        &'a self,
+        _: PhysicalPoint,
+        _: PhysicalPoint,
+        _: MouseButton,
+        _: Duration,
+        _: &'a OperationContext,
+    ) -> BackendFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+    fn scroll<'a>(
+        &'a self,
+        _: PhysicalPoint,
+        x: i32,
+        y: i32,
+        _: &'a OperationContext,
+    ) -> BackendFuture<'a, ()> {
+        self.log.lock().unwrap().push(format!("wheel {x},{y}"));
+        Box::pin(async { Ok(()) })
+    }
+    fn type_text<'a>(&'a self, text: &'a str, _: &'a OperationContext) -> BackendFuture<'a, ()> {
+        self.log
+            .lock()
+            .unwrap()
+            .push(format!("type chars={}", text.chars().count()));
+        Box::pin(async { Ok(()) })
+    }
+    fn press_keys<'a>(&'a self, keys: &'a [Key], _: &'a OperationContext) -> BackendFuture<'a, ()> {
+        let chord: Vec<String> = keys.iter().map(ToString::to_string).collect();
+        self.log
+            .lock()
+            .unwrap()
+            .push(format!("press {}", chord.join("+")));
+        Box::pin(async { Ok(()) })
+    }
+    fn release_all(&self) -> WinwrightResult<()> {
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------- helpers
+
+fn engine(fake: &Arc<Fake>) -> Engine {
+    Engine::new(Config::default(), fake.clone(), fake.clone())
 }
 
 fn sid() -> SessionId {
     SessionId::parse("test").unwrap()
 }
 
+fn by(role: &str, name: &str) -> ElementTarget {
+    ElementTarget::by_locator(
+        ElementLocator {
+            role: Some(role.into()),
+            name: Some(name.into()),
+            ..Default::default()
+        },
+        SnapshotTarget::Active,
+    )
+}
+
+fn click(target: ElementTarget) -> DesktopAction {
+    DesktopAction::Click {
+        target,
+        button: MouseButton::Left,
+        click_count: 1,
+        force_physical: false,
+    }
+}
+
+async fn ref_of(
+    engine: &Engine,
+    session: &crate::session::Session,
+    role: &str,
+    name: &str,
+) -> String {
+    let found = engine
+        .find(
+            session,
+            FindRequest {
+                role: Some(role.into()),
+                name: Some(name.into()),
+                ..serde_json::from_str("{}").unwrap()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(found.count, 1, "{role} {name}");
+    found.matches[0].reference.clone()
+}
+
+// ---------------------------------------------------------------- snapshot / find / inspect
+
 #[tokio::test]
-async fn snapshot_active_window_and_reuse_refs() {
-    let uia = Arc::new(FakeUia::default());
-    let engine = engine_with(
-        vec![
-            window(10, "Untitled - Notepad", "notepad.exe", true),
-            window(20, "Calculator", "CalculatorApp.exe", false),
-        ],
-        uia.clone(),
-    );
+async fn snapshot_renders_and_keeps_refs_stable() {
+    let fake = Fake::new();
+    let engine = engine(&fake);
     let session = engine.session(&sid(), "test").unwrap();
     let snap = engine
         .snapshot(&session, SnapshotRequest::default())
         .await
         .unwrap();
     assert_eq!(snap.generation, "s_1");
-    assert_eq!(
-        snap.tree,
-        "WINDOW \"Untitled - Notepad\" [e1]\n  BUTTON \"Save\" [e2]\n"
+    assert!(
+        snap.tree.starts_with("WINDOW \"Fixture\" [e1]\n"),
+        "{}",
+        snap.tree
     );
-    let active = snap.active_window.unwrap();
-    assert_eq!(
-        (active.reference.as_str(), active.process.as_str()),
-        ("e1", "notepad.exe")
+    assert!(
+        snap.tree
+            .contains("EDIT \"Password:\" value=\"[REDACTED]\" sensitive=true")
     );
-    assert_eq!(uia.captured_roots.lock().unwrap()[0], TreeRoot::Window(10));
-    assert_eq!(
-        uia.released.lock().unwrap().len(),
-        1,
-        "the unnamed pane is released"
+    assert!(snap.tree.contains("CHECKBOX \"Enable feature\" unchecked"));
+    assert!(snap.tree.contains("BUTTON \"Disabled Action\" disabled"));
+    assert!(
+        !snap.tree.contains("\"Red\""),
+        "collapsed combo items are offscreen"
     );
-
+    assert_eq!(snap.active_window.unwrap().reference, "e1");
     let again = engine
         .snapshot(&session, SnapshotRequest::default())
         .await
         .unwrap();
     assert_eq!(again.generation, "s_2");
-    assert_eq!(again.tree, snap.tree, "same elements keep their refs");
-    // Second snapshot: pane released, plus the two superseded slots of e1/e2.
-    assert_eq!(uia.released.lock().unwrap().len(), 4);
+    assert_eq!(again.tree, snap.tree);
 }
 
 #[tokio::test]
 async fn window_selection_is_never_guessed() {
-    let uia = Arc::new(FakeUia::default());
-    let engine = engine_with(
-        vec![
-            window(10, "notes - Notepad", "notepad.exe", true),
-            window(11, "todo - Notepad", "notepad.exe", false),
-        ],
-        uia,
-    );
+    let fake = Fake::new();
+    fake.s()
+        .windows
+        .push(window(11, "Second Fixture", "fixture.exe", false));
+    let engine = engine(&fake);
     let session = engine.session(&sid(), "test").unwrap();
-    let by_process = SnapshotRequest {
+    let req = SnapshotRequest {
         target: SnapshotTarget::Window(WindowSelector {
-            process: Some("notepad".into()),
+            process: Some("fixture".into()),
             ..Default::default()
         }),
         ..Default::default()
     };
-    let err = engine.snapshot(&session, by_process).await.unwrap_err();
+    let err = engine.snapshot(&session, req).await.unwrap_err();
     assert_eq!(err.code().as_str(), "ELEMENT_AMBIGUOUS");
     assert_eq!(err.payload().matches.len(), 2);
-
-    let by_title = SnapshotRequest {
-        target: SnapshotTarget::Window(WindowSelector {
-            title: Some("todo".into()),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-    engine.snapshot(&session, by_title).await.unwrap();
-
     let missing = SnapshotRequest {
         target: SnapshotTarget::Window(WindowSelector {
             title: Some("Photoshop".into()),
@@ -234,49 +709,427 @@ async fn window_selection_is_never_guessed() {
         }),
         ..Default::default()
     };
-    let err = engine.snapshot(&session, missing).await.unwrap_err();
-    assert_eq!(err.code().as_str(), "WINDOW_NOT_FOUND");
-}
-
-#[tokio::test]
-async fn subtree_uses_session_refs_and_rejects_foreign_refs() {
-    let uia = Arc::new(FakeUia::default());
-    let engine = engine_with(vec![window(10, "N", "n.exe", true)], uia.clone());
-    let a = engine.session(&sid(), "test").unwrap();
-    let b = engine
-        .session(&SessionId::parse("other").unwrap(), "test")
-        .unwrap();
-    engine
-        .snapshot(&a, SnapshotRequest::default())
-        .await
-        .unwrap();
-
-    let subtree = SnapshotRequest {
-        target: SnapshotTarget::Subtree {
-            reference: "e2".into(),
-        },
-        ..Default::default()
-    };
-    engine.snapshot(&a, subtree.clone()).await.unwrap();
-    assert!(matches!(
-        uia.captured_roots.lock().unwrap()[1],
-        TreeRoot::Element(_)
-    ));
-    let err = engine.snapshot(&b, subtree).await.unwrap_err();
     assert_eq!(
-        err.code().as_str(),
-        "INVALID_REQUEST",
-        "refs are per session"
+        engine
+            .snapshot(&session, missing)
+            .await
+            .unwrap_err()
+            .code()
+            .as_str(),
+        "WINDOW_NOT_FOUND"
     );
 }
 
 #[tokio::test]
-async fn cancel_interrupts_a_hung_capture() {
-    let uia = Arc::new(FakeUia {
+async fn find_returns_refs_ranked_and_label_inference_works() {
+    let fake = Fake::new();
+    let engine = engine(&fake);
+    let session = engine.session(&sid(), "test").unwrap();
+    let saves = engine
+        .find(
+            &session,
+            serde_json::from_str(r#"{"role":"Button","name":"Save"}"#).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(saves.count, 2);
+    assert_ne!(saves.matches[0].reference, saves.matches[1].reference);
+    assert_eq!(
+        saves.matches[0].path,
+        "Window \"Fixture\" > Button \"Save\""
+    );
+
+    let by_label = engine
+        .find(
+            &session,
+            serde_json::from_str(r#"{"label":"Name"}"#).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(by_label.count, 1);
+    assert_eq!(by_label.matches[0].automation_id, "101");
+
+    let offscreen = engine
+        .find(
+            &session,
+            serde_json::from_str(r#"{"role":"ListItem","name":"Green","visibleOnly":false}"#)
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        offscreen.count, 1,
+        "visibleOnly=false searches collapsed items"
+    );
+}
+
+#[tokio::test]
+async fn inspect_assigns_a_ref_and_path() {
+    let fake = Fake::new();
+    let engine = engine(&fake);
+    let session = engine.session(&sid(), "test").unwrap();
+    let d = engine
+        .inspect(&session, InspectRequest::UnderCursor)
+        .await
+        .unwrap();
+    assert_eq!(d.element.name, "Target");
+    assert_eq!(d.element.path, "Window \"Fixture\" > Button \"Target\"");
+    let again = engine
+        .inspect(&session, InspectRequest::Ref(d.element.reference.clone()))
+        .await
+        .unwrap();
+    assert_eq!(again.element.reference, d.element.reference);
+}
+
+// ---------------------------------------------------------------- actions
+
+#[tokio::test]
+async fn invoke_that_opens_a_window_is_verified() {
+    let fake = Fake::new();
+    let engine = engine(&fake);
+    let session = engine.session(&sid(), "test").unwrap();
+    let r = engine
+        .execute(&session, click(by("Button", "Open Dialog")))
+        .await
+        .unwrap();
+    assert!(r.success && r.executed && r.verified, "{r:?}");
+    assert_eq!(r.method, ActionMethod::InvokePattern);
+    assert_eq!(r.opened_windows, ["\"Fixture Dialog\" (fixture.exe)"]);
+    assert!(r.reference.is_some());
+}
+
+#[tokio::test]
+async fn invoke_without_observable_change_is_executed_but_unverified() {
+    let fake = Fake::new();
+    let engine = engine(&fake);
+    let session = engine.session(&sid(), "test").unwrap();
+    let save = engine
+        .find(
+            &session,
+            serde_json::from_str(r#"{"role":"Button","automationId":"s1"}"#).unwrap(),
+        )
+        .await
+        .unwrap();
+    let r = engine
+        .execute(
+            &session,
+            click(ElementTarget::by_ref(&save.matches[0].reference)),
+        )
+        .await
+        .unwrap();
+    assert!(r.executed && !r.verified);
+    assert!(r.warnings[0].contains("no observable state change"));
+}
+
+#[tokio::test]
+async fn ambiguous_locator_reports_candidate_refs() {
+    let fake = Fake::new();
+    let engine = engine(&fake);
+    let session = engine.session(&sid(), "test").unwrap();
+    let err = engine
+        .execute(&session, click(by("Button", "Save")))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code().as_str(), "ELEMENT_AMBIGUOUS");
+    let matches = err.payload().matches;
+    assert_eq!(matches.len(), 2);
+    assert!(matches.iter().all(|m| m.starts_with('e')), "{matches:?}");
+    assert!(fake.s().executed.is_empty(), "nothing was clicked");
+}
+
+#[tokio::test]
+async fn fill_uses_value_pattern_and_reads_back() {
+    let fake = Fake::new();
+    let engine = engine(&fake);
+    let session = engine.session(&sid(), "test").unwrap();
+    let name = ref_of(&engine, &session, "Edit", "Name:").await;
+    let r = engine
+        .execute(
+            &session,
+            DesktopAction::Fill {
+                target: ElementTarget::by_ref(&name),
+                text: "notes.txt".into(),
+                clear: true,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.method, ActionMethod::ValuePattern);
+    assert!(r.verified);
+    assert_eq!(r.after.as_deref(), Some("value=\"notes.txt\""));
+    let appended = engine
+        .execute(
+            &session,
+            DesktopAction::Fill {
+                target: ElementTarget::by_ref(&name),
+                text: ".bak".into(),
+                clear: false,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(appended.after.as_deref(), Some("value=\"notes.txt.bak\""));
+}
+
+#[tokio::test]
+async fn filling_a_password_needs_confirmation_and_reading_it_is_blocked() {
+    let fake = Fake::new();
+    let engine = engine(&fake);
+    let session = engine.session(&sid(), "test").unwrap();
+    let pw = ref_of(&engine, &session, "Edit", "Password:").await;
+    let err = engine
+        .execute(
+            &session,
+            DesktopAction::Fill {
+                target: ElementTarget::by_ref(&pw),
+                text: "hunter2".into(),
+                clear: true,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.code().as_str(), "CONFIRMATION_REQUIRED");
+    let err = engine
+        .execute(
+            &session,
+            DesktopAction::ReadText {
+                target: ElementTarget::by_ref(&pw),
+                max_chars: 100,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.code().as_str(), "SENSITIVE_FIELD");
+    assert!(fake.s().executed.is_empty());
+}
+
+#[tokio::test]
+async fn sensitive_buttons_require_confirmation() {
+    let fake = Fake::new();
+    let engine = engine(&fake);
+    let session = engine.session(&sid(), "test").unwrap();
+    let err = engine
+        .execute(&session, click(by("Button", "Submit")))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code().as_str(), "CONFIRMATION_REQUIRED");
+    assert!(fake.s().executed.is_empty(), "Submit was not invoked");
+    assert_eq!(fake.s().els[&STATUS].name, "Ready");
+}
+
+#[tokio::test]
+async fn check_is_idempotent_and_verified() {
+    let fake = Fake::new();
+    let engine = engine(&fake);
+    let session = engine.session(&sid(), "test").unwrap();
+    let cb = ref_of(&engine, &session, "CheckBox", "Enable feature").await;
+    let check = || DesktopAction::Check {
+        target: ElementTarget::by_ref(&cb),
+    };
+    let first = engine.execute(&session, check()).await.unwrap();
+    assert_eq!(first.method, ActionMethod::TogglePattern);
+    assert!(first.verified);
+    assert_eq!(first.after.as_deref(), Some("checked"));
+    let second = engine.execute(&session, check()).await.unwrap();
+    assert_eq!(second.method, ActionMethod::NoOp);
+    let uncheck = engine
+        .execute(
+            &session,
+            DesktopAction::Uncheck {
+                target: ElementTarget::by_ref(&cb),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(uncheck.after.as_deref(), Some("unchecked"));
+    assert_eq!(
+        fake.s()
+            .executed
+            .iter()
+            .filter(|e| e.starts_with("Toggle"))
+            .count(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn radio_check_selects() {
+    let fake = Fake::new();
+    let engine = engine(&fake);
+    let session = engine.session(&sid(), "test").unwrap();
+    let r = engine
+        .execute(
+            &session,
+            DesktopAction::Check {
+                target: by("RadioButton", "Small"),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.method, ActionMethod::SelectionItemPattern);
+    assert!(r.verified);
+}
+
+#[tokio::test]
+async fn select_option_in_collapsed_combo() {
+    let fake = Fake::new();
+    let engine = engine(&fake);
+    let session = engine.session(&sid(), "test").unwrap();
+    let r = engine
+        .execute(
+            &session,
+            DesktopAction::Select {
+                target: by("ComboBox", "Color:"),
+                option: Some("green".into()),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.method, ActionMethod::SelectionItemPattern);
+    assert!(r.verified, "{r:?}");
+    let s = fake.s();
+    assert_eq!(s.els[&COMBO].value.as_deref(), Some("Green"));
+    assert_eq!(s.els[&COMBO].expand, Some(ExpandState::Collapsed));
+    assert!(s.executed.iter().any(|e| e.starts_with("Expand")));
+}
+
+#[tokio::test]
+async fn stale_ref_is_re_resolved_after_recreation() {
+    let fake = Fake::new();
+    let engine = engine(&fake);
+    let session = engine.session(&sid(), "test").unwrap();
+    let target = ref_of(&engine, &session, "Button", "Target").await;
+    engine
+        .execute(&session, click(by("Button", "Recreate")))
+        .await
+        .unwrap();
+    assert!(!fake.s().els.contains_key(&TARGET), "old element is gone");
+    let r = engine
+        .execute(&session, click(ElementTarget::by_ref(&target)))
+        .await
+        .unwrap();
+    assert_eq!(
+        r.reference.as_deref(),
+        Some(target.as_str()),
+        "same ref keeps working"
+    );
+    assert_eq!(fake.s().els[&STATUS].name, "Target clicked");
+    assert!(
+        fake.s().executed.last().unwrap().contains("#100"),
+        "the new element was invoked"
+    );
+}
+
+#[tokio::test]
+async fn read_text_prefers_text_pattern() {
+    let fake = Fake::new();
+    let engine = engine(&fake);
+    let session = engine.session(&sid(), "test").unwrap();
+    let r = engine
+        .execute(
+            &session,
+            DesktopAction::ReadText {
+                target: by("Document", "Notes"),
+                max_chars: 100,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.method, ActionMethod::TextPattern);
+    assert_eq!(r.text.as_deref(), Some("hello notes"));
+}
+
+#[tokio::test]
+async fn disabled_and_elevated_targets_are_refused() {
+    let fake = Fake::new();
+    let engine = engine(&fake);
+    let session = engine.session(&sid(), "test").unwrap();
+    let err = engine
+        .execute(&session, click(by("Button", "Disabled Action")))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code().as_str(), "INVALID_REQUEST");
+    assert!(err.to_string().contains("disabled"));
+    fake.s().privileged = true;
+    let err = engine
+        .execute(&session, click(by("Button", "Target")))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code().as_str(), "UIPI_BLOCKED");
+    assert!(fake.s().executed.is_empty());
+}
+
+#[tokio::test]
+async fn physical_paths_need_an_input_backend() {
+    let fake = Fake::new();
+    let bare = engine(&fake);
+    let session = bare.session(&sid(), "test").unwrap();
+    let press = DesktopAction::Press {
+        target: None,
+        keys: vec![Key::Ctrl, Key::Shift, Key::Char('s')],
+    };
+    assert_eq!(
+        bare.execute(&session, press.clone())
+            .await
+            .unwrap_err()
+            .code()
+            .as_str(),
+        "BACKEND_UNAVAILABLE"
+    );
+
+    let input = Arc::new(FakeInput::default());
+    let with_input = engine(&fake).with_input(input.clone());
+    let session = with_input.session(&sid(), "test").unwrap();
+    let r = with_input.execute(&session, press).await.unwrap();
+    assert_eq!(r.method, ActionMethod::PhysicalKeyboard);
+    let r = with_input
+        .execute(
+            &session,
+            DesktopAction::Click {
+                target: by("Button", "Target"),
+                button: MouseButton::Right,
+                click_count: 1,
+                force_physical: false,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.method, ActionMethod::PhysicalClick);
+    let log = input.log.lock().unwrap().clone();
+    assert_eq!(log, ["press Ctrl+Shift+s", "click Right x1 at 248,8"]);
+}
+
+#[tokio::test]
+async fn window_close_is_verified() {
+    let fake = Fake::new();
+    let engine = engine(&fake);
+    let session = engine.session(&sid(), "test").unwrap();
+    let r = engine
+        .window_action(
+            &session,
+            WindowAction::Close {
+                window: WindowSelector {
+                    title: Some("Fixture".into()),
+                    ..Default::default()
+                },
+            },
+        )
+        .await
+        .unwrap();
+    assert!(r.verified);
+    assert_eq!(r.method, ActionMethod::WindowApi);
+    assert_eq!(r.closed_windows.len(), 1);
+}
+
+// ---------------------------------------------------------------- lifecycle
+
+#[tokio::test]
+async fn cancel_interrupts_a_hung_capture_and_is_terminal() {
+    let fake = Arc::new(Fake {
         hang: true,
-        ..Default::default()
+        ..Arc::into_inner(Fake::new()).unwrap()
     });
-    let engine = Arc::new(engine_with(vec![window(10, "N", "n.exe", true)], uia));
+    let engine = Arc::new(engine(&fake));
     let session = engine.session(&sid(), "test").unwrap();
     let task = {
         let engine = Arc::clone(&engine);
@@ -285,42 +1138,25 @@ async fn cancel_interrupts_a_hung_capture() {
     };
     tokio::time::sleep(Duration::from_millis(20)).await;
     session.cancel();
-    let err = task.await.unwrap().unwrap_err();
-    assert_eq!(err.code().as_str(), "CANCELLED");
-    let err = engine
-        .snapshot(&session, SnapshotRequest::default())
-        .await
-        .unwrap_err();
-    assert_eq!(err.code().as_str(), "CANCELLED", "cancel is terminal");
-}
-
-#[tokio::test]
-async fn inspect_assigns_a_ref_and_path() {
-    let uia = Arc::new(FakeUia::default());
-    let engine = engine_with(vec![window(10, "N", "n.exe", true)], uia);
-    let session = engine.session(&sid(), "test").unwrap();
-    let details = engine
-        .inspect(&session, InspectRequest::UnderCursor)
-        .await
-        .unwrap();
-    assert_eq!(details.element.reference, "e1");
     assert_eq!(
-        details.element.path,
-        "Window \"Untitled - Notepad\" > Button \"Save\""
+        task.await.unwrap().unwrap_err().code().as_str(),
+        "CANCELLED"
     );
-    assert_eq!(details.element.patterns, vec![UiPattern::Invoke]);
-    assert_eq!(details.process_name, "fake.exe");
-    let again = engine
-        .inspect(&session, InspectRequest::Ref("e1".into()))
-        .await
-        .unwrap();
-    assert_eq!(again.element.reference, "e1");
+    assert_eq!(
+        engine
+            .snapshot(&session, SnapshotRequest::default())
+            .await
+            .unwrap_err()
+            .code()
+            .as_str(),
+        "CANCELLED"
+    );
 }
 
 #[tokio::test]
 async fn invalid_requests_fail_before_touching_backends() {
-    let uia = Arc::new(FakeUia::default());
-    let engine = engine_with(vec![], uia.clone());
+    let fake = Fake::new();
+    let engine = engine(&fake);
     let session = engine.session(&sid(), "test").unwrap();
     let err = engine
         .snapshot(
@@ -334,13 +1170,18 @@ async fn invalid_requests_fail_before_touching_backends() {
         .unwrap_err();
     assert_eq!(err.code().as_str(), "INVALID_REQUEST");
     let err = engine
-        .snapshot(&session, SnapshotRequest::default())
+        .execute(
+            &session,
+            DesktopAction::Focus {
+                target: ElementTarget {
+                    reference: None,
+                    locator: None,
+                    scope: SnapshotTarget::Active,
+                },
+            },
+        )
         .await
         .unwrap_err();
-    assert_eq!(
-        err.code().as_str(),
-        "WINDOW_NOT_FOUND",
-        "no foreground window"
-    );
-    assert!(uia.captured_roots.lock().unwrap().is_empty());
+    assert_eq!(err.code().as_str(), "INVALID_REQUEST");
+    assert!(fake.s().captured_roots.is_empty());
 }

@@ -13,7 +13,7 @@ use winwright_contracts::element::{ControlRole, ElementInfo, ExpandState, Toggle
 use winwright_contracts::snapshot::{CellValue, SnapshotNode, SnapshotRequest};
 use winwright_security::{is_sensitive, redacted_value};
 
-use crate::refs::RefTable;
+use crate::refs::{NewRef, RefTable};
 
 const MAX_NAME_CHARS: usize = 120;
 const MAX_VALUE_CHARS: usize = 120;
@@ -168,6 +168,7 @@ pub struct Compressor<'r> {
     replaced: Vec<ElementKey>,
     /// Ref of the first emitted root, used as the active window ref.
     pub first_root_ref: Option<String>,
+    window: Option<u64>,
 }
 
 impl<'r> Compressor<'r> {
@@ -183,10 +184,13 @@ impl<'r> Compressor<'r> {
             kept: HashSet::new(),
             replaced: Vec::new(),
             first_root_ref: None,
+            window: None,
         }
     }
 
-    pub fn add_tree(&mut self, tree: &UiTree, refs: &mut RefTable) {
+    /// `window` is the top-level window the tree belongs to (the scope for re-resolution).
+    pub fn add_tree(&mut self, tree: &UiTree, refs: &mut RefTable, window: Option<u64>) {
+        self.window = window;
         self.truncated |= tree.truncated;
         let mut budget = self.req.max_nodes.saturating_sub(self.emitted);
         let mut sels = Vec::new();
@@ -314,10 +318,13 @@ impl<'r> Compressor<'r> {
         let props = &sel.node.props;
         let identity = ElementIdentity::from_props(props, sel.fingerprint);
         let upserted = refs.upsert(
-            identity,
-            sel.node.key,
-            props.bounds,
-            props.label(),
+            NewRef {
+                identity,
+                key: sel.node.key,
+                bounds: props.bounds,
+                label: props.label(),
+                window: self.window,
+            },
             self.generation,
             self.now,
         );
@@ -518,7 +525,7 @@ mod tests {
         refs: &mut RefTable,
     ) -> (String, Vec<ElementKey>) {
         let mut c = Compressor::new(req, 1, Instant::now());
-        c.add_tree(t, refs);
+        c.add_tree(t, refs, None);
         let released = c.unreferenced_keys(std::slice::from_ref(t));
         (c.text, released)
     }
@@ -653,7 +660,7 @@ mod tests {
         };
         let mut refs = RefTable::default();
         let mut c = Compressor::new(&req, 1, Instant::now());
-        c.add_tree(&t, &mut refs);
+        c.add_tree(&t, &mut refs, None);
         assert_eq!(c.emitted, 10);
         assert!(c.truncated);
     }
@@ -687,7 +694,7 @@ mod tests {
         };
         let mut refs = RefTable::default();
         let mut c = Compressor::new(&req, 1, Instant::now());
-        c.add_tree(&t, &mut refs);
+        c.add_tree(&t, &mut refs, None);
         let root = &c.nodes[0];
         assert_eq!(root.children.len(), 4);
         assert_eq!(
