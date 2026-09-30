@@ -1197,6 +1197,7 @@ dependencies = [
  "windows",
  "winwright-contracts",
  "winwright-core",
+ "winwright-overlay",
 ]
 
 [[package]]

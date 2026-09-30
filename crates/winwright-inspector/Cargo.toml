@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 winwright-contracts.workspace = true
 winwright-core.workspace = true
+winwright-overlay.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
