@@ -418,24 +418,19 @@ impl Worker {
             return Ok(node);
         }
         let child_is_leaf_level = depth + 2 >= walk.request.max_depth;
-        // Children deliberately filtered out (offscreen, vanished) do not count as "more".
-        let mut filtered = 0;
         for i in 0..len.min(walk.request.max_children) {
             if walk.should_stop()? {
                 break;
             }
             // SAFETY: index is within `Length()`; the array is owned by this thread.
             let Ok(child) = (unsafe { children.GetElement(i as i32) }) else {
-                filtered += 1;
                 continue;
             };
             let child_props = read_props(&child);
             if child_props.offscreen && !walk.request.include_offscreen {
-                filtered += 1;
                 continue;
             }
             if !child_props.runtime_id.is_empty() && walk.seen.contains(&child_props.runtime_id) {
-                filtered += 1;
                 continue;
             }
             let child = if child_is_leaf_level || skip_children(child_props.role) {
@@ -445,7 +440,6 @@ impl Worker {
                 match unsafe { child.BuildUpdatedCache(&self.cache_children) } {
                     Ok(c) => c,
                     Err(e) if is_gone(&e) => {
-                        filtered += 1;
                         continue;
                     }
                     Err(e) => {
@@ -456,10 +450,9 @@ impl Worker {
             };
             node.children.push(self.walk(child, depth + 1, walk)?);
         }
-        node.children_total = len - filtered;
-        if len > walk.request.max_children {
-            walk.truncated = true;
-        }
+        // `children_total` is the provider's own count (offscreen and uncaptured included);
+        // only the node budget, depth limit, or deadline mark the whole tree truncated.
+        node.children_total = len;
         Ok(node)
     }
 

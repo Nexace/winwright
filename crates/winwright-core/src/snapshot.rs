@@ -289,7 +289,10 @@ impl<'r> Compressor<'r> {
             list_truncated = true;
         }
         let provider_total = node.children_total.max(node.children.len() as u32);
-        let backend_capped = node.children_total > node.children.len() as u32;
+        // Lists report their real size when not every item is shown (offscreen or uncaptured);
+        // other containers stay quiet about skipped offscreen children.
+        let backend_capped =
+            is_list_like(node.props.role) && node.children_total > children.len() as u32;
         let child_count = (list_truncated || backend_capped).then(|| {
             let shown = children.len() as u32;
             (provider_total.max(shown), shown)
