@@ -1,42 +1,50 @@
 # Winwright State
 
 **Updated:** 2026-09-30
-**Current phase:** 1b — persistent engine (`winwright serve`) so refs survive CLI processes
-**Toolchain:** Rust 1.98.1 MSVC (pinned), windows-rs 0.62.2, tokio 1.53, schemars 1.2
+**Current phase:** 4 — waits, UIA events, verification, snapshot diff
+**Toolchain:** Rust 1.98.1 MSVC (pinned), windows-rs 0.62.2, tokio 1.53, schemars 1.2, regex 1.13
 
 ## Done
-- Phase 0: workspace (contracts, core, security, cli); typed errors with stable codes + hints;
-  DTOs for elements/windows/snapshots/locators/security/config; backend traits
-  (`WindowBackend`, `UiAutomationBackend`) with `ElementKey` epoch slots; per-session
-  `RefTable` with ref reuse + epoch invalidation; terminal session cancel + emergency
-  `cancel_all`; in-process `ActionLease`; default-deny `Policy`; redaction + `SecretString`;
-  config loading; stderr logging; `winwright --version`.
-- Phase 1: `winwright-win32` (EnumWindows + DWM cloak/bounds, process names, cursor,
-  Per-Monitor-V2 DPI); `winwright-uia` (dedicated MTA worker, bounded mailbox + oneshot
-  replies, cache-request tree walk with one cross-process call per descended node, epoch
-  slots, inspect with ancestors, UIA transaction timeouts); core `Compressor` (keep/flatten/
-  prune, list truncation, grid-cell folding, bidi stripping, redaction) and `Engine`
-  (windows, snapshot, inspect); CLI `windows`, `snapshot`, `inspect`.
-  - Verified live: Notepad, Settings, File Explorer trees readable with refs.
-  - Release timings incl. process spawn + COM init: `windows` ~58 ms, active snapshot ~240 ms.
-  - Tests: 63 unit + 3 opt-in live (`cargo test -p winwright-uia -- --ignored --test-threads=1`).
+- Phase 0: workspace, contracts, typed errors, config, logging, sessions/refs, lease, policy, redaction.
+- Phase 1: Win32 windows + DPI, dedicated MTA UIA worker, compact snapshots with stable refs,
+  inspect. Verified live on Notepad / Settings / File Explorer.
+- Phase 2: locator engine (role/name/text/AutomationId/label/class/framework/ancestor/nth,
+  exact/contains/regex, ranking, ambiguity with candidate refs, secret-safe text matching),
+  `find`, stale-ref re-resolution by identity. CLI `find`.
+- Phase 3: pattern-first action engine (click/fill/type/focus/select/check/uncheck/toggle/
+  expand/collapse/scroll/scrollIntoView/press/readText) with verification, activation-risk
+  classifier (Send/Delete/Buy... -> CONFIRMATION_REQUIRED), UIPI refusal, action lease,
+  unknown-outcome timeouts; Win32 window focus/move/resize/state/close. CLI commands.
+- Parallel adapter crates (subagents, merged): `winwright-input` (SendInput, 48 tests),
+  `winwright-capture` (WGC + WIC, 19 tests + 6 live), `winwright-overlay` (native overlays +
+  hotkeys, 36 tests + 5 live), `winwright-shell` / `winwright-files` (typed process/file ops,
+  protected paths, recycle-only delete), fixtures (`winwright-fixture-win32`,
+  `winwright-fixture-canvas`) and `winwright-test-support`.
+- Live fixture acceptance (`cargo test -p winwright-cli --test live_fixture -- --ignored
+  --test-threads=1`): 6/6, stable across 3 runs, UIA patterns only (no injected input).
+- Totals: 269 unit/integration tests passing; 30 opt-in live tests.
 
 ## Next
-- Phase 1b: `winwright serve` owning the Engine; CLI talks to it over a current-user-ACL named
-  pipe; `--session <id>`; `inspect <ref>`; cross-process action lease.
-- Phase 2: locator engine + Rust Win32 fixture app (`fixtures/test-win32-app`).
+- Phase 4: `wait_for` (event-accelerated polling), UIA event handlers on the worker, snapshot diff.
+- Phase 5: rmcp MCP server (stdio) over the engine.
+- Phase 1b: `winwright serve` + named pipe so refs survive CLI processes.
+- Wire capture/overlay/shell/files into the engine (screenshot, highlight, app_launch,
+  process_list, filesystem_operation) behind policy.
+- Phase 7 acceptance needs a physical-input run on the canvas fixture: ask the user first.
 
 ## Decisions
-- One ref namespace (`eN`) for windows and elements; no separate `wN` refs.
-- Refs are per-session and monotonic; an element keeps its ref across snapshots when its
-  runtime id + static identity match (keeps diffs readable).
+- One ref namespace (`eN`); refs per session; reused across snapshots when runtime id +
+  static identity match; re-resolved by identity within the owning window when stale.
 - Cancelling a session is terminal until an explicit user reset.
-- `WindowInfo.hwnd` is exposed as an opaque number; platform layer revalidates identity.
-- Value of sensitive fields is never read by the backend (not just redacted later).
-- Deadline expiry during a snapshot walk returns a partial tree marked truncated; cancellation
-  returns `CANCELLED`.
-- Window selectors never guess: multiple matches -> `ELEMENT_AMBIGUOUS` listing candidates.
+- Sensitive values are never read by the backend; `readText` on them -> `SENSITIVE_FIELD`.
+- Window selectors and locators never guess between equally strong matches.
+- UIA walks skip already-captured runtime ids (Win32 combo boxes expose cycles when expanded).
 
-## Known gaps
-- UWP windows report `ApplicationFrameHost.exe` as process (see docs/app-compatibility.md).
-- CLI `windows` starts the UIA worker unnecessarily (fine once `serve` exists).
+## Known gaps / follow-ups
+- UWP windows report `ApplicationFrameHost.exe` as process.
+- Capture: intermittent all-black region captures seen once by the capture agent (cause unknown).
+- Overlays are clipped to one monitor and are visible in screen captures.
+- Input: keyboard layout comes from the calling thread (VkKeyScanW), not the target app.
+- Recycle-bin delete and app launch are implemented but only unit-tested (live tests opt-in).
+- Win32 list/tab/combo selection via UIA sets the selection without the app's change
+  notification (e.g. LBN_SELCHANGE) in some controls; verification reads the control state.
