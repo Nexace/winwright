@@ -660,6 +660,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "winwright-capture"
+version = "0.1.0"
+dependencies = [
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "windows",
+ "winwright-contracts",
+ "winwright-win32",
+]
+
+[[package]]
 name = "winwright-cli"
 version = "0.1.0"
 dependencies = [

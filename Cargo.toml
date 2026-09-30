@@ -8,6 +8,7 @@ members = [
     "crates/winwright-uia",
     "crates/winwright-input",
     "crates/winwright-overlay",
+    "crates/winwright-capture",
     "crates/winwright-cli",
     "crates/winwright-test-support",
     "fixtures/test-win32-app",
@@ -21,6 +22,7 @@ default-members = [
     "crates/winwright-uia",
     "crates/winwright-input",
     "crates/winwright-overlay",
+    "crates/winwright-capture",
     "crates/winwright-cli",
 ]
 
@@ -31,6 +33,7 @@ rust-version = "1.98"
 publish = false
 
 [workspace.dependencies]
+winwright-capture = { path = "crates/winwright-capture" }
 winwright-contracts = { path = "crates/winwright-contracts" }
 winwright-core = { path = "crates/winwright-core" }
 winwright-input = { path = "crates/winwright-input" }
