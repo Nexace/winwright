@@ -70,6 +70,9 @@ struct Step {
     after: Option<UiProps>,
     text: Option<String>,
     warnings: Vec<String>,
+    /// The exact state the target must reach; re-checked briefly because some providers
+    /// (Win32 radio buttons, list boxes) update a moment after the call returns.
+    expect: Option<Expect>,
 }
 
 impl Step {
@@ -80,6 +83,35 @@ impl Step {
             after: None,
             text: None,
             warnings: Vec::new(),
+            expect: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum Expect {
+    Selected,
+    Toggle(ToggleState),
+    ToggleChangedFrom(Option<ToggleState>),
+    Expand(ExpandState),
+    Visible,
+    Value(String),
+}
+
+impl Expect {
+    fn met(&self, p: &UiProps) -> bool {
+        match self {
+            Self::Selected => p.selected == Some(true),
+            Self::Toggle(t) => p.toggle_state == Some(*t),
+            Self::ToggleChangedFrom(before) => {
+                p.toggle_state.is_some() && p.toggle_state != *before
+            }
+            Self::Expand(e) => p.expand_state == Some(*e),
+            Self::Visible => !p.offscreen,
+            Self::Value(v) => p
+                .value
+                .as_deref()
+                .is_some_and(|x| x.trim().eq_ignore_ascii_case(v)),
         }
     }
 }
@@ -253,6 +285,27 @@ impl Engine {
     ) -> WinwrightResult<UiActionOutcome> {
         ctx.check("action")?;
         self.uia.execute_pattern(r.key, action, ctx).await
+    }
+
+    /// Re-reads the target until `pred` holds or the settle window passes.
+    async fn poll_until(
+        &self,
+        r: &Resolved,
+        ctx: &OperationContext,
+        pred: impl Fn(&UiProps) -> bool,
+    ) -> Option<UiProps> {
+        let deadline = Instant::now() + SETTLE.min(ctx.remaining());
+        loop {
+            if let Ok(props) = self.uia.refresh(r.key, ctx).await
+                && pred(&props)
+            {
+                return Some(props);
+            }
+            if Instant::now() >= deadline || ctx.cancel.is_cancelled() {
+                return None;
+            }
+            tokio::time::sleep(SETTLE_POLL).await;
+        }
     }
 
     /// Polls for any observable effect: target state, target disappearance, window changes.
@@ -434,6 +487,15 @@ impl Engine {
             }
         };
 
+        if !step.verified
+            && let (Some(expect), Some(r)) = (step.expect.clone(), r)
+            && let Some(props) = self.poll_until(r, &ctx, |p| expect.met(p)).await
+        {
+            step.verified = true;
+            step.after = Some(props);
+            step.warnings
+                .retain(|w| !w.starts_with("the combo box still shows"));
+        }
         let mut result = ActionResult {
             success: true,
             executed: true,
@@ -449,8 +511,17 @@ impl Engine {
             focus: None,
             warnings: std::mem::take(&mut step.warnings),
         };
+        // Invoke and physical input can only be verified by side effects; every other method
+        // checked the control's own state and that answer stands.
+        let evidence_based = matches!(
+            step.method,
+            ActionMethod::InvokePattern
+                | ActionMethod::PhysicalClick
+                | ActionMethod::PhysicalKeyboard
+                | ActionMethod::PhysicalScroll
+        );
         if mutating {
-            if !step.verified && step.method != ActionMethod::NoOp {
+            if evidence_based && !step.verified {
                 let (seen, after) = self.settle(r, &before_windows, &ctx).await;
                 result.verified = seen;
                 if after.is_some() {
@@ -473,7 +544,9 @@ impl Engine {
                     result.closed_windows.push(label.clone());
                 }
             }
-            if !result.opened_windows.is_empty() || !result.closed_windows.is_empty() {
+            if evidence_based
+                && (!result.opened_windows.is_empty() || !result.closed_windows.is_empty())
+            {
                 result.verified = true;
                 result
                     .warnings
@@ -579,6 +652,7 @@ impl Engine {
                 .as_ref()
                 .is_some_and(|a| a.selected == Some(true));
             step.after = out.props_after;
+            step.expect = Some(Expect::Selected);
             return Ok(step);
         }
         if p.has_pattern(UiPattern::Toggle)
@@ -594,6 +668,7 @@ impl Engine {
                 .as_ref()
                 .is_some_and(|a| a.toggle_state != p.toggle_state);
             step.after = out.props_after;
+            step.expect = Some(Expect::ToggleChangedFrom(p.toggle_state));
             return Ok(step);
         }
         if p.has_pattern(UiPattern::ExpandCollapse) {
@@ -773,6 +848,7 @@ impl Engine {
                         .as_ref()
                         .is_some_and(|a| a.selected == Some(true));
                     step.after = out.props_after;
+                    step.expect = Some(Expect::Selected);
                     Ok(step)
                 }
                 Some(false) => Err(WinwrightError::invalid(
@@ -798,7 +874,12 @@ impl Engine {
         let attempts = if target_state.is_some() { 3 } else { 1 };
         for _ in 0..attempts {
             let out = self.pattern(r, UiPatternAction::Toggle, ctx).await?;
-            after = out.props_after;
+            // Never toggle again on a stale read: wait for this toggle to land first.
+            let before = current;
+            after = match self.poll_until(r, ctx, |p| p.toggle_state != before).await {
+                Some(props) => Some(props),
+                None => out.props_after,
+            };
             let now = after.as_ref().and_then(|a| a.toggle_state);
             if target_state.is_none() || now == target_state || now == current {
                 break;
@@ -812,6 +893,10 @@ impl Engine {
             None => final_state.is_some() && final_state != p.toggle_state,
         };
         step.after = after;
+        step.expect = Some(match target_state {
+            Some(t) => Expect::Toggle(t),
+            None => Expect::ToggleChangedFrom(p.toggle_state),
+        });
         Ok(step)
     }
 
@@ -855,6 +940,7 @@ impl Engine {
             .as_ref()
             .is_some_and(|a| a.expand_state == Some(want));
         step.after = out.props_after;
+        step.expect = Some(Expect::Expand(want));
         Ok(step)
     }
 
@@ -870,6 +956,7 @@ impl Engine {
         let mut step = Step::new(ActionMethod::ScrollItemPattern);
         step.verified = out.props_after.as_ref().is_some_and(|a| !a.offscreen);
         step.after = out.props_after;
+        step.expect = Some(Expect::Visible);
         Ok(step)
     }
 
@@ -1000,16 +1087,28 @@ impl Engine {
                 .as_ref()
                 .is_some_and(|a| a.selected == Some(true));
             step.after = out.props_after;
+            step.expect = Some(Expect::Selected);
             return Ok(step);
         };
+        let is_combo = r.props.role == ControlRole::ComboBox;
         let was_collapsed = r.props.has_pattern(UiPattern::ExpandCollapse)
             && r.props.expand_state == Some(ExpandState::Collapsed);
+        // A classic drop-down may need Enter to commit; its window must be in front before the
+        // list opens, because activating it later would close the list.
+        if is_combo
+            && self.input.is_some()
+            && let Some(window) = r.window
+            && self.windows.foreground_window()?.map(|w| w.hwnd) != Some(window)
+        {
+            let _ = self.windows.focus_window(window);
+        }
         if was_collapsed {
             // Many combo boxes only materialize their items while open.
             let _ = self.pattern(r, UiPatternAction::Expand, ctx).await;
         }
-        let item = self.find_item(session, r, option, ctx).await;
-        let result = match item {
+        // The text the container must show afterwards (combo boxes are verified by value).
+        let expected: String;
+        let mut step = match self.find_item(session, r, option, ctx).await {
             Ok(item) => {
                 if item.props.offscreen && item.props.has_pattern(UiPattern::ScrollItem) {
                     let _ = self
@@ -1021,50 +1120,105 @@ impl Engine {
                 } else if item.props.has_pattern(UiPattern::Invoke) {
                     (UiPatternAction::Invoke, ActionMethod::InvokePattern)
                 } else {
+                    self.release(vec![item.key]).await;
+                    self.collapse_if_opened(r, was_collapsed, ctx).await;
                     return Err(WinwrightError::UnsupportedPattern {
                         element: item.label(),
                         pattern: "SelectionItem/Invoke".into(),
                     });
                 };
-                let out = self.pattern(&item, action, ctx).await?;
-                let mut step = Step::new(method);
-                step.verified = out
-                    .props_after
-                    .as_ref()
-                    .is_some_and(|a| a.selected == Some(true));
+                expected = item.props.name.trim().to_owned();
+                let out = self.pattern(&item, action, ctx).await;
                 self.release(vec![item.key]).await;
-                Ok(step)
+                let out = match out {
+                    Ok(out) => out,
+                    Err(e) => {
+                        self.collapse_if_opened(r, was_collapsed, ctx).await;
+                        return Err(e);
+                    }
+                };
+                let mut step = Step::new(method);
+                // For lists/tabs/trees the item's own state is the truth; a combo box is
+                // checked below by its value.
+                step.verified = !is_combo
+                    && out
+                        .props_after
+                        .as_ref()
+                        .is_some_and(|a| a.selected == Some(true));
+                step
             }
             Err(WinwrightError::ElementNotFound { .. })
                 if r.props.has_pattern(UiPattern::Value)
                     && r.props.value_read_only == Some(false) =>
             {
+                expected = option.trim().to_owned();
                 let out = self
                     .pattern(r, UiPatternAction::SetValue(option.to_owned()), ctx)
                     .await?;
                 let mut step = Step::new(ActionMethod::ValuePattern);
                 step.verified =
                     out.props_after.as_ref().and_then(|a| a.value.as_deref()) == Some(option);
-                Ok(step)
+                step
             }
-            Err(e) => Err(e),
+            Err(e) => {
+                self.collapse_if_opened(r, was_collapsed, ctx).await;
+                return Err(e);
+            }
         };
-        if was_collapsed {
-            // Close the drop-down again if selecting did not already.
-            if let Ok(now) = self.uia.refresh(r.key, ctx).await
-                && now.expand_state == Some(ExpandState::Expanded)
-            {
-                let _ = self.pattern(r, UiPatternAction::Collapse, ctx).await;
+        let shows_expected = |p: &UiProps| {
+            p.value
+                .as_deref()
+                .is_some_and(|v| v.trim().eq_ignore_ascii_case(&expected))
+        };
+        if is_combo {
+            let now = self.uia.refresh(r.key, ctx).await?;
+            if now.expand_state == Some(ExpandState::Expanded) {
+                // Classic Win32 drop-downs only highlight the item on Select and revert when
+                // the list is closed; Enter commits it (spec §11 keyboard fallback). Only while
+                // this combo's list is open, focused, and its window is in front, so the key
+                // cannot reach anything else. Modern combos close themselves on Select.
+                let foreground = self.windows.foreground_window()?.map(|w| w.hwnd);
+                let safe = now.focused && foreground.is_some() && foreground == r.window;
+                tracing::debug!(
+                    safe,
+                    focused = now.focused,
+                    "drop-down still open after Select"
+                );
+                if let Some(input) = self.input.as_deref()
+                    && safe
+                {
+                    input.press_keys(&[Key::Enter], ctx).await?;
+                    step.warnings
+                        .push("committed the drop-down choice with Enter".into());
+                }
             }
         }
-        let mut step = result?;
-        if let Ok(now) = self.uia.refresh(r.key, ctx).await {
+        self.collapse_if_opened(r, was_collapsed, ctx).await;
+        let now = self.uia.refresh(r.key, ctx).await?;
+        if is_combo {
+            step.verified = shows_expected(&now);
+            step.expect = Some(Expect::Value(expected.clone()));
             if !step.verified {
-                step.verified = now.value.as_deref() == Some(option);
+                step.warnings.push(format!(
+                    "the combo box still shows {:?}, not {expected:?}",
+                    now.value.as_deref().unwrap_or_default()
+                ));
             }
-            step.after = Some(now);
+        } else if !step.verified {
+            step.verified = shows_expected(&now);
         }
+        step.after = Some(now);
         Ok(step)
+    }
+
+    /// Closes a drop-down this action opened, if it is still open.
+    async fn collapse_if_opened(&self, r: &Resolved, opened: bool, ctx: &OperationContext) {
+        if opened
+            && let Ok(now) = self.uia.refresh(r.key, ctx).await
+            && now.expand_state == Some(ExpandState::Expanded)
+        {
+            let _ = self.pattern(r, UiPatternAction::Collapse, ctx).await;
+        }
     }
 
     /// Finds `option` among the target's descendants (exact name, else a unique contains).

@@ -218,6 +218,8 @@ async fn phase3_invoke_fill_toggle_select() {
         })
         .await;
     assert!(r.verified, "combo value should read Green: {r:?}");
+    // The app itself must have seen the change, not just UIA.
+    assert_eq!(h.wait_status("Color: Green").await, "Color: Green", "{r:?}");
 
     let r = h
         .run(DesktopAction::Select {
