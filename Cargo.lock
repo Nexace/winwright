@@ -687,6 +687,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "winwright-fixture-canvas"
+version = "0.1.0"
+dependencies = [
+ "windows",
+]
+
+[[package]]
 name = "winwright-fixture-win32"
 version = "0.1.0"
 dependencies = [

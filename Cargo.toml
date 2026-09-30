@@ -8,6 +8,7 @@ members = [
     "crates/winwright-uia",
     "crates/winwright-cli",
     "fixtures/test-win32-app",
+    "fixtures/test-custom-canvas",
 ]
 default-members = [
     "crates/winwright-contracts",
