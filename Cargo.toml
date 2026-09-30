@@ -12,6 +12,7 @@ members = [
     "crates/winwright-shell",
     "crates/winwright-files",
     "crates/winwright-mcp",
+    "crates/winwright-inspector",
     "crates/winwright-cli",
     "crates/winwright-test-support",
     "fixtures/test-win32-app",
@@ -29,6 +30,7 @@ default-members = [
     "crates/winwright-shell",
     "crates/winwright-files",
     "crates/winwright-mcp",
+    "crates/winwright-inspector",
     "crates/winwright-cli",
 ]
 
@@ -43,6 +45,7 @@ winwright-capture = { path = "crates/winwright-capture" }
 winwright-contracts = { path = "crates/winwright-contracts" }
 winwright-core = { path = "crates/winwright-core" }
 winwright-input = { path = "crates/winwright-input" }
+winwright-inspector = { path = "crates/winwright-inspector" }
 winwright-overlay = { path = "crates/winwright-overlay" }
 winwright-files = { path = "crates/winwright-files" }
 winwright-mcp = { path = "crates/winwright-mcp" }

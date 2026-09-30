@@ -1114,6 +1114,7 @@ dependencies = [
  "winwright-core",
  "winwright-files",
  "winwright-input",
+ "winwright-inspector",
  "winwright-mcp",
  "winwright-overlay",
  "winwright-shell",
@@ -1184,6 +1185,18 @@ dependencies = [
  "windows",
  "winwright-contracts",
  "winwright-win32",
+]
+
+[[package]]
+name = "winwright-inspector"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "tokio",
+ "tracing",
+ "windows",
+ "winwright-contracts",
+ "winwright-core",
 ]
 
 [[package]]

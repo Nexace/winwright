@@ -87,6 +87,8 @@ pub enum Command {
     Mcp,
     /// Show (or clear) the local audit log of actions Winwright performed.
     Audit(AuditArgs),
+    /// Open the Inspector window: browse a window's UI tree, pick, highlight, copy locators.
+    Inspector,
 }
 
 #[derive(Args)]

@@ -1,6 +1,6 @@
 [package]
-name = "winwright-overlay"
-description = "Native click-through overlays and global hotkeys on a dedicated Win32 message-loop thread."
+name = "winwright-inspector"
+description = "Native Winwright Inspector window: UIA tree, element properties, pick, highlight, copy locator."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,21 +8,20 @@ publish.workspace = true
 
 [dependencies]
 winwright-contracts.workspace = true
+winwright-core.workspace = true
+serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 windows = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
+    "Win32_System_DataExchange",
     "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_UI_Controls",
     "Win32_UI_HiDpi",
-    "Win32_UI_Input_KeyboardAndMouse",
-    "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
-
-[dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt"] }
-winwright-win32.workspace = true
 
 [lints]
 workspace = true

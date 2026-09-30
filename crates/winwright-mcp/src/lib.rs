@@ -4,7 +4,7 @@
 
 mod inputs;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use base64::Engine as _;
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -95,23 +95,39 @@ fn render_found(f: &FindResult) -> String {
 #[derive(Clone)]
 pub struct WinwrightMcp {
     engine: Arc<Engine>,
-    session: Arc<Session>,
+    session: Arc<Mutex<Arc<Session>>>,
     tool_router: ToolRouter<Self>,
+}
+
+fn session_id() -> SessionId {
+    SessionId::parse("mcp").expect("valid id")
 }
 
 impl WinwrightMcp {
     pub fn new(engine: Arc<Engine>) -> Result<Self, WinwrightError> {
-        let session = engine.session(&SessionId::parse("mcp").expect("valid id"), "mcp")?;
+        let session = engine.session(&session_id(), "mcp")?;
         Ok(Self {
             engine,
-            session,
+            session: Arc::new(Mutex::new(session)),
             tool_router: Self::tool_router(),
         })
     }
 
+    /// The current session. After an emergency stop it stays cancelled (every tool fails with
+    /// CANCELLED) until the user re-enables Winwright, which yields a fresh session here.
+    fn sess(&self) -> Arc<Session> {
+        let mut current = self.session.lock().unwrap_or_else(PoisonError::into_inner);
+        if current.is_cancelled()
+            && let Ok(fresh) = self.engine.session(&session_id(), "mcp")
+        {
+            *current = fresh;
+        }
+        Arc::clone(&current)
+    }
+
     async fn act(&self, action: Result<DesktopAction, WinwrightError>) -> CallToolResult {
         match action {
-            Ok(action) => match self.engine.execute(&self.session, action).await {
+            Ok(action) => match self.engine.execute(&self.sess(), action).await {
                 Ok(result) => json(&result),
                 Err(e) => fail(e),
             },
@@ -128,7 +144,7 @@ impl WinwrightMcp {
     )]
     async fn desktop_snapshot(&self, Parameters(input): Parameters<SnapshotInput>) -> ToolResult {
         Ok(
-            match self.engine.snapshot(&self.session, input.request()).await {
+            match self.engine.snapshot(&self.sess(), input.request()).await {
                 Ok(s) => text(render_snapshot(&s)),
                 Err(e) => fail(e),
             },
@@ -140,7 +156,7 @@ impl WinwrightMcp {
     )]
     async fn desktop_find(&self, Parameters(input): Parameters<FindInput>) -> ToolResult {
         Ok(match input.request() {
-            Ok(req) => match self.engine.find(&self.session, req).await {
+            Ok(req) => match self.engine.find(&self.sess(), req).await {
                 Ok(found) => text(render_found(&found)),
                 Err(e) => fail(e),
             },
@@ -182,7 +198,7 @@ impl WinwrightMcp {
             }
             (None, None) => InspectRequest::Focused,
         };
-        Ok(match self.engine.inspect(&self.session, request).await {
+        Ok(match self.engine.inspect(&self.sess(), request).await {
             Ok(d) => json(&d),
             Err(e) => fail(e),
         })
@@ -276,7 +292,7 @@ impl WinwrightMcp {
     )]
     async fn desktop_wait_for(&self, Parameters(input): Parameters<WaitInput>) -> ToolResult {
         Ok(match input.request() {
-            Ok(req) => match self.engine.wait_for(&self.session, req).await {
+            Ok(req) => match self.engine.wait_for(&self.sess(), req).await {
                 Ok(r) => json(&r),
                 Err(e) => fail(e),
             },
@@ -289,7 +305,7 @@ impl WinwrightMcp {
     )]
     async fn window_control(&self, Parameters(input): Parameters<WindowInput>) -> ToolResult {
         Ok(match input.action() {
-            Ok(action) => match self.engine.window_action(&self.session, action).await {
+            Ok(action) => match self.engine.window_action(&self.sess(), action).await {
                 Ok(r) => json(&r),
                 Err(e) => fail(e),
             },
@@ -313,7 +329,7 @@ impl WinwrightMcp {
             ImageFormat::Png => "image/png",
             ImageFormat::Jpeg => "image/jpeg",
         };
-        Ok(match self.engine.screenshot(&self.session, request).await {
+        Ok(match self.engine.screenshot(&self.sess(), request).await {
             Ok(img) => CallToolResult::success(vec![
                 ContentBlock::image(
                     base64::engine::general_purpose::STANDARD.encode(&img.bytes),
@@ -339,7 +355,7 @@ impl WinwrightMcp {
     )]
     async fn overlay_highlight(&self, Parameters(input): Parameters<HighlightInput>) -> ToolResult {
         Ok(match input.request() {
-            Ok(req) => match self.engine.highlight(&self.session, req).await {
+            Ok(req) => match self.engine.highlight(&self.sess(), req).await {
                 Ok(r) => json(&r),
                 Err(e) => fail(e),
             },
@@ -360,7 +376,7 @@ impl WinwrightMcp {
     )]
     async fn app_launch(&self, Parameters(input): Parameters<LaunchInput>) -> ToolResult {
         Ok(
-            match self.engine.launch_app(&self.session, input.request()).await {
+            match self.engine.launch_app(&self.sess(), input.request()).await {
                 Ok(r) => json(&r),
                 Err(e) => fail(e),
             },
@@ -395,7 +411,7 @@ impl WinwrightMcp {
         Ok(
             match self
                 .engine
-                .file_operation(&self.session, input.operation)
+                .file_operation(&self.sess(), input.operation)
                 .await
             {
                 Ok(r) => json(&r),
@@ -409,7 +425,7 @@ impl WinwrightMcp {
     )]
     async fn shell_execute(&self, Parameters(input): Parameters<ExecInput>) -> ToolResult {
         Ok(
-            match self.engine.exec(&self.session, input.request()).await {
+            match self.engine.exec(&self.sess(), input.request()).await {
                 Ok(r) => json(&r),
                 Err(e) => fail(e),
             },

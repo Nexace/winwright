@@ -67,6 +67,13 @@ pub enum Command {
         id: HotkeyId,
         reply: SyncSender<()>,
     },
+    /// Adds or updates the tray icon; `reply` only for the first (adding) call.
+    TraySet {
+        state: crate::tray::TrayState,
+        callback: Option<crate::tray::TrayCallback>,
+        reply: Option<SyncSender<WinwrightResult<()>>>,
+    },
+    TrayRemove,
     Shutdown,
 }
 
@@ -187,7 +194,11 @@ fn setup(rx: Receiver<Command>, signals: Arc<Signals>) -> WinwrightResult<HWND> 
     Ok(host)
 }
 
-fn register_class(hinstance: HINSTANCE, name: PCWSTR, proc: WNDPROC) -> WinwrightResult<()> {
+pub(crate) fn register_class(
+    hinstance: HINSTANCE,
+    name: PCWSTR,
+    proc: WNDPROC,
+) -> WinwrightResult<()> {
     let class = WNDCLASSEXW {
         cbSize: size_of::<WNDCLASSEXW>() as u32,
         lpfnWndProc: proc,
@@ -381,6 +392,24 @@ impl UiState {
                 self.unregister(id);
                 let _ = reply.send(());
             }
+            Command::TraySet {
+                state,
+                callback,
+                reply,
+            } => {
+                let result = crate::tray::set(self.hinstance, state, callback);
+                match reply {
+                    Some(reply) => {
+                        let _ = reply.send(result);
+                    }
+                    None => {
+                        if let Err(err) = result {
+                            tracing::warn!(%err, "tray update failed");
+                        }
+                    }
+                }
+            }
+            Command::TrayRemove => crate::tray::remove(),
             Command::Shutdown => {}
         }
     }
@@ -477,6 +506,7 @@ impl UiState {
     /// mailbox, and finally destroys the host window.
     fn destroy(mut self) {
         self.clear_all();
+        crate::tray::remove();
         for &id in self.hotkeys.keys() {
             // SAFETY: `id` was registered on `host` by this thread.
             let _ = unsafe { UnregisterHotKey(Some(self.host), id) };

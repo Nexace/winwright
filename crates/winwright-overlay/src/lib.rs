@@ -31,6 +31,7 @@ mod layout;
 mod paint;
 mod render;
 mod thread;
+mod tray;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender, SyncSender};
@@ -47,6 +48,7 @@ use winwright_contracts::{WinwrightError, WinwrightResult};
 use crate::thread::{Callback, Command, Signals, WM_APP_WAKE};
 
 pub use crate::confirm::{NativeConfirmer, dialog_text};
+pub use crate::tray::{TrayMenuItem, TrayState};
 
 /// Default emergency-stop chord (spec §22). The engine binds it to `cancel_all`.
 pub const EMERGENCY_STOP_DEFAULT: &str = "Ctrl+Alt+Escape";
@@ -244,10 +246,11 @@ impl Drop for UiThread {
     }
 }
 
-/// Both services on one shared native UI thread.
+/// Overlays, hotkeys and the tray icon on one shared native UI thread.
 pub struct NativeUi {
     pub overlay: NativeOverlay,
     pub hotkeys: HotkeyHost,
+    pub tray: TrayHost,
 }
 
 impl NativeUi {
@@ -258,8 +261,47 @@ impl NativeUi {
             overlay: NativeOverlay {
                 ui: Arc::clone(&ui),
             },
+            tray: TrayHost {
+                ui: Arc::clone(&ui),
+            },
             hotkeys: HotkeyHost { ui },
         })
+    }
+}
+
+/// The notification-area icon. Menu callbacks run on the native UI thread and must be quick;
+/// they may call [`TrayHost::update`]. The icon is removed on shutdown.
+#[derive(Clone)]
+pub struct TrayHost {
+    ui: Arc<UiThread>,
+}
+
+impl TrayHost {
+    /// Adds the icon; `on_command` receives the chosen menu item's id.
+    pub fn show(
+        &self,
+        state: TrayState,
+        on_command: Box<dyn Fn(u32) + Send + Sync>,
+    ) -> WinwrightResult<()> {
+        let callback: crate::tray::TrayCallback = Arc::from(on_command);
+        self.ui.request("tray show", |reply| Command::TraySet {
+            state,
+            callback: Some(callback),
+            reply: Some(reply),
+        })?
+    }
+
+    /// Changes tooltip, icon color, or menu. Never blocks; usable from callbacks.
+    pub fn update(&self, state: TrayState) {
+        let _ = self.ui.submit(Command::TraySet {
+            state,
+            callback: None,
+            reply: None,
+        });
+    }
+
+    pub fn remove(&self) {
+        let _ = self.ui.submit(Command::TrayRemove);
     }
 }
 

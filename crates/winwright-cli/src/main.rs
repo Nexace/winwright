@@ -206,13 +206,40 @@ async fn serve_mcp(config: Config) -> Result<(), WinwrightError> {
         .with_processes(Arc::new(winwright_shell::SystemProcesses::new()))
         .with_files(Arc::new(winwright_files::LocalFiles::new())),
     );
-    // Weak: the hotkey callback must not keep the engine (and its UI thread) alive.
+    // Weak: callbacks must not keep the engine (and its UI thread) alive.
     let weak = Arc::downgrade(&engine);
+    let tray = native.tray.clone();
+    let tray_for_hotkey = native.tray.clone();
+    let weak_for_hotkey = Arc::downgrade(&engine);
+    if let Err(err) = native.tray.show(
+        tray_state(false),
+        Box::new(move |id| {
+            let Some(engine) = weak.upgrade() else {
+                return;
+            };
+            match id {
+                TRAY_STOP => {
+                    engine.emergency_stop();
+                    tray.update(tray_state(true));
+                }
+                TRAY_REARM => {
+                    engine.rearm();
+                    tray.update(tray_state(false));
+                }
+                TRAY_INSPECTOR => spawn_detached(&["inspector"]),
+                TRAY_AUDIT => open_audit_log(),
+                _ => {}
+            }
+        }),
+    ) {
+        tracing::warn!(%err, "tray icon unavailable");
+    }
     match native.hotkeys.register_emergency_stop(
         None,
         Box::new(move || {
-            if let Some(engine) = weak.upgrade() {
+            if let Some(engine) = weak_for_hotkey.upgrade() {
                 engine.emergency_stop();
+                tray_for_hotkey.update(tray_state(true));
             }
         }),
     ) {
@@ -228,8 +255,80 @@ async fn serve_mcp(config: Config) -> Result<(), WinwrightError> {
             backend: "mcp".into(),
             reason: e.to_string(),
         })?;
+    native.tray.remove();
     native.hotkeys.shutdown();
     Ok(())
+}
+
+const TRAY_STOP: u32 = 1;
+const TRAY_REARM: u32 = 2;
+const TRAY_INSPECTOR: u32 = 3;
+const TRAY_AUDIT: u32 = 4;
+
+fn tray_state(stopped: bool) -> winwright_overlay::TrayState {
+    use winwright_overlay::{TrayMenuItem, TrayState};
+    TrayState {
+        tooltip: if stopped {
+            "Winwright: stopped (AI actions are blocked)".into()
+        } else {
+            "Winwright: active for your AI assistant".into()
+        },
+        active: !stopped,
+        items: vec![
+            TrayMenuItem {
+                id: TRAY_STOP,
+                label: "Stop now\tCtrl+Alt+Esc".into(),
+                enabled: !stopped,
+            },
+            TrayMenuItem {
+                id: TRAY_REARM,
+                label: "Re-enable".into(),
+                enabled: stopped,
+            },
+            TrayMenuItem {
+                id: TRAY_INSPECTOR,
+                label: "Open Inspector".into(),
+                enabled: true,
+            },
+            TrayMenuItem {
+                id: TRAY_AUDIT,
+                label: "Show audit log".into(),
+                enabled: true,
+            },
+        ],
+    }
+}
+
+/// Starts another `winwright` process (the Inspector) without waiting for it.
+fn spawn_detached(args: &[&str]) {
+    match std::env::current_exe() {
+        Ok(exe) => {
+            if let Err(err) = std::process::Command::new(exe)
+                .args(args)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+            {
+                tracing::warn!(%err, "could not start {args:?}");
+            }
+        }
+        Err(err) => tracing::warn!(%err, "cannot locate winwright.exe"),
+    }
+}
+
+/// Opens the audit log in Notepad (the user's own click from the tray menu).
+fn open_audit_log() {
+    let Some(path) = winwright_core::audit::AuditLog::default_path() else {
+        return;
+    };
+    if !path.exists() {
+        tracing::info!("no audit log yet");
+        return;
+    }
+    if let Err(err) = std::process::Command::new("notepad.exe").arg(&path).spawn() {
+        tracing::warn!(%err, "could not open the audit log");
+    }
 }
 
 /// One-shot CLI commands use a transient session; refs do not outlive the process until
@@ -302,9 +401,11 @@ async fn run(cli: Cli) -> Result<(), WinwrightError> {
     };
     let engine = build_engine(config, extras)?;
     match command {
-        Command::Version | Command::Config | Command::Mcp | Command::Audit(_) => {
-            unreachable!("handled above")
-        }
+        Command::Version
+        | Command::Config
+        | Command::Mcp
+        | Command::Audit(_)
+        | Command::Inspector => unreachable!("handled above"),
         Command::Windows => {
             let windows = engine.list_windows()?;
             if json {
@@ -620,11 +721,30 @@ fn main() -> ExitCode {
     winwright_win32::enable_per_monitor_dpi_awareness();
     let cli = Cli::parse();
     let json = cli.json;
+    if matches!(cli.command, Command::Inspector) {
+        // The Inspector drives its own window loop and runtime on this thread.
+        return report(run_inspector(cli.config.as_deref()), json);
+    }
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_time()
         .build()
         .expect("tokio runtime");
-    match runtime.block_on(run(cli)) {
+    report(runtime.block_on(run(cli)), json)
+}
+
+fn run_inspector(config: Option<&std::path::Path>) -> Result<(), WinwrightError> {
+    let config = winwright_core::config::load_config(config)?;
+    let engine = Engine::new(
+        config,
+        Arc::new(winwright_win32::Win32Windows),
+        Arc::new(winwright_uia::UiaBackend::start()?),
+    )
+    .with_overlay(Arc::new(winwright_overlay::NativeOverlay::start()?));
+    winwright_inspector::run(engine)
+}
+
+fn report(result: Result<(), WinwrightError>, json: bool) -> ExitCode {
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             if json {
