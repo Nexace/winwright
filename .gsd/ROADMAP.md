@@ -5,8 +5,8 @@ Each phase keeps the workspace building, adds tests before behavior, and lands a
 
 | Phase | Scope | Acceptance | Status |
 |---|---|---|---|
-| 0 | Cargo workspace, owned contracts + backend traits, typed errors, config, logging, session/ref authority skeleton, action lease, cancellation context, redaction, default-deny policy, CLI version | workspace builds on MSVC; `cargo test` runs; `winwright --version` | in progress |
-| 1 | Win32 window list/active window/DPI; dedicated MTA UIA worker; raw tree capture; compact snapshot + refs; inspect | Notepad / Settings / Explorer trees readable; interactive controls get refs | planned |
+| 0 | Cargo workspace, owned contracts + backend traits, typed errors, config, logging, session/ref authority skeleton, action lease, cancellation context, redaction, default-deny policy, CLI version | workspace builds on MSVC; `cargo test` runs; `winwright --version` | done |
+| 1 | Win32 window list/active window/DPI; dedicated MTA UIA worker; raw tree capture; compact snapshot + refs; inspect | Notepad / Settings / Explorer trees readable; interactive controls get refs | done |
 | 1b | `winwright serve` per-user engine over current-user named pipe; `--session` refs across CLI processes | `snapshot --session demo` then `inspect --session demo e14` | planned |
 | 2 | Semantic locators: role, name, text, AutomationId, label, class, framework, ancestor, nth; ranking + ambiguity; Win32 fixture app | `winwright find --role Button --name Save` resolves fixture controls | planned |
 | 3 | Pattern-first actions: click, fill, focus, select, toggle, expand/collapse, scroll, press, hotkey | fixture workflows with no coordinate clicks | planned |

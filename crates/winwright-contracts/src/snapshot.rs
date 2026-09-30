@@ -108,11 +108,20 @@ pub struct WindowSummary {
     pub process: String,
 }
 
+/// A read-only grid/table cell folded into its row (`Type="File folder"`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CellValue {
+    pub name: String,
+    pub value: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SnapshotNode {
     #[serde(flatten)]
     pub element: ElementInfo,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cells: Vec<CellValue>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub children: Vec<SnapshotNode>,
     /// Total children when the list was truncated to `maxListItems`.
