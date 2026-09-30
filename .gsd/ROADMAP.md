@@ -17,5 +17,5 @@ Each phase keeps the workspace building, adds tests before behavior, and lands a
 | 8 | Permission engine, confirmations, audit, emergency stop, elevated-app detection | passwords never returned; stop halts queued work | planned |
 | 9 | Optional Playwright/CDP browser bridge | DOM + native dialog in one workflow | planned |
 | 10 | VisionGrounder fallback | visual-only target found + clicked, flagged as vision | planned |
-| 11 | Optional Tauri desktop UX (tray, hotkey, panel, permissions UI) | — | planned |
+| 11 | Native desktop UX, no WebView (user decision: keep usage minimal): tray icon only while running (Active/Stopped, Stop, Re-enable, Open Inspector); native Inspector window (UIA tree + properties, pick under cursor, live highlight, copy locator/ref); native Allow/Deny confirmation dialogs for risky actions. Tauri dropped unless requested later. | tray + inspector work against fixtures; confirmation approvals only from the dialog | planned |
 | 12 | Recorder / codegen | recorded Notepad save replays semantically | planned |
