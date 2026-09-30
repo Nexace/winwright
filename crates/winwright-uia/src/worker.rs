@@ -3,7 +3,7 @@
 //! Commands arrive over a bounded channel and carry owned data plus a oneshot reply. Live
 //! elements stay in `slots`, keyed by `ElementKey { worker_epoch, slot }`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::ffi::c_void;
 use std::time::Instant;
 
@@ -152,6 +152,9 @@ struct Walk<'a> {
     deadline: &'a Deadline,
     count: u32,
     truncated: bool,
+    /// Runtime ids already captured. Some providers expose cycles (an expanded Win32 combo
+    /// box lists its own top-level window as a child) or the same element twice.
+    seen: HashSet<Vec<i32>>,
 }
 
 impl Walk<'_> {
@@ -327,6 +330,7 @@ impl Worker {
             deadline,
             count: 0,
             truncated: false,
+            seen: HashSet::new(),
         };
         let root = self.walk(root, 0, &mut walk)?;
         Ok(UiTree {
@@ -346,6 +350,9 @@ impl Worker {
         let mut props = read_props(&el);
         read_value(&el, &mut props);
         walk.count += 1;
+        if !props.runtime_id.is_empty() {
+            walk.seen.insert(props.runtime_id.clone());
+        }
         let descend = !skip_children(props.role);
         let key = self.store(el.clone());
         let mut node = UiNode {
@@ -385,6 +392,10 @@ impl Worker {
             };
             let child_props = read_props(&child);
             if child_props.offscreen && !walk.request.include_offscreen {
+                filtered += 1;
+                continue;
+            }
+            if !child_props.runtime_id.is_empty() && walk.seen.contains(&child_props.runtime_id) {
                 filtered += 1;
                 continue;
             }

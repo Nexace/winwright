@@ -1029,6 +1029,13 @@ impl Engine {
             }
         }
         walk(&tree.root, 0, &mut all, &mut exact, &mut partial, option);
+        // The same element can surface twice through provider quirks; count it once.
+        let dedupe = |v: &mut Vec<&winwright_contracts::backend::UiNode>| {
+            let mut seen = std::collections::HashSet::new();
+            v.retain(|n| n.props.runtime_id.is_empty() || seen.insert(n.props.runtime_id.clone()));
+        };
+        dedupe(&mut exact);
+        dedupe(&mut partial);
         let pick = match (exact.len(), partial.len()) {
             (1, _) => Some(exact[0]),
             (0, 1) => Some(partial[0]),
