@@ -11,6 +11,7 @@ members = [
     "crates/winwright-capture",
     "crates/winwright-shell",
     "crates/winwright-files",
+    "crates/winwright-mcp",
     "crates/winwright-cli",
     "crates/winwright-test-support",
     "fixtures/test-win32-app",
@@ -27,6 +28,7 @@ default-members = [
     "crates/winwright-capture",
     "crates/winwright-shell",
     "crates/winwright-files",
+    "crates/winwright-mcp",
     "crates/winwright-cli",
 ]
 
@@ -43,14 +45,18 @@ winwright-core = { path = "crates/winwright-core" }
 winwright-input = { path = "crates/winwright-input" }
 winwright-overlay = { path = "crates/winwright-overlay" }
 winwright-files = { path = "crates/winwright-files" }
+winwright-mcp = { path = "crates/winwright-mcp" }
 winwright-security = { path = "crates/winwright-security" }
 winwright-shell = { path = "crates/winwright-shell" }
 winwright-uia = { path = "crates/winwright-uia" }
 winwright-win32 = { path = "crates/winwright-win32" }
 winwright-test-support = { path = "crates/winwright-test-support" }
 
+base64 = "0.23"
 clap = { version = "4.6", features = ["derive"] }
 regex = "1.13"
+# stdio MCP only: no HTTP/auth stacks (keeps the dependency tree small).
+rmcp = { version = "3.5", features = ["transport-io"] }
 schemars = "1.2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

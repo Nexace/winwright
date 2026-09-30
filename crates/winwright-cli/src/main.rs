@@ -1,4 +1,5 @@
 mod args;
+mod lazy;
 
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -173,6 +174,49 @@ fn print_action(r: &ActionResult) {
     }
 }
 
+/// MCP mode: stdout carries protocol frames only. Capture starts on first use; overlays and
+/// the emergency-stop hotkey share one small native UI thread. Nothing persists after exit.
+async fn serve_mcp(config: Config) -> Result<(), WinwrightError> {
+    let native = winwright_overlay::NativeUi::start()?;
+    let uia = winwright_uia::UiaBackend::start()?;
+    let engine = Arc::new(
+        Engine::new(
+            config,
+            Arc::new(winwright_win32::Win32Windows),
+            Arc::new(uia),
+        )
+        .with_input(Arc::new(winwright_input::SendInputBackend::new()))
+        .with_capture(Arc::new(lazy::LazyCapture::default()))
+        .with_overlay(Arc::new(native.overlay))
+        .with_processes(Arc::new(winwright_shell::SystemProcesses::new()))
+        .with_files(Arc::new(winwright_files::LocalFiles::new())),
+    );
+    // Weak: the hotkey callback must not keep the engine (and its UI thread) alive.
+    let weak = Arc::downgrade(&engine);
+    match native.hotkeys.register_emergency_stop(
+        None,
+        Box::new(move || {
+            if let Some(engine) = weak.upgrade() {
+                engine.emergency_stop();
+            }
+        }),
+    ) {
+        Ok(_) => tracing::info!(
+            "emergency stop: {}",
+            winwright_overlay::EMERGENCY_STOP_DEFAULT
+        ),
+        Err(err) => tracing::warn!(%err, "emergency-stop hotkey unavailable"),
+    }
+    winwright_mcp::serve_stdio(Arc::clone(&engine))
+        .await
+        .map_err(|e| WinwrightError::BackendUnavailable {
+            backend: "mcp".into(),
+            reason: e.to_string(),
+        })?;
+    native.hotkeys.shutdown();
+    Ok(())
+}
+
 /// One-shot CLI commands use a transient session; refs do not outlive the process until
 /// `winwright serve` provides a persistent per-user engine.
 fn cli_session() -> SessionId {
@@ -211,6 +255,7 @@ async fn run(cli: Cli) -> Result<(), WinwrightError> {
             print_json(&config);
             return Ok(());
         }
+        Command::Mcp => return serve_mcp(config).await,
         other => other,
     };
 
@@ -222,7 +267,7 @@ async fn run(cli: Cli) -> Result<(), WinwrightError> {
     };
     let engine = build_engine(config, extras)?;
     match command {
-        Command::Version | Command::Config => unreachable!("handled above"),
+        Command::Version | Command::Config | Command::Mcp => unreachable!("handled above"),
         Command::Windows => {
             let windows = engine.list_windows()?;
             if json {

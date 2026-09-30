@@ -39,6 +39,36 @@ DIALOG "Save As" [e1]
   BUTTON "Cancel" [e5]
 ```
 
+## Use from an AI client (MCP)
+
+`winwright mcp` speaks MCP over stdio. The client starts it for a session and it exits when
+the client disconnects: no service, no startup entry, nothing left running. Screen capture
+starts only on the first screenshot; UI Automation event listeners attach only during waits.
+Press **Ctrl+Alt+Esc** at any time to stop everything.
+
+Claude Code:
+
+```powershell
+claude mcp add winwright -- "C:\path\to\winwright.exe" mcp
+```
+
+Claude Desktop (`claude_desktop_config.json`):
+
+```json
+{ "mcpServers": { "winwright": { "command": "C:\\path\\to\\winwright.exe", "args": ["mcp"] } } }
+```
+
+Tools: `desktop_snapshot` (use `diff: true` after actions), `desktop_find`, `desktop_click`,
+`desktop_fill`, `desktop_type`, `desktop_press`, `desktop_select`, `desktop_check`,
+`desktop_expand`, `desktop_scroll`, `desktop_focus`, `desktop_read_text`, `desktop_wait_for`,
+`desktop_inspect`, `desktop_windows`, `window_control`, `desktop_screenshot`,
+`overlay_highlight`, `overlay_clear`, `app_launch`, `process_list`, `filesystem_operation`,
+`shell_execute` (off by default).
+
+Safety defaults: password values are never read; clicking Send/Delete/Buy-style controls,
+deleting files, and running programs return `CONFIRMATION_REQUIRED` or `ACTION_BLOCKED`;
+elevated apps are refused (`UIPI_BLOCKED`).
+
 ## Layout
 
 | Crate | Role |

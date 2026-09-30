@@ -83,6 +83,8 @@ pub enum Command {
     Launch(LaunchArgs),
     /// List running processes.
     Processes,
+    /// Serve MCP over stdio (launched by an AI client; exits when the client disconnects).
+    Mcp,
 }
 
 #[derive(Args, Clone, Default)]

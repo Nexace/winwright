@@ -16,6 +16,7 @@ winwright-capture.workspace = true
 winwright-core.workspace = true
 winwright-files.workspace = true
 winwright-input.workspace = true
+winwright-mcp.workspace = true
 winwright-overlay.workspace = true
 winwright-shell.workspace = true
 winwright-uia.workspace = true
