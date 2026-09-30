@@ -683,6 +683,8 @@ dependencies = [
  "tracing-subscriber",
  "winwright-contracts",
  "winwright-core",
+ "winwright-input",
+ "winwright-test-support",
  "winwright-uia",
  "winwright-win32",
 ]

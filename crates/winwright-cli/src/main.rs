@@ -41,7 +41,8 @@ fn build_engine(config: Config) -> Result<Engine, WinwrightError> {
         config,
         Arc::new(winwright_win32::Win32Windows),
         Arc::new(uia),
-    ))
+    )
+    .with_input(Arc::new(winwright_input::SendInputBackend::new())))
 }
 
 fn print_windows(windows: &[WindowInfo]) {
