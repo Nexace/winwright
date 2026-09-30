@@ -25,6 +25,7 @@
 //! and label sizes scale with the target monitor's DPI. The window is clipped to the monitor
 //! that shows most of the rect; a rect on no monitor renders nothing.
 
+mod confirm;
 mod keys;
 mod layout;
 mod paint;
@@ -44,6 +45,8 @@ use winwright_contracts::overlay::{OverlayId, OverlayRequest, OverlayService};
 use winwright_contracts::{WinwrightError, WinwrightResult};
 
 use crate::thread::{Callback, Command, Signals, WM_APP_WAKE};
+
+pub use crate::confirm::{NativeConfirmer, dialog_text};
 
 /// Default emergency-stop chord (spec §22). The engine binds it to `cancel_all`.
 pub const EMERGENCY_STOP_DEFAULT: &str = "Ctrl+Alt+Escape";

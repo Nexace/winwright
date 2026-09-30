@@ -15,6 +15,41 @@ use winwright_contracts::element::{ControlRole, ExpandState, ToggleState, UiPatt
 use winwright_contracts::geometry::{PhysicalPoint, PhysicalRect};
 use winwright_contracts::input::{InputBackend, Key, MouseButton, validate_chord};
 use winwright_contracts::security::{ActionRisk, Capability, ProposedAction, TargetSummary};
+
+/// One-line description shown in confirmation dialogs (never includes typed text).
+fn describe(action: &DesktopAction, target: Option<&Resolved>) -> String {
+    let on = target.map_or_else(|| "the focused window".to_owned(), Resolved::label);
+    match action {
+        DesktopAction::Click { click_count, .. } if *click_count > 1 => {
+            format!("Double-click {on}")
+        }
+        DesktopAction::Click { .. } => format!("Click {on}"),
+        DesktopAction::Fill { text, .. } => {
+            format!("Enter {} characters into {on}", text.chars().count())
+        }
+        DesktopAction::TypeText { text, .. } => {
+            format!("Type {} characters into {on}", text.chars().count())
+        }
+        DesktopAction::Focus { .. } => format!("Focus {on}"),
+        DesktopAction::Select {
+            option: Some(o), ..
+        } => format!("Select {o:?} in {on}"),
+        DesktopAction::Select { option: None, .. } => format!("Select {on}"),
+        DesktopAction::Check { .. } => format!("Check {on}"),
+        DesktopAction::Uncheck { .. } => format!("Uncheck {on}"),
+        DesktopAction::Toggle { .. } => format!("Toggle {on}"),
+        DesktopAction::Expand { .. } => format!("Expand {on}"),
+        DesktopAction::Collapse { .. } => format!("Collapse {on}"),
+        DesktopAction::Scroll { .. } | DesktopAction::ScrollIntoView { .. } => {
+            format!("Scroll {on}")
+        }
+        DesktopAction::Press { keys, .. } => {
+            let chord: Vec<String> = keys.iter().map(ToString::to_string).collect();
+            format!("Press {} in {on}", chord.join("+"))
+        }
+        DesktopAction::ReadText { .. } => format!("Read text of {on}"),
+    }
+}
 use winwright_contracts::{WinwrightError, WinwrightResult};
 use winwright_security::{classify_activation, is_sensitive, redacted_value};
 
@@ -250,11 +285,41 @@ impl Engine {
         }
     }
 
-    /// Execute an element-level action (spec §14).
+    /// Execute an element-level action (spec §14). State-changing actions are audited.
     pub async fn execute(
         &self,
         session: &Session,
         action: DesktopAction,
+    ) -> WinwrightResult<ActionResult> {
+        let started = Instant::now();
+        let tool = format!("desktop_{}", action.name());
+        let mutating = !matches!(action, DesktopAction::ReadText { .. });
+        let mut target = None;
+        let mut confirmed = false;
+        let result = self
+            .execute_inner(session, action, &mut target, &mut confirmed)
+            .await;
+        if mutating {
+            let method = result.as_ref().ok().map(|r| r.method);
+            self.record(
+                session,
+                &tool,
+                target.as_ref(),
+                method,
+                &result,
+                confirmed,
+                started,
+            );
+        }
+        result
+    }
+
+    async fn execute_inner(
+        &self,
+        session: &Session,
+        action: DesktopAction,
+        audit_target: &mut Option<TargetSummary>,
+        confirmed: &mut bool,
     ) -> WinwrightResult<ActionResult> {
         let started = Instant::now();
         let ctx = session.operation(self.timeout())?;
@@ -267,7 +332,41 @@ impl Engine {
         {
             return Err(WinwrightError::SensitiveField { element: r.label() });
         }
-        self.authorize(self.proposed(&action, resolved.as_ref()))?;
+        if let Some(r) = &resolved {
+            self.guard_self(r.props.process_id, &r.label())?;
+        }
+        if resolved.is_none()
+            && matches!(
+                action,
+                DesktopAction::Press { .. } | DesktopAction::TypeText { .. }
+            )
+        {
+            // Keys go to the foreground window: never let them answer Winwright's own dialogs.
+            if let Some(fg) = self.windows.foreground_window()?
+                && (fg.process_id == std::process::id()
+                    || fg.process_name.eq_ignore_ascii_case("winwright.exe"))
+            {
+                return Err(WinwrightError::ActionBlocked {
+                    reason: "keyboard input to Winwright's own windows is blocked".into(),
+                });
+            }
+        }
+        let mutating = !matches!(action, DesktopAction::ReadText { .. });
+        let mut lease = if mutating {
+            Some(self.lease.try_acquire(&session.id)?)
+        } else {
+            None
+        };
+        let proposed = self.proposed(&action, resolved.as_ref());
+        *audit_target = proposed.target.clone();
+        let summary = describe(&action, resolved.as_ref());
+        *confirmed = self.permit(session, proposed, summary, &mut lease).await?;
+        // A confirmation may have taken a while: give the action its own full deadline.
+        let ctx = if *confirmed {
+            session.operation(self.timeout())?
+        } else {
+            ctx
+        };
         if let Some(r) = &resolved
             && self.windows.is_more_privileged(r.props.process_id)
             && !matches!(action, DesktopAction::ReadText { .. })
@@ -280,12 +379,6 @@ impl Engine {
                 ),
             });
         }
-        let mutating = !matches!(action, DesktopAction::ReadText { .. });
-        let _lease = if mutating {
-            Some(self.lease.try_acquire(&session.id)?)
-        } else {
-            None
-        };
         let before_windows = if mutating {
             self.window_set()
         } else {
@@ -1068,16 +1161,49 @@ impl Engine {
         }
     }
 
-    /// Top-level window control (spec §17).
+    /// Top-level window control (spec §17). Audited.
     pub async fn window_action(
         &self,
         session: &Session,
         action: WindowAction,
     ) -> WinwrightResult<ActionResult> {
         let started = Instant::now();
+        let tool = action.name();
+        let mut target = None;
+        let mut confirmed = false;
+        let result = self
+            .window_action_inner(session, action, &mut target, &mut confirmed)
+            .await;
+        let method = result.as_ref().ok().map(|r| r.method);
+        self.record(
+            session,
+            tool,
+            target.as_ref(),
+            method,
+            &result,
+            confirmed,
+            started,
+        );
+        result
+    }
+
+    async fn window_action_inner(
+        &self,
+        session: &Session,
+        action: WindowAction,
+        audit_target: &mut Option<TargetSummary>,
+        confirmed: &mut bool,
+    ) -> WinwrightResult<ActionResult> {
+        let started = Instant::now();
         let ctx = session.operation(self.timeout())?;
         let window = self.find_window(action.selector())?;
-        self.authorize(ProposedAction {
+        let label = window_label(&window.title, &window.process_name);
+        self.guard_self(window.process_id, &format!("Window {label}"))?;
+        if self.windows.is_more_privileged(window.process_id) {
+            return Err(WinwrightError::UipiBlocked { target: label });
+        }
+        let mut lease = Some(self.lease.try_acquire(&session.id)?);
+        let proposed = ProposedAction {
             tool: action.name().into(),
             capability: Capability::WindowControl,
             risk: ActionRisk::Normal,
@@ -1087,13 +1213,20 @@ impl Engine {
                 role: Some("Window".into()),
                 name: None,
             }),
-        })?;
-        if self.windows.is_more_privileged(window.process_id) {
-            return Err(WinwrightError::UipiBlocked {
-                target: window_label(&window.title, &window.process_name),
-            });
-        }
-        let _lease = self.lease.try_acquire(&session.id)?;
+        };
+        *audit_target = proposed.target.clone();
+        let verb = action
+            .name()
+            .trim_start_matches("window_")
+            .replace('_', " ");
+        *confirmed = self
+            .permit(
+                session,
+                proposed,
+                format!("{verb} window {label}"),
+                &mut lease,
+            )
+            .await?;
         let hwnd = window.hwnd;
         let mut warnings = Vec::new();
         let expected_bounds = match &action {

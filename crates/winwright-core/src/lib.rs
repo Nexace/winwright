@@ -1,6 +1,7 @@
 //! Winwright core runtime. Transport-agnostic: MCP, the local API, and the CLI all call in here.
 
 mod actions;
+pub mod audit;
 pub mod config;
 pub mod diff;
 pub mod engine;

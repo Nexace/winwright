@@ -83,6 +83,10 @@ pub struct SecurityConfig {
     pub allow_shell: bool,
     pub allow_powershell: bool,
     pub allow_clipboard_secrets: bool,
+    /// Local audit log of state-changing actions (never typed text or values).
+    pub audit: bool,
+    /// Seconds an unanswered confirmation dialog waits before denying.
+    pub confirmation_timeout_seconds: u64,
 }
 
 impl Default for SecurityConfig {
@@ -93,6 +97,8 @@ impl Default for SecurityConfig {
             allow_shell: false,
             allow_powershell: false,
             allow_clipboard_secrets: false,
+            audit: true,
+            confirmation_timeout_seconds: 60,
         }
     }
 }

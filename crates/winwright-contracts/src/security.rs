@@ -75,3 +75,22 @@ pub struct PolicyVerdict {
     pub decision: PermissionDecision,
     pub reason: String,
 }
+
+/// What the user is asked to approve. Shown verbatim in trusted local UI.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConfirmationPrompt {
+    /// e.g. `Click Button "Submit"`.
+    pub summary: String,
+    pub target: Option<TargetSummary>,
+    /// Why confirmation is needed (from the policy verdict).
+    pub reason: String,
+    /// Unanswered prompts are denied after this long.
+    pub timeout_ms: u64,
+}
+
+/// Trusted local approval (spec §66). Only the human at the machine can answer; a model can
+/// never satisfy a confirmation, and implementations must default to "deny".
+pub trait Confirmer: Send + Sync {
+    fn confirm<'a>(&'a self, prompt: ConfirmationPrompt)
+    -> crate::backend::BackendFuture<'a, bool>;
+}

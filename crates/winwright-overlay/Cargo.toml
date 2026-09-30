@@ -8,6 +8,7 @@ publish.workspace = true
 
 [dependencies]
 winwright-contracts.workspace = true
+tokio.workspace = true
 tracing.workspace = true
 windows = { workspace = true, features = [
     "Win32_Foundation",
@@ -17,6 +18,10 @@ windows = { workspace = true, features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
+winwright-win32.workspace = true
 
 [lints]
 workspace = true

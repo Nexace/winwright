@@ -56,7 +56,10 @@ impl Client {
         self.send(json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}));
         loop {
             let mut line = String::new();
-            assert!(self.stdout.read_line(&mut line).unwrap() > 0, "server closed stdout");
+            assert!(
+                self.stdout.read_line(&mut line).unwrap() > 0,
+                "server closed stdout"
+            );
             let msg: Value = serde_json::from_str(&line)
                 .unwrap_or_else(|e| panic!("stdout must carry only JSON-RPC frames ({e}): {line}"));
             if msg["id"] == json!(id) {
@@ -108,7 +111,11 @@ fn lists_tools_with_object_schemas() {
     ] {
         assert!(names.contains(&expected), "missing {expected}: {names:?}");
     }
-    assert!(names.len() <= 25, "keep the tool surface small: {}", names.len());
+    assert!(
+        names.len() <= 25,
+        "keep the tool surface small: {}",
+        names.len()
+    );
     for t in tools {
         assert_eq!(t["inputSchema"]["type"], "object", "{}", t["name"]);
         assert!(t["description"].as_str().is_some_and(|d| !d.is_empty()));
@@ -127,7 +134,10 @@ fn model_style_session_on_the_fixture() {
     assert!(snap.starts_with("snapshot s_1"), "{snap}");
     assert!(snap.contains("BUTTON \"Target\""), "{snap}");
 
-    let (err, found) = c.call("desktop_find", json!({"role": "Button", "name": "Target", "window": window}));
+    let (err, found) = c.call(
+        "desktop_find",
+        json!({"role": "Button", "name": "Target", "window": window}),
+    );
     assert!(!err, "{found}");
     let target_ref = found
         .lines()
@@ -147,14 +157,20 @@ fn model_style_session_on_the_fixture() {
     );
     assert!(!err, "{waited}");
 
-    let (err, filled) = c.call("desktop_fill", json!({"label": "Name", "role": "Edit", "value": "Ada", "window": window}));
+    let (err, filled) = c.call(
+        "desktop_fill",
+        json!({"label": "Name", "role": "Edit", "value": "Ada", "window": window}),
+    );
     assert!(!err, "{filled}");
     assert!(filled.contains("\"verified\":true"), "{filled}");
 
-    // Policy is enforced through MCP exactly as in the engine.
-    let (err, blocked) = c.call("desktop_click", json!({"role": "Button", "name": "Submit", "window": window}));
+    // Policy is enforced through MCP exactly as in the engine (shell is off by default).
+    let (err, blocked) = c.call(
+        "shell_execute",
+        json!({"program": "cmd.exe", "args": ["/c", "echo", "hi"]}),
+    );
     assert!(err, "{blocked}");
-    assert!(blocked.contains("CONFIRMATION_REQUIRED"), "{blocked}");
+    assert!(blocked.contains("ACTION_BLOCKED"), "{blocked}");
 
     let (err, diff) = c.call("desktop_snapshot", json!({"window": window, "diff": true}));
     assert!(!err, "{diff}");

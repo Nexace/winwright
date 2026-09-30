@@ -85,6 +85,18 @@ pub enum Command {
     Processes,
     /// Serve MCP over stdio (launched by an AI client; exits when the client disconnects).
     Mcp,
+    /// Show (or clear) the local audit log of actions Winwright performed.
+    Audit(AuditArgs),
+}
+
+#[derive(Args)]
+pub struct AuditArgs {
+    /// How many recent events to show.
+    #[arg(long, default_value_t = 50)]
+    pub last: usize,
+    /// Delete the audit log.
+    #[arg(long)]
+    pub clear: bool,
 }
 
 #[derive(Args, Clone, Default)]

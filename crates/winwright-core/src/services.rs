@@ -11,10 +11,54 @@ use winwright_contracts::system::{
 };
 use winwright_contracts::{WinwrightError, WinwrightResult};
 
+use std::time::Instant;
+
 use crate::engine::Engine;
 use crate::session::Session;
 
 const DEFAULT_HIGHLIGHT_MS: u64 = 8_000;
+
+/// Dialog/audit description of a file operation. Paths are shown; contents never are.
+fn describe_file_op(op: &FileOperation) -> String {
+    let overwrite = |o: &bool| if *o { " (overwrite)" } else { "" };
+    match op {
+        FileOperation::List { path, .. } => format!("List {}", path.display()),
+        FileOperation::Metadata { path } => format!("Read metadata of {}", path.display()),
+        FileOperation::Copy {
+            from,
+            to,
+            overwrite: o,
+        } => {
+            format!(
+                "Copy {} to {}{}",
+                from.display(),
+                to.display(),
+                overwrite(o)
+            )
+        }
+        FileOperation::Move {
+            from,
+            to,
+            overwrite: o,
+        } => {
+            format!(
+                "Move {} to {}{}",
+                from.display(),
+                to.display(),
+                overwrite(o)
+            )
+        }
+        FileOperation::Rename { path, new_name } => {
+            format!("Rename {} to {new_name}", path.display())
+        }
+        FileOperation::Delete { path } => format!("Move {} to the Recycle Bin", path.display()),
+        FileOperation::CreateDirectory { path } => format!("Create folder {}", path.display()),
+        FileOperation::Search { root, pattern, .. } => {
+            format!("Search {} for {pattern}", root.display())
+        }
+        FileOperation::KnownFolder { name } => format!("Resolve folder {name}"),
+    }
+}
 const DEFAULT_OVERLAY_COLOR: u32 = 0x00E0_4A2A;
 
 fn unavailable(backend: &str) -> WinwrightError {
@@ -143,18 +187,37 @@ impl Engine {
         session: &Session,
         request: LaunchRequest,
     ) -> WinwrightResult<LaunchResult> {
-        self.authorize(proposed(
+        let started = Instant::now();
+        let action = proposed(
             "app_launch",
             Capability::ProcessLaunch,
             ActionRisk::Normal,
             Some(request.app.clone()),
-        ))?;
-        let processes = self
-            .processes
-            .as_deref()
-            .ok_or_else(|| unavailable("process"))?;
-        let ctx = session.operation(self.timeout())?;
-        processes.launch(request, &ctx).await
+        );
+        let target = action.target.clone();
+        let summary = format!("Launch {}", request.app);
+        let mut lease = None;
+        let mut confirmed = false;
+        let result = async {
+            confirmed = self.permit(session, action, summary, &mut lease).await?;
+            let processes = self
+                .processes
+                .as_deref()
+                .ok_or_else(|| unavailable("process"))?;
+            let ctx = session.operation(self.timeout())?;
+            processes.launch(request, &ctx).await
+        }
+        .await;
+        self.record(
+            session,
+            "app_launch",
+            target.as_ref(),
+            None,
+            &result,
+            confirmed,
+            started,
+        );
+        result
     }
 
     pub fn process_list(&self) -> WinwrightResult<Vec<ProcessInfo>> {
@@ -189,10 +252,40 @@ impl Engine {
             }
             FileOperation::Delete { .. } => (Capability::FileDelete, ActionRisk::Destructive),
         };
-        self.authorize(proposed("filesystem_operation", capability, risk, None))?;
-        let files = self.files.as_deref().ok_or_else(|| unavailable("files"))?;
-        let ctx = session.operation(self.timeout())?;
-        files.execute(op, &ctx).await
+        let summary = describe_file_op(&op);
+        let action = proposed(
+            "filesystem_operation",
+            capability,
+            risk,
+            Some(summary.clone()),
+        );
+        if risk == ActionRisk::ReadOnly {
+            self.authorize(action)?;
+            let files = self.files.as_deref().ok_or_else(|| unavailable("files"))?;
+            let ctx = session.operation(self.timeout())?;
+            return files.execute(op, &ctx).await;
+        }
+        let started = Instant::now();
+        let target = action.target.clone();
+        let mut lease = None;
+        let mut confirmed = false;
+        let result = async {
+            confirmed = self.permit(session, action, summary, &mut lease).await?;
+            let files = self.files.as_deref().ok_or_else(|| unavailable("files"))?;
+            let ctx = session.operation(self.timeout())?;
+            files.execute(op, &ctx).await
+        }
+        .await;
+        self.record(
+            session,
+            "filesystem_operation",
+            target.as_ref(),
+            None,
+            &result,
+            confirmed,
+            started,
+        );
+        result
     }
 
     /// Typed process execution. Disabled unless the user enables `security.allowShell`, and
@@ -202,18 +295,41 @@ impl Engine {
         session: &Session,
         request: ExecRequest,
     ) -> WinwrightResult<ExecResult> {
-        self.authorize(proposed(
+        let started = Instant::now();
+        let action = proposed(
             "shell_execute",
             Capability::Shell,
             ActionRisk::Sensitive,
             Some(request.program.clone()),
-        ))?;
-        let processes = self
-            .processes
-            .as_deref()
-            .ok_or_else(|| unavailable("process"))?;
-        let ctx = session.operation(self.timeout())?;
-        processes.exec(request, &ctx).await
+        );
+        let target = action.target.clone();
+        let summary = format!(
+            "Run {} with {} argument(s)",
+            request.program,
+            request.args.len()
+        );
+        let mut lease = None;
+        let mut confirmed = false;
+        let result = async {
+            confirmed = self.permit(session, action, summary, &mut lease).await?;
+            let processes = self
+                .processes
+                .as_deref()
+                .ok_or_else(|| unavailable("process"))?;
+            let ctx = session.operation(self.timeout())?;
+            processes.exec(request, &ctx).await
+        }
+        .await;
+        self.record(
+            session,
+            "shell_execute",
+            target.as_ref(),
+            None,
+            &result,
+            confirmed,
+            started,
+        );
+        result
     }
 
     /// Emergency stop (spec §22, §44): cancel every session and queued operation, release any

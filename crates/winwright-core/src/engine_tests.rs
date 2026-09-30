@@ -1434,3 +1434,183 @@ async fn diff_snapshot_sends_only_changes() {
     );
     assert_eq!(diff.lines().count(), 2, "only the checkbox changed: {diff}");
 }
+
+// ---------------------------------------------------------------- phase 8: confirmations, audit
+
+struct FakeConfirmer {
+    answer: bool,
+    prompts: Mutex<Vec<winwright_contracts::security::ConfirmationPrompt>>,
+}
+
+impl winwright_contracts::security::Confirmer for FakeConfirmer {
+    fn confirm<'a>(
+        &'a self,
+        prompt: winwright_contracts::security::ConfirmationPrompt,
+    ) -> BackendFuture<'a, bool> {
+        self.prompts.lock().unwrap().push(prompt);
+        let answer = self.answer;
+        Box::pin(async move { Ok(answer) })
+    }
+}
+
+fn confirmer(answer: bool) -> Arc<FakeConfirmer> {
+    Arc::new(FakeConfirmer {
+        answer,
+        prompts: Mutex::new(Vec::new()),
+    })
+}
+
+#[tokio::test]
+async fn approved_confirmation_runs_the_action_once() {
+    let fake = Fake::new();
+    let yes = confirmer(true);
+    let engine = engine(&fake).with_confirmer(yes.clone());
+    let session = engine.session(&sid(), "test").unwrap();
+    let r = engine
+        .execute(&session, click(by("Button", "Submit")))
+        .await
+        .unwrap();
+    assert_eq!(r.method, ActionMethod::InvokePattern);
+    assert_eq!(fake.s().els[&STATUS].name, "Submitted");
+    let prompts = yes.prompts.lock().unwrap();
+    assert_eq!(prompts.len(), 1);
+    assert_eq!(prompts[0].summary, "Click Button \"Submit\"");
+    assert!(prompts[0].reason.contains("send, submit"));
+}
+
+#[tokio::test]
+async fn declined_confirmation_blocks_and_nothing_runs() {
+    let fake = Fake::new();
+    let engine = engine(&fake).with_confirmer(confirmer(false));
+    let session = engine.session(&sid(), "test").unwrap();
+    let err = engine
+        .execute(&session, click(by("Button", "Submit")))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code().as_str(), "ACTION_BLOCKED");
+    assert!(err.to_string().contains("declined"), "{err}");
+    assert!(fake.s().executed.is_empty());
+    assert!(
+        engine.lease().holder().is_none(),
+        "lease released after the dialog"
+    );
+}
+
+#[tokio::test]
+async fn fill_prompt_never_contains_the_typed_text() {
+    let fake = Fake::new();
+    let yes = confirmer(true);
+    let engine = engine(&fake).with_confirmer(yes.clone());
+    let session = engine.session(&sid(), "test").unwrap();
+    engine
+        .execute(
+            &session,
+            DesktopAction::Fill {
+                target: by("Edit", "Password:"),
+                text: "hunter2".into(),
+                clear: true,
+            },
+        )
+        .await
+        .unwrap();
+    let prompts = yes.prompts.lock().unwrap();
+    assert_eq!(
+        prompts[0].summary,
+        "Enter 7 characters into Edit \"Password:\""
+    );
+    assert!(!format!("{:?}", prompts[0]).contains("hunter2"));
+}
+
+#[tokio::test]
+async fn winwright_never_automates_its_own_windows() {
+    let fake = Fake::new();
+    let mut own = window(99, "Winwright: confirm action", "winwright.exe", true);
+    own.process_id = std::process::id();
+    {
+        let mut s = fake.s();
+        for w in &mut s.windows {
+            w.foreground = false;
+        }
+        s.windows.push(own);
+    }
+    let engine = engine(&fake).with_input(Arc::new(FakeInput::default()));
+    let session = engine.session(&sid(), "test").unwrap();
+    let err = engine
+        .window_action(
+            &session,
+            WindowAction::Close {
+                window: WindowSelector {
+                    hwnd: Some(99),
+                    ..Default::default()
+                },
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.code().as_str(), "ACTION_BLOCKED");
+    // Keys go to the foreground window, which is Winwright's dialog here.
+    let err = engine
+        .execute(
+            &session,
+            DesktopAction::Press {
+                target: None,
+                keys: vec![Key::Enter],
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.code().as_str(), "ACTION_BLOCKED");
+    assert!(err.to_string().contains("Winwright's own windows"), "{err}");
+}
+
+#[tokio::test]
+async fn audit_log_records_outcomes_without_text() {
+    let fake = Fake::new();
+    let dir = std::env::temp_dir().join(format!("winwright-engine-audit-{}", std::process::id()));
+    let path = dir.join("audit.jsonl");
+    let engine =
+        engine(&fake)
+            .with_confirmer(confirmer(false))
+            .with_audit(crate::audit::AuditLog::new(
+                path.clone(),
+                crate::audit::DEFAULT_MAX_BYTES,
+            ));
+    let session = engine.session(&sid(), "test").unwrap();
+    engine
+        .execute(
+            &session,
+            DesktopAction::Fill {
+                target: by("Edit", "Name:"),
+                text: "top secret words".into(),
+                clear: true,
+            },
+        )
+        .await
+        .unwrap();
+    let _ = engine
+        .execute(&session, click(by("Button", "Submit")))
+        .await;
+    // Reads are not audited.
+    engine
+        .execute(
+            &session,
+            DesktopAction::ReadText {
+                target: by("Document", "Notes"),
+                max_chars: 10,
+            },
+        )
+        .await
+        .unwrap();
+    let lines = crate::audit::AuditLog::tail(&path, 10).unwrap();
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert!(
+        lines[0].contains("\"tool\":\"desktop_fill\"") && lines[0].contains("\"result\":\"ok\"")
+    );
+    assert!(lines[0].contains("\"method\":\"ValuePattern\""));
+    assert!(lines[1].contains("\"result\":\"ACTION_BLOCKED\""));
+    assert!(
+        !lines.join("\n").contains("secret"),
+        "typed text never reaches the log"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -44,14 +44,29 @@ struct Extras {
     system: bool,
 }
 
+/// Confirmations always go to the person at this machine; audit follows config.
+fn with_safety(engine: Engine) -> Engine {
+    let audit = engine.config().security.audit;
+    let engine = engine.with_confirmer(Arc::new(winwright_overlay::NativeConfirmer::new()));
+    match (audit, winwright_core::audit::AuditLog::default_path()) {
+        (true, Some(path)) => engine.with_audit(winwright_core::audit::AuditLog::new(
+            path,
+            winwright_core::audit::DEFAULT_MAX_BYTES,
+        )),
+        _ => engine,
+    }
+}
+
 fn build_engine(config: Config, extras: Extras) -> Result<Engine, WinwrightError> {
     let uia = winwright_uia::UiaBackend::start()?;
-    let mut engine = Engine::new(
-        config,
-        Arc::new(winwright_win32::Win32Windows),
-        Arc::new(uia),
-    )
-    .with_input(Arc::new(winwright_input::SendInputBackend::new()));
+    let mut engine = with_safety(
+        Engine::new(
+            config,
+            Arc::new(winwright_win32::Win32Windows),
+            Arc::new(uia),
+        )
+        .with_input(Arc::new(winwright_input::SendInputBackend::new())),
+    );
     if extras.capture {
         engine = engine.with_capture(Arc::new(winwright_capture::WgcCapture::start()?));
     }
@@ -180,11 +195,11 @@ async fn serve_mcp(config: Config) -> Result<(), WinwrightError> {
     let native = winwright_overlay::NativeUi::start()?;
     let uia = winwright_uia::UiaBackend::start()?;
     let engine = Arc::new(
-        Engine::new(
+        with_safety(Engine::new(
             config,
             Arc::new(winwright_win32::Win32Windows),
             Arc::new(uia),
-        )
+        ))
         .with_input(Arc::new(winwright_input::SendInputBackend::new()))
         .with_capture(Arc::new(lazy::LazyCapture::default()))
         .with_overlay(Arc::new(native.overlay))
@@ -256,6 +271,26 @@ async fn run(cli: Cli) -> Result<(), WinwrightError> {
             return Ok(());
         }
         Command::Mcp => return serve_mcp(config).await,
+        Command::Audit(a) => {
+            let Some(path) = winwright_core::audit::AuditLog::default_path() else {
+                return Err(WinwrightError::invalid("LOCALAPPDATA is not set"));
+            };
+            if a.clear {
+                winwright_core::audit::AuditLog::clear(&path)
+                    .map_err(|e| WinwrightError::invalid(format!("cannot clear audit log: {e}")))?;
+                println!("cleared {}", path.display());
+            } else {
+                let lines = winwright_core::audit::AuditLog::tail(&path, a.last)
+                    .map_err(|e| WinwrightError::invalid(format!("cannot read audit log: {e}")))?;
+                if lines.is_empty() {
+                    eprintln!("no audit events ({})", path.display());
+                }
+                for line in lines {
+                    println!("{line}");
+                }
+            }
+            return Ok(());
+        }
         other => other,
     };
 
@@ -267,7 +302,9 @@ async fn run(cli: Cli) -> Result<(), WinwrightError> {
     };
     let engine = build_engine(config, extras)?;
     match command {
-        Command::Version | Command::Config | Command::Mcp => unreachable!("handled above"),
+        Command::Version | Command::Config | Command::Mcp | Command::Audit(_) => {
+            unreachable!("handled above")
+        }
         Command::Windows => {
             let windows = engine.list_windows()?;
             if json {

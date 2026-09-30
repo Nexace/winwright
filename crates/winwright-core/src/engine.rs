@@ -4,6 +4,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use winwright_contracts::action::ActionMethod;
 use winwright_contracts::backend::{
     ElementIdentity, InspectTarget, OperationContext, TreeRoot, UiAutomationBackend, UiTree,
     UiTreeRequest, WindowBackend,
@@ -15,7 +16,10 @@ use winwright_contracts::geometry::PhysicalPoint;
 use winwright_contracts::ids::{SessionId, format_element_ref, format_generation};
 use winwright_contracts::input::InputBackend;
 use winwright_contracts::overlay::OverlayService;
-use winwright_contracts::security::{ActionRisk, Capability, PermissionDecision, ProposedAction};
+use winwright_contracts::security::{
+    ActionRisk, Capability, ConfirmationPrompt, Confirmer, PermissionDecision, ProposedAction,
+    TargetSummary,
+};
 use winwright_contracts::snapshot::{
     DesktopSnapshot, SnapshotRequest, SnapshotTarget, WindowSummary,
 };
@@ -24,7 +28,8 @@ use winwright_contracts::window::{WindowInfo, WindowSelector};
 use winwright_contracts::{WinwrightError, WinwrightResult};
 use winwright_security::Policy;
 
-use crate::lease::ActionLease;
+use crate::audit::{AuditEvent, AuditLog, now_ms};
+use crate::lease::{ActionLease, LeaseGuard};
 use crate::refs::NewRef;
 use crate::session::{Session, SessionRegistry};
 use crate::snapshot::{Compressor, element_info, fingerprint_step};
@@ -78,6 +83,8 @@ pub struct Engine {
     pub(crate) overlay: Option<Arc<dyn OverlayService>>,
     pub(crate) processes: Option<Arc<dyn ProcessService>>,
     pub(crate) files: Option<Arc<dyn FileService>>,
+    pub(crate) confirmer: Option<Arc<dyn Confirmer>>,
+    pub(crate) audit: Option<Arc<AuditLog>>,
     pub(crate) sessions: SessionRegistry,
     pub(crate) lease: ActionLease,
 }
@@ -98,6 +105,8 @@ impl Engine {
             overlay: None,
             processes: None,
             files: None,
+            confirmer: None,
+            audit: None,
             sessions: SessionRegistry::default(),
             lease: ActionLease::default(),
         }
@@ -125,6 +134,17 @@ impl Engine {
 
     pub fn with_files(mut self, files: Arc<dyn FileService>) -> Self {
         self.files = Some(files);
+        self
+    }
+
+    /// Trusted local approval UI. Without one, confirmations fail with `CONFIRMATION_REQUIRED`.
+    pub fn with_confirmer(mut self, confirmer: Arc<dyn Confirmer>) -> Self {
+        self.confirmer = Some(confirmer);
+        self
+    }
+
+    pub fn with_audit(mut self, audit: AuditLog) -> Self {
+        self.audit = Some(Arc::new(audit));
         self
     }
 
@@ -163,6 +183,101 @@ impl Engine {
                 reason: verdict.reason,
             }),
         }
+    }
+
+    /// Policy check for state-changing calls. `Confirm` asks the human through the trusted
+    /// confirmer while holding the action lease, so nothing (not even this engine) can act on
+    /// the desktop, or press Enter on the dialog, until the user decides. Returns whether the
+    /// user approved a confirmation.
+    pub(crate) async fn permit(
+        &self,
+        session: &Session,
+        action: ProposedAction,
+        summary: String,
+        lease: &mut Option<LeaseGuard>,
+    ) -> WinwrightResult<bool> {
+        let verdict = self.policy.evaluate(&action);
+        match verdict.decision {
+            PermissionDecision::Allow => Ok(false),
+            PermissionDecision::Deny => Err(WinwrightError::ActionBlocked {
+                reason: verdict.reason,
+            }),
+            PermissionDecision::Confirm => {
+                let Some(confirmer) = self.confirmer.as_deref() else {
+                    return Err(WinwrightError::ConfirmationRequired {
+                        reason: format!("{} ({summary})", verdict.reason),
+                    });
+                };
+                if lease.is_none() {
+                    *lease = Some(self.lease.try_acquire(&session.id)?);
+                }
+                let prompt = ConfirmationPrompt {
+                    summary: summary.clone(),
+                    target: action.target,
+                    reason: verdict.reason,
+                    timeout_ms: self
+                        .config
+                        .security
+                        .confirmation_timeout_seconds
+                        .clamp(5, 600)
+                        * 1000,
+                };
+                let cancel = session.operation(Duration::from_secs(600))?.cancel;
+                let approved = tokio::select! {
+                    answer = confirmer.confirm(prompt) => answer?,
+                    () = cancel.cancelled() => return Err(WinwrightError::Cancelled),
+                };
+                if approved {
+                    tracing::info!(%summary, "user approved");
+                    Ok(true)
+                } else {
+                    Err(WinwrightError::ActionBlocked {
+                        reason: format!("the user declined: {summary}"),
+                    })
+                }
+            }
+        }
+    }
+
+    /// Refuses to touch Winwright's own windows (its confirmation dialogs above all).
+    pub(crate) fn guard_self(&self, process_id: u32, what: &str) -> WinwrightResult<()> {
+        if process_id == std::process::id() {
+            return Err(WinwrightError::ActionBlocked {
+                reason: format!("{what} belongs to Winwright itself and cannot be automated"),
+            });
+        }
+        Ok(())
+    }
+
+    /// Records one state-changing call in the local audit log (if enabled).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record<T>(
+        &self,
+        session: &Session,
+        tool: &str,
+        target: Option<&TargetSummary>,
+        method: Option<ActionMethod>,
+        result: &WinwrightResult<T>,
+        confirmation: bool,
+        started: Instant,
+    ) {
+        let Some(audit) = self.audit.as_deref() else {
+            return;
+        };
+        let code = match result {
+            Ok(_) => "ok",
+            Err(e) => e.code().as_str(),
+        };
+        audit.record(&AuditEvent {
+            timestamp_ms: now_ms(),
+            session: session.id.as_str(),
+            tool,
+            target,
+            method,
+            result: code,
+            confirmation,
+            duration_ms: started.elapsed().as_millis() as u64,
+        });
     }
 
     pub(crate) fn observe(&self, tool: &str) -> WinwrightResult<()> {
