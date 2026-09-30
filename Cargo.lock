@@ -700,10 +700,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "winwright-fixture-canvas"
+version = "0.1.0"
+dependencies = [
+ "windows",
+]
+
+[[package]]
+name = "winwright-fixture-win32"
+version = "0.1.0"
+dependencies = [
+ "windows",
+]
+
+[[package]]
 name = "winwright-security"
 version = "0.1.0"
 dependencies = [
  "winwright-contracts",
+]
+
+[[package]]
+name = "winwright-test-support"
+version = "0.1.0"
+dependencies = [
+ "windows",
 ]
 
 [[package]]
