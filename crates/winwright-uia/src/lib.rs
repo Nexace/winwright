@@ -9,12 +9,13 @@ mod patterns;
 mod props;
 mod worker;
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 
 use tokio::sync::{mpsc, oneshot};
 use winwright_contracts::backend::{
-    BackendFuture, ElementKey, InspectTarget, OperationContext, UiActionOutcome,
+    BackendFuture, ElementKey, EventSubscription, InspectTarget, OperationContext, UiActionOutcome,
     UiAutomationBackend, UiInspection, UiPatternAction, UiProps, UiTree, UiTreeRequest,
 };
 use winwright_contracts::{WinwrightError, WinwrightResult};
@@ -29,6 +30,7 @@ pub struct UiaBackend {
     tx: mpsc::Sender<Command>,
     epoch: u64,
     events: tokio::sync::watch::Receiver<u64>,
+    listeners: Arc<AtomicUsize>,
 }
 
 fn unavailable() -> WinwrightError {
@@ -45,16 +47,23 @@ impl UiaBackend {
         let (tx, rx) = mpsc::channel(QUEUE_DEPTH);
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let (events_tx, events) = tokio::sync::watch::channel(0u64);
+        let listeners = Arc::new(AtomicUsize::new(0));
+        let event_state = worker::EventState::new(Arc::new(events_tx), Arc::clone(&listeners));
         std::thread::Builder::new()
             .name(format!("winwright-uia-{epoch}"))
             .stack_size(8 * 1024 * 1024)
-            .spawn(move || worker::run(epoch, rx, ready_tx, events_tx))
+            .spawn(move || worker::run(epoch, rx, ready_tx, event_state))
             .map_err(|e| WinwrightError::BackendUnavailable {
                 backend: "UIAutomation".into(),
                 reason: format!("cannot spawn worker thread: {e}"),
             })?;
         ready_rx.recv().map_err(|_| unavailable())??;
-        Ok(Self { tx, epoch, events })
+        Ok(Self {
+            tx,
+            epoch,
+            events,
+            listeners,
+        })
     }
 
     async fn call<T>(
@@ -114,8 +123,16 @@ impl UiAutomationBackend for UiaBackend {
         self.epoch
     }
 
-    fn events(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
-        Some(self.events.clone())
+    fn events(&self) -> Option<EventSubscription> {
+        self.listeners.fetch_add(1, Ordering::AcqRel);
+        let _ = self.tx.try_send(Command::SyncEvents);
+        let listeners = Arc::clone(&self.listeners);
+        let tx = self.tx.clone();
+        Some(EventSubscription::new(self.events.clone(), move || {
+            listeners.fetch_sub(1, Ordering::AcqRel);
+            // A lost message is harmless: the worker reconciles after every command.
+            let _ = tx.try_send(Command::SyncEvents);
+        }))
     }
 
     fn capture_tree<'a>(

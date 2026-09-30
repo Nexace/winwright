@@ -2,13 +2,15 @@
 //! only bump a counter: no UIA calls, no locks, no allocation. Waits treat a bump as "look
 //! again", never as proof. Subscriptions are added and removed on the worker thread.
 
+use std::sync::Arc;
+
 use tokio::sync::watch;
 use windows::Win32::UI::Accessibility::*;
 use windows::core::{Interface, Ref, implement};
 
 #[implement(IUIAutomationEventHandler, IUIAutomationFocusChangedEventHandler)]
 struct Notifier {
-    tx: watch::Sender<u64>,
+    tx: Arc<watch::Sender<u64>>,
 }
 
 impl Notifier {
@@ -43,7 +45,7 @@ impl IUIAutomationFocusChangedEventHandler_Impl for Notifier_Impl {
 pub fn subscribe(
     automation: &IUIAutomation,
     root: &IUIAutomationElement,
-    tx: watch::Sender<u64>,
+    tx: Arc<watch::Sender<u64>>,
 ) -> bool {
     let notifier = Notifier { tx };
     let handler: IUIAutomationEventHandler = notifier.into();

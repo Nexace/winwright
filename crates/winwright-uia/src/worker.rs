@@ -5,6 +5,8 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::ffi::c_void;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use tokio::sync::{mpsc, oneshot};
@@ -58,6 +60,37 @@ pub enum Command {
         action: UiPatternAction,
         reply: oneshot::Sender<WinwrightResult<UiActionOutcome>>,
     },
+    /// Listener count changed; the worker reconciles after every command anyway.
+    SyncEvents,
+}
+
+/// On-demand UIA event listening: attached only while `listeners > 0`.
+pub struct EventState {
+    pub tx: Arc<tokio::sync::watch::Sender<u64>>,
+    pub listeners: Arc<AtomicUsize>,
+    subscribed: bool,
+}
+
+impl EventState {
+    pub fn new(tx: Arc<tokio::sync::watch::Sender<u64>>, listeners: Arc<AtomicUsize>) -> Self {
+        Self {
+            tx,
+            listeners,
+            subscribed: false,
+        }
+    }
+
+    fn reconcile(&mut self, automation: &IUIAutomation, root: &IUIAutomationElement) {
+        let want = self.listeners.load(Ordering::Acquire) > 0;
+        if want && !self.subscribed {
+            self.subscribed = crate::events::subscribe(automation, root, Arc::clone(&self.tx));
+            tracing::debug!(subscribed = self.subscribed, "UIA events attached");
+        } else if !want && self.subscribed {
+            crate::events::unsubscribe(automation);
+            self.subscribed = false;
+            tracing::debug!("UIA events detached");
+        }
+    }
 }
 
 struct Worker {
@@ -77,7 +110,7 @@ pub fn run(
     epoch: u64,
     mut rx: mpsc::Receiver<Command>,
     ready: std::sync::mpsc::Sender<WinwrightResult<()>>,
-    events: tokio::sync::watch::Sender<u64>,
+    mut events: EventState,
 ) {
     // Drop order matters: `_apartment` is declared first so it is dropped after `worker`.
     let _apartment = match ComApartment::init_mta() {
@@ -94,9 +127,8 @@ pub fn run(
             return;
         }
     };
-    let subscribed = crate::events::subscribe(&worker.automation, &worker.root, events);
     let _ = ready.send(Ok(()));
-    tracing::debug!(epoch, subscribed, "UIA worker ready");
+    tracing::debug!(epoch, "UIA worker ready");
 
     while let Some(command) = rx.blocking_recv() {
         match command {
@@ -130,11 +162,14 @@ pub fn run(
             Command::Execute { key, action, reply } => {
                 let _ = reply.send(worker.execute(key, &action));
             }
+            Command::SyncEvents => {}
         }
+        events.reconcile(&worker.automation, &worker.root);
     }
     tracing::debug!(epoch, slots = worker.slots.len(), "UIA worker stopping");
     // Handlers must be removed on this thread before the apartment is torn down.
-    crate::events::unsubscribe(&worker.automation);
+    events.listeners.store(0, Ordering::Release);
+    events.reconcile(&worker.automation, &worker.root);
 }
 
 fn collect_keys(node: &UiNode, out: &mut Vec<ElementKey>) {

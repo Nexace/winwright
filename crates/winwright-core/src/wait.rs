@@ -137,9 +137,9 @@ impl Engine {
             }
             let nap = interval.min(remaining);
             match events_rx.as_mut() {
-                Some(rx) => {
+                Some(sub) => {
                     tokio::select! {
-                        changed = rx.changed() => {
+                        changed = sub.rx.changed() => {
                             if changed.is_ok() {
                                 events += 1;
                             } else {

@@ -266,6 +266,32 @@ pub struct UiActionOutcome {
     pub point: Option<PhysicalPoint>,
 }
 
+/// A live UI-change counter; dropping it lets the backend stop listening.
+pub struct EventSubscription {
+    pub rx: tokio::sync::watch::Receiver<u64>,
+    release: Option<Box<dyn FnOnce() + Send + Sync>>,
+}
+
+impl EventSubscription {
+    pub fn new(
+        rx: tokio::sync::watch::Receiver<u64>,
+        release: impl FnOnce() + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            rx,
+            release: Some(Box::new(release)),
+        }
+    }
+}
+
+impl Drop for EventSubscription {
+    fn drop(&mut self) {
+        if let Some(release) = self.release.take() {
+            release();
+        }
+    }
+}
+
 /// Top-level window enumeration and control. Fast Win32 calls that never block on hung apps.
 pub trait WindowBackend: Send + Sync {
     fn list_windows(&self) -> WinwrightResult<Vec<WindowInfo>>;
@@ -306,10 +332,11 @@ pub trait UiAutomationBackend: Send + Sync {
     /// Drops worker slots the caller no longer references.
     fn release<'a>(&'a self, keys: Vec<ElementKey>) -> BackendFuture<'a, ()>;
 
-    /// A counter bumped whenever UI Automation reports a relevant change (window opened or
-    /// closed, focus moved, structure changed). Waits use it only to wake early; they always
-    /// re-check the real state. `None` when the backend has no event source.
-    fn events(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
+    /// Starts listening for UI changes (window opened/closed, focus moved) for as long as the
+    /// returned subscription lives. Listening costs cross-process event traffic, so backends
+    /// attach only while at least one subscription exists. Waits use the counter only to wake
+    /// early and always re-check real state. `None` when the backend has no event source.
+    fn events(&self) -> Option<EventSubscription> {
         None
     }
 

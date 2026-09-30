@@ -1,0 +1,10 @@
+[package]
+name = "winwright-mcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+rmcp = { version = "3.5", features = ["transport-io"] }
+
