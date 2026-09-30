@@ -9,6 +9,8 @@ members = [
     "crates/winwright-input",
     "crates/winwright-overlay",
     "crates/winwright-capture",
+    "crates/winwright-shell",
+    "crates/winwright-files",
     "crates/winwright-cli",
     "crates/winwright-test-support",
     "fixtures/test-win32-app",
@@ -23,6 +25,8 @@ default-members = [
     "crates/winwright-input",
     "crates/winwright-overlay",
     "crates/winwright-capture",
+    "crates/winwright-shell",
+    "crates/winwright-files",
     "crates/winwright-cli",
 ]
 
@@ -38,7 +42,9 @@ winwright-contracts = { path = "crates/winwright-contracts" }
 winwright-core = { path = "crates/winwright-core" }
 winwright-input = { path = "crates/winwright-input" }
 winwright-overlay = { path = "crates/winwright-overlay" }
+winwright-files = { path = "crates/winwright-files" }
 winwright-security = { path = "crates/winwright-security" }
+winwright-shell = { path = "crates/winwright-shell" }
 winwright-uia = { path = "crates/winwright-uia" }
 winwright-win32 = { path = "crates/winwright-win32" }
 winwright-test-support = { path = "crates/winwright-test-support" }
@@ -54,6 +60,7 @@ tokio-util = "0.7"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 windows = "0.62"
+windows-core = "0.62"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
