@@ -42,7 +42,7 @@ pub fn text_color_on(background: u32) -> u32 {
 }
 
 /// Premultiplied source-over: `src + dst * (1 - src.a)`. Keeps every channel <= alpha.
-fn over(src: u32, dst: u32) -> u32 {
+pub(crate) fn over(src: u32, dst: u32) -> u32 {
     let inv = 255 - (src >> 24);
     let ch = |shift: u32| ((src >> shift) & 0xFF) + (((dst >> shift) & 0xFF) * inv + 127) / 255;
     (ch(24) << 24) | (ch(16) << 16) | (ch(8) << 8) | ch(0)

@@ -227,7 +227,10 @@ async fn serve_mcp(config: Config) -> Result<(), WinwrightError> {
                     tray.update(tray_state(false));
                 }
                 TRAY_INSPECTOR => spawn_detached(&["inspector"]),
-                TRAY_AUDIT => open_audit_log(),
+                TRAY_AUDIT if !open_audit_log() => tray.notify(
+                    "No audit log yet",
+                    "Winwright records every AI action here once an assistant acts.",
+                ),
                 _ => {}
             }
         }),
@@ -240,6 +243,10 @@ async fn serve_mcp(config: Config) -> Result<(), WinwrightError> {
             if let Some(engine) = weak_for_hotkey.upgrade() {
                 engine.emergency_stop();
                 tray_for_hotkey.update(tray_state(true));
+                tray_for_hotkey.notify(
+                    "Winwright stopped",
+                    "All AI actions are blocked. Choose Resume in the tray menu to allow them again.",
+                );
             }
         }),
     ) {
@@ -266,35 +273,40 @@ const TRAY_INSPECTOR: u32 = 3;
 const TRAY_AUDIT: u32 = 4;
 
 fn tray_state(stopped: bool) -> winwright_overlay::TrayState {
+    use winwright_overlay::theme::glyph;
     use winwright_overlay::{TrayMenuItem, TrayState};
+    let item = |id, label: &str, glyph, separator_before| TrayMenuItem {
+        id,
+        label: label.into(),
+        enabled: true,
+        glyph: Some(glyph),
+        separator_before,
+    };
     TrayState {
         tooltip: if stopped {
-            "Winwright: stopped (AI actions are blocked)".into()
+            "Winwright \u{00B7} stopped (AI actions are blocked)".into()
         } else {
-            "Winwright: active for your AI assistant".into()
+            "Winwright \u{00B7} ready for your AI assistant".into()
         },
         active: !stopped,
+        status: if stopped {
+            "Stopped \u{00B7} AI actions are blocked".into()
+        } else {
+            "Active \u{00B7} your AI assistant can act".into()
+        },
         items: vec![
-            TrayMenuItem {
-                id: TRAY_STOP,
-                label: "Stop now\tCtrl+Alt+Esc".into(),
-                enabled: !stopped,
+            if stopped {
+                item(TRAY_REARM, "Resume AI actions", glyph::PLAY, false)
+            } else {
+                item(
+                    TRAY_STOP,
+                    "Stop all AI actions\tCtrl+Alt+Esc",
+                    glyph::STOP,
+                    false,
+                )
             },
-            TrayMenuItem {
-                id: TRAY_REARM,
-                label: "Re-enable".into(),
-                enabled: stopped,
-            },
-            TrayMenuItem {
-                id: TRAY_INSPECTOR,
-                label: "Open Inspector".into(),
-                enabled: true,
-            },
-            TrayMenuItem {
-                id: TRAY_AUDIT,
-                label: "Show audit log".into(),
-                enabled: true,
-            },
+            item(TRAY_INSPECTOR, "Open Inspector", glyph::SEARCH, true),
+            item(TRAY_AUDIT, "View audit log", glyph::HISTORY, false),
         ],
     }
 }
@@ -317,18 +329,19 @@ fn spawn_detached(args: &[&str]) {
     }
 }
 
-/// Opens the audit log in Notepad (the user's own click from the tray menu).
-fn open_audit_log() {
+/// Opens the audit log in Notepad (the user's own click from the tray menu). False when
+/// there is no log yet.
+fn open_audit_log() -> bool {
     let Some(path) = winwright_core::audit::AuditLog::default_path() else {
-        return;
+        return false;
     };
     if !path.exists() {
-        tracing::info!("no audit log yet");
-        return;
+        return false;
     }
     if let Err(err) = std::process::Command::new("notepad.exe").arg(&path).spawn() {
         tracing::warn!(%err, "could not open the audit log");
     }
+    true
 }
 
 /// One-shot CLI commands use a transient session; refs do not outlive the process until

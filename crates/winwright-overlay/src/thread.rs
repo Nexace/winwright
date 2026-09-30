@@ -73,6 +73,10 @@ pub enum Command {
         callback: Option<crate::tray::TrayCallback>,
         reply: Option<SyncSender<WinwrightResult<()>>>,
     },
+    TrayBalloon {
+        title: String,
+        body: String,
+    },
     TrayRemove,
     Shutdown,
 }
@@ -409,6 +413,7 @@ impl UiState {
                     }
                 }
             }
+            Command::TrayBalloon { title, body } => crate::tray::balloon(&title, &body),
             Command::TrayRemove => crate::tray::remove(),
             Command::Shutdown => {}
         }

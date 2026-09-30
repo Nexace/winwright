@@ -1,20 +1,65 @@
-//! Trusted local confirmation dialog (spec §66). A native Windows message box that only the
-//! person at the keyboard can answer: "No" is the default button, and a prompt that is not
-//! answered in time, or whose request is abandoned, is closed with "No".
+//! Trusted local confirmation dialog (spec §66): a native Winwright window that only the
+//! person at the keyboard can answer.
+//!
+//! - "Deny" is the default and focused button: Enter, Esc, Alt+F4 and closing all deny.
+//! - "Allow once" stays disabled for a moment after the dialog appears, so a click or key
+//!   meant for another window cannot approve an action.
+//! - A prompt that is not answered in time, or whose request is abandoned, is denied and the
+//!   window closes itself.
+//!
+//! Every piece of text is an owner-drawn STATIC control, so screen readers read the prompt
+//! while it keeps the Winwright look.
 
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::cell::RefCell;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+use std::time::{Duration, Instant};
 
-use windows::Win32::Foundation::{LPARAM, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Graphics::Gdi::{
+    BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DT_END_ELLIPSIS, DT_LEFT,
+    DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, DeleteDC, DeleteObject, EndPaint, GetDC,
+    GetMonitorInfoW, HDC, HGDIOBJ, InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO,
+    MonitorFromPoint, PAINTSTRUCT, ReleaseDC, SRCCOPY, SelectObject,
+};
+use windows::Win32::UI::Controls::{
+    CDDS_PREPAINT, CDIS_DISABLED, CDIS_FOCUS, CDIS_HOT, CDIS_SELECTED, CDRF_DODEFAULT,
+    CDRF_SKIPDEFAULT, DRAWITEMSTRUCT, NM_CUSTOMDRAW, NMCUSTOMDRAW, NMHDR,
+};
+use windows::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForMonitor, MDT_EFFECTIVE_DPI};
+use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, GetFocus, SetFocus};
 use windows::Win32::UI::WindowsAndMessaging::{
-    FindWindowW, IDNO, IDYES, MB_DEFBUTTON2, MB_ICONWARNING, MB_SETFOREGROUND, MB_TOPMOST,
-    MB_YESNO, MessageBoxW, PostMessageW, WM_COMMAND,
+    BS_DEFPUSHBUTTON, BS_PUSHBUTTON, CreateWindowExW, DC_HASDEFID, DM_GETDEFID, DefWindowProcW,
+    DestroyIcon, DestroyWindow, DispatchMessageW, FLASHW_ALL, FLASHW_TIMERNOFG, FLASHWINFO,
+    FlashWindowEx, GetCursorPos, GetForegroundWindow, GetMessageW, HICON, HMENU, ICON_BIG,
+    ICON_SMALL, IDCANCEL, IsDialogMessageW, KillTimer, MSG, PostMessageW, PostQuitMessage,
+    SM_CXICON, SM_CXSMICON, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOZORDER, SendMessageW,
+    SetForegroundWindow, SetTimer, SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage,
+    WA_INACTIVE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_CLOSE, WM_COMMAND, WM_DESTROY,
+    WM_DPICHANGED, WM_DRAWITEM, WM_ERASEBKGND, WM_NOTIFY, WM_PAINT, WM_SETFONT, WM_SETICON,
+    WM_TIMER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_EX_APPWINDOW, WS_EX_TOPMOST, WS_OVERLAPPED,
+    WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 use windows::core::{HSTRING, PCWSTR, w};
+use winwright_contracts::WinwrightResult;
 use winwright_contracts::backend::BackendFuture;
 use winwright_contracts::security::{ConfirmationPrompt, Confirmer};
 
-static NEXT_PROMPT: AtomicU64 = AtomicU64::new(1);
+use crate::platform;
+use crate::theme::{self, ButtonKind, ButtonState, Fonts, Palette, glyph};
+
+const CLASS: PCWSTR = w!("WinwrightConfirm");
+const TITLE: PCWSTR = w!("Winwright: confirm action");
+/// IDCANCEL, so Esc denies through IsDialogMessage.
+const ID_DENY: i32 = IDCANCEL.0;
+const ID_ALLOW: i32 = 100;
+const TIMER_TICK: usize = 1;
+const TIMER_ARM: usize = 2;
+const ARM_DELAY_MS: u32 = 800;
+const WIDTH: i32 = 460;
+const SS_OWNERDRAW: u32 = 0x0D;
+const SS_NOPREFIX: u32 = 0x80;
+const ODT_STATIC: u32 = 5;
 
 #[derive(Debug, Default)]
 pub struct NativeConfirmer;
@@ -25,78 +70,116 @@ impl NativeConfirmer {
     }
 }
 
-/// The dialog text. Pure so it can be tested; never contains typed text or field values
-/// (the engine's summaries only count characters).
+/// The dialog text as plain lines. Pure so it can be tested; never contains typed text or
+/// field values (the engine's summaries only count characters).
 pub fn dialog_text(prompt: &ConfirmationPrompt) -> String {
-    let mut text = format!(
-        "An AI assistant using Winwright wants to:\n\n    {}\n",
-        prompt.summary
-    );
-    if let Some(t) = &prompt.target {
-        if let Some(window) = &t.window {
-            text.push_str(&format!("\nWindow: {window}"));
-        }
-        if let Some(process) = &t.process {
-            text.push_str(&format!("\nApp: {process}"));
-        }
-        text.push('\n');
+    let c = Content::of(prompt);
+    let mut text = format!("{}\n{}\n\n{}\n", c.title, c.subtitle, c.summary);
+    if !c.context.is_empty() {
+        text.push_str(&format!("{}\n", c.context));
     }
     text.push_str(&format!(
-        "\nWhy you are asked: {}\n\nAllow this once?\n\n\
-         \"No\" is the default. Unanswered requests are denied after {} seconds.\n\
-         Press Ctrl+Alt+Esc at any time to stop Winwright.",
-        prompt.reason,
-        prompt.timeout_ms / 1000
+        "\n{}\n{}\n{}",
+        c.reason,
+        c.hint,
+        c.countdown(c.seconds)
     ));
     text
 }
 
-/// Answers an abandoned or timed-out dialog with "No" so it never lingers.
-struct DenyOnDrop {
-    title: HSTRING,
+/// What the dialog says.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Content {
+    title: String,
+    subtitle: String,
+    summary: String,
+    context: String,
+    reason: String,
+    hint: String,
+    seconds: u64,
 }
+
+impl Content {
+    fn of(prompt: &ConfirmationPrompt) -> Self {
+        let mut context = Vec::new();
+        if let Some(t) = &prompt.target {
+            if let Some(window) = &t.window {
+                context.push(format!("Window: {window}"));
+            }
+            if let Some(process) = &t.process {
+                context.push(format!("App: {process}"));
+            }
+        }
+        Self {
+            title: "Allow this action?".into(),
+            subtitle: "An AI assistant using Winwright is asking for your approval.".into(),
+            summary: prompt.summary.clone(),
+            context: context.join("  \u{00B7}  "),
+            reason: format!("Why you are asked: {}", prompt.reason),
+            hint: "Deny is the default. Press Ctrl+Alt+Esc at any time to stop Winwright.".into(),
+            seconds: prompt.timeout_ms.max(1_000) / 1000,
+        }
+    }
+
+    fn countdown(&self, left: u64) -> String {
+        format!("Denied automatically in {left} s")
+    }
+}
+
+/// Shared by a request and its dialog thread.
+#[derive(Default)]
+struct Link {
+    /// The dialog window once it exists (0 before).
+    hwnd: AtomicIsize,
+    /// The request stopped waiting (timeout, cancellation): the dialog must deny and close.
+    abandoned: AtomicBool,
+}
+
+/// Answers an abandoned or timed-out dialog with "Deny" so it never lingers, even when the
+/// request gives up before the window exists (the dialog checks `abandoned` once created).
+struct DenyOnDrop(Arc<Link>);
 
 impl Drop for DenyOnDrop {
     fn drop(&mut self) {
-        // SAFETY: plain window lookup and message post; both take owned/borrowed values only.
-        unsafe {
-            if let Ok(hwnd) = FindWindowW(w!("#32770"), &self.title) {
-                let _ = PostMessageW(Some(hwnd), WM_COMMAND, WPARAM(IDNO.0 as usize), LPARAM(0));
-            }
+        self.0.abandoned.store(true, Ordering::SeqCst);
+        let hwnd = self.0.hwnd.load(Ordering::SeqCst);
+        if hwnd != 0 {
+            // SAFETY: posts to the dialog window; a stale handle just fails the post.
+            let _ = unsafe {
+                PostMessageW(
+                    Some(HWND(hwnd as *mut std::ffi::c_void)),
+                    WM_CLOSE,
+                    WPARAM(0),
+                    LPARAM(0),
+                )
+            };
         }
     }
 }
 
 impl Confirmer for NativeConfirmer {
     fn confirm<'a>(&'a self, prompt: ConfirmationPrompt) -> BackendFuture<'a, bool> {
-        let id = NEXT_PROMPT.fetch_add(1, Ordering::Relaxed);
-        let title = HSTRING::from(format!(
-            "Winwright: confirm action ({}-{id})",
-            std::process::id()
-        ));
-        let text = HSTRING::from(dialog_text(&prompt));
         let timeout = Duration::from_millis(prompt.timeout_ms.max(1_000));
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let thread_title = title.clone();
+        let link = Arc::new(Link::default());
+        let thread_link = Arc::clone(&link);
         let spawned = std::thread::Builder::new()
             .name("winwright-confirm".into())
             .spawn(move || {
-                // SAFETY: both strings outlive the modal call on this thread.
-                let answer = unsafe {
-                    MessageBoxW(
-                        None,
-                        PCWSTR(text.as_ptr()),
-                        PCWSTR(thread_title.as_ptr()),
-                        MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2 | MB_TOPMOST | MB_SETFOREGROUND,
-                    )
+                let answer = match run_dialog(&thread_link, &prompt, timeout) {
+                    Ok(answer) => answer,
+                    Err(err) => {
+                        tracing::warn!(%err, "confirmation dialog unavailable; denying");
+                        false
+                    }
                 };
-                let _ = tx.send(answer == IDYES);
+                let _ = tx.send(answer);
             });
         Box::pin(async move {
             if spawned.is_err() {
                 return Ok(false);
             }
-            let _deny_on_drop = DenyOnDrop { title };
+            let _deny_on_drop = DenyOnDrop(link);
             Ok(tokio::time::timeout(timeout, rx)
                 .await
                 .ok()
@@ -106,14 +189,760 @@ impl Confirmer for NativeConfirmer {
     }
 }
 
+// ---------------------------------------------------------------------------------------
+// The window
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Look {
+    Title,
+    Subtitle,
+    Summary,
+    Context,
+    Reason,
+    Hint,
+    Countdown,
+}
+
+struct Block {
+    look: Look,
+    hwnd: HWND,
+    rect: RECT,
+}
+
+struct Dialog {
+    deny: HWND,
+    allow: HWND,
+    blocks: Vec<Block>,
+    palette: Palette,
+    fonts: Fonts,
+    content: Content,
+    deadline: Instant,
+    armed: bool,
+    answer: Option<bool>,
+    link: Arc<Link>,
+    focus: HWND,
+    icons: Vec<HICON>,
+    /// Painted by the dialog: badge, card, and the button band.
+    badge: RECT,
+    card: RECT,
+    band_top: i32,
+}
+
+thread_local! {
+    static DIALOG: RefCell<Option<Dialog>> = const { RefCell::new(None) };
+}
+
+fn with_dialog<R>(f: impl FnOnce(&mut Dialog) -> R) -> Option<R> {
+    DIALOG.with(|cell| cell.try_borrow_mut().ok()?.as_mut().map(f))
+}
+
+fn rect(left: i32, top: i32, width: i32, height: i32) -> RECT {
+    RECT {
+        left,
+        top,
+        right: left + width,
+        bottom: top + height,
+    }
+}
+
+impl Dialog {
+    fn font(&self, look: Look) -> &theme::Font {
+        match look {
+            Look::Title => &self.fonts.title,
+            Look::Summary => &self.fonts.strong,
+            Look::Subtitle | Look::Context | Look::Reason | Look::Hint | Look::Countdown => {
+                &self.fonts.small
+            }
+        }
+    }
+
+    fn colors(&self, look: Look) -> (u32, u32) {
+        let p = &self.palette;
+        match look {
+            Look::Title | Look::Summary => (
+                p.text,
+                if look == Look::Summary {
+                    p.window
+                } else {
+                    p.surface
+                },
+            ),
+            Look::Context => (p.muted, p.window),
+            Look::Subtitle | Look::Reason => (p.muted, p.surface),
+            Look::Hint => (p.faint, p.surface),
+            Look::Countdown => (p.muted, p.window),
+        }
+    }
+
+    fn text_of(&self, look: Look) -> String {
+        let c = &self.content;
+        match look {
+            Look::Title => c.title.clone(),
+            Look::Subtitle => c.subtitle.clone(),
+            Look::Summary => c.summary.clone(),
+            Look::Context => c.context.clone(),
+            Look::Reason => c.reason.clone(),
+            Look::Hint => c.hint.clone(),
+            Look::Countdown => c.countdown(self.seconds_left()),
+        }
+    }
+
+    fn seconds_left(&self) -> u64 {
+        self.deadline
+            .saturating_duration_since(Instant::now())
+            .as_secs_f64()
+            .ceil() as u64
+    }
+
+    /// Positions every block and button for the current DPI; returns the client size.
+    fn layout(&mut self) -> (i32, i32) {
+        let dpi = self.fonts.dpi;
+        let px = |v| theme::scale(v, dpi);
+        let pad = px(24);
+        let width = px(WIDTH);
+        let inner = width - pad * 2;
+        // SAFETY: a screen DC borrowed for measuring only.
+        let dc = unsafe { GetDC(None) };
+        let measure = |look: Look, w: i32| -> i32 {
+            let text = self.text_of(look);
+            if text.is_empty() {
+                return 0;
+            }
+            theme::measure(dc, self.font(look), &text, Some(w), DT_WORDBREAK).1
+        };
+        let badge = px(40);
+        let text_x = pad + badge + px(14);
+        let text_w = width - pad - text_x;
+        let mut rects = Vec::new();
+        let title_h = measure(Look::Title, text_w);
+        let sub_h = measure(Look::Subtitle, text_w);
+        let header_h = (title_h + px(2) + sub_h).max(badge);
+        let header_top = pad;
+        let text_top = header_top + (header_h - (title_h + px(2) + sub_h)) / 2;
+        rects.push((Look::Title, rect(text_x, text_top, text_w, title_h)));
+        rects.push((
+            Look::Subtitle,
+            rect(text_x, text_top + title_h + px(2), text_w, sub_h),
+        ));
+        let badge_rect = rect(pad, header_top + (header_h - badge) / 2, badge, badge);
+        let mut y = header_top + header_h + px(18);
+        let card_pad = px(14);
+        let card_inner = inner - card_pad * 2;
+        let sum_h = measure(Look::Summary, card_inner);
+        let ctx_h = measure(Look::Context, card_inner);
+        let card_h = card_pad * 2 + sum_h + if ctx_h > 0 { px(4) + ctx_h } else { 0 };
+        let card_rect = rect(pad, y, inner, card_h);
+        rects.push((
+            Look::Summary,
+            rect(pad + card_pad, y + card_pad, card_inner, sum_h),
+        ));
+        if ctx_h > 0 {
+            rects.push((
+                Look::Context,
+                rect(
+                    pad + card_pad,
+                    y + card_pad + sum_h + px(4),
+                    card_inner,
+                    ctx_h,
+                ),
+            ));
+        }
+        y += card_h + px(14);
+        let reason_h = measure(Look::Reason, inner);
+        rects.push((Look::Reason, rect(pad, y, inner, reason_h)));
+        y += reason_h + px(6);
+        let hint_h = measure(Look::Hint, inner);
+        rects.push((Look::Hint, rect(pad, y, inner, hint_h)));
+        y += hint_h + px(22);
+        let band_top = y;
+        let band_h = px(68);
+        let button_h = px(36);
+        let button_w = px(124);
+        let button_y = y + (band_h - button_h) / 2;
+        let allow_x = width - pad + px(2) - button_w;
+        let deny_x = allow_x - px(6) - button_w;
+        let countdown_w = deny_x - pad - px(8);
+        rects.push((
+            Look::Countdown,
+            rect(pad, y + 1, countdown_w.max(0), band_h - 1),
+        ));
+        // SAFETY: releases the DC borrowed above.
+        unsafe { ReleaseDC(None, dc) };
+        self.badge = badge_rect;
+        self.card = card_rect;
+        self.band_top = band_top;
+        for (look, r) in rects {
+            if let Some(b) = self.blocks.iter_mut().find(|b| b.look == look) {
+                b.rect = r;
+            }
+        }
+        // SAFETY: moves this dialog's own child windows.
+        unsafe {
+            for b in &self.blocks {
+                let r = b.rect;
+                let _ = SetWindowPos(
+                    b.hwnd,
+                    None,
+                    r.left,
+                    r.top,
+                    r.right - r.left,
+                    r.bottom - r.top,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+            }
+            let _ = SetWindowPos(
+                self.deny,
+                None,
+                deny_x,
+                button_y,
+                button_w,
+                button_h,
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+            let _ = SetWindowPos(
+                self.allow,
+                None,
+                allow_x,
+                button_y,
+                button_w,
+                button_h,
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+        }
+        (width, y + band_h)
+    }
+
+    fn paint(&self, hdc: HDC, client: RECT) {
+        let p = &self.palette;
+        let band = RECT {
+            top: self.band_top,
+            ..client
+        };
+        theme::fill(
+            hdc,
+            RECT {
+                bottom: self.band_top,
+                ..client
+            },
+            p.surface,
+        );
+        theme::fill(hdc, band, p.window);
+        theme::fill(
+            hdc,
+            RECT {
+                bottom: self.band_top + 1,
+                ..band
+            },
+            p.border,
+        );
+        theme::dot(hdc, self.badge, p.selection);
+        theme::icon(hdc, &self.fonts.icons, glyph::SHIELD, self.badge, p.accent);
+        theme::rounded(
+            hdc,
+            self.card,
+            self.fonts.px(6) as f32,
+            p.window,
+            Some(p.border),
+        );
+    }
+
+    fn draw_block(&self, d: &DRAWITEMSTRUCT) {
+        let Some(block) = self.blocks.iter().find(|b| b.hwnd == d.hwndItem) else {
+            return;
+        };
+        let (fg, bg) = self.colors(block.look);
+        theme::fill(d.hDC, d.rcItem, bg);
+        let flags = if block.look == Look::Countdown {
+            DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS
+        } else {
+            DT_WORDBREAK | DT_LEFT
+        };
+        theme::text(
+            d.hDC,
+            self.font(block.look),
+            &self.text_of(block.look),
+            d.rcItem,
+            fg,
+            flags,
+        );
+    }
+
+    fn draw_button(&self, cd: &NMCUSTOMDRAW) {
+        let is_deny = cd.hdr.hwndFrom == self.deny;
+        let state = ButtonState {
+            hot: cd.uItemState.0 & CDIS_HOT.0 != 0,
+            pressed: cd.uItemState.0 & CDIS_SELECTED.0 != 0,
+            focused: cd.uItemState.0 & CDIS_FOCUS.0 != 0,
+            disabled: cd.uItemState.0 & CDIS_DISABLED.0 != 0,
+        };
+        theme::draw_button(
+            cd.hdc,
+            cd.rc,
+            self.palette.window,
+            if is_deny {
+                ButtonKind::Primary
+            } else {
+                ButtonKind::Secondary
+            },
+            state,
+            if is_deny { "Deny" } else { "Allow once" },
+            None,
+            &self.palette,
+            &self.fonts,
+        );
+    }
+}
+
+fn child(parent: HWND, class: PCWSTR, text: &str, style: u32, id: i32) -> WinwrightResult<HWND> {
+    let text = HSTRING::from(text);
+    // SAFETY: creates a child of `parent` on this thread; the menu handle carries the id.
+    unsafe {
+        CreateWindowExW(
+            WINDOW_EX_STYLE(0),
+            class,
+            &text,
+            WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | style),
+            0,
+            0,
+            0,
+            0,
+            Some(parent),
+            Some(HMENU(id as isize as _)),
+            None,
+            None,
+        )
+    }
+    .map_err(|e| platform("CreateWindowExW(confirm child)", &e))
+}
+
+fn cursor_monitor_dpi_and_work_area() -> (u32, RECT) {
+    // SAFETY: plain cursor/monitor queries with local out-parameters.
+    unsafe {
+        let mut pt = POINT::default();
+        let _ = GetCursorPos(&mut pt);
+        let monitor = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+        let mut info = MONITORINFO {
+            cbSize: size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        let _ = GetMonitorInfoW(monitor, &mut info);
+        let (mut dx, mut dy) = (96u32, 96u32);
+        let _ = GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dx, &mut dy);
+        (dx.max(96), info.rcWork)
+    }
+}
+
+fn window_size(client: (i32, i32), dpi: u32) -> (i32, i32) {
+    let mut r = rect(0, 0, client.0, client.1);
+    // SAFETY: `r` is a local RECT adjusted in place.
+    let _ =
+        unsafe { AdjustWindowRectExForDpi(&mut r, dialog_style(), false, dialog_ex_style(), dpi) };
+    (r.right - r.left, r.bottom - r.top)
+}
+
+fn dialog_style() -> WINDOW_STYLE {
+    WINDOW_STYLE(WS_OVERLAPPED.0 | WS_CAPTION.0 | WS_SYSMENU.0 | WS_CLIPCHILDREN.0)
+}
+
+fn dialog_ex_style() -> WINDOW_EX_STYLE {
+    WINDOW_EX_STYLE(WS_EX_TOPMOST.0 | WS_EX_APPWINDOW.0)
+}
+
+fn set_icons(hwnd: HWND, dpi: u32) -> Vec<HICON> {
+    let mut icons = Vec::new();
+    // SAFETY: metric queries and WM_SETICON with icons that live until the window closes.
+    unsafe {
+        for (which, metric) in [(ICON_SMALL, SM_CXSMICON), (ICON_BIG, SM_CXICON)] {
+            let size = windows::Win32::UI::HiDpi::GetSystemMetricsForDpi(metric, dpi);
+            if let Ok(icon) = theme::brand_icon(size, false) {
+                SendMessageW(
+                    hwnd,
+                    WM_SETICON,
+                    Some(WPARAM(which as usize)),
+                    Some(LPARAM(icon.0 as isize)),
+                );
+                icons.push(icon);
+            }
+        }
+    }
+    icons
+}
+
+/// Shows the dialog on this thread and returns the answer (true only for "Allow once").
+fn run_dialog(
+    link: &Arc<Link>,
+    prompt: &ConfirmationPrompt,
+    timeout: Duration,
+) -> WinwrightResult<bool> {
+    let hinstance = theme::register_class(CLASS, Some(dialog_proc))?;
+    let (dpi, work) = cursor_monitor_dpi_and_work_area();
+    // SAFETY: the class is registered; the window is created hidden and shown below.
+    let hwnd = unsafe {
+        CreateWindowExW(
+            dialog_ex_style(),
+            CLASS,
+            TITLE,
+            dialog_style(),
+            work.left,
+            work.top,
+            100,
+            100,
+            None,
+            None,
+            Some(hinstance),
+            None,
+        )
+    }
+    .map_err(|e| platform("CreateWindowExW(confirm)", &e))?;
+    link.hwnd.store(hwnd.0 as isize, Ordering::SeqCst);
+    let build = || -> WinwrightResult<Dialog> {
+        let content = Content::of(prompt);
+        let mut blocks = Vec::new();
+        for look in [
+            Look::Title,
+            Look::Subtitle,
+            Look::Summary,
+            Look::Context,
+            Look::Reason,
+            Look::Hint,
+            Look::Countdown,
+        ] {
+            let text = match look {
+                Look::Context if content.context.is_empty() => continue,
+                _ => String::new(),
+            };
+            let hwnd = child(hwnd, w!("STATIC"), &text, SS_OWNERDRAW | SS_NOPREFIX, 0)?;
+            blocks.push(Block {
+                look,
+                hwnd,
+                rect: RECT::default(),
+            });
+        }
+        let deny = child(
+            hwnd,
+            w!("BUTTON"),
+            "Deny",
+            BS_DEFPUSHBUTTON as u32 | WS_TABSTOP.0,
+            ID_DENY,
+        )?;
+        let allow = child(
+            hwnd,
+            w!("BUTTON"),
+            "Allow once",
+            BS_PUSHBUTTON as u32 | WS_TABSTOP.0,
+            ID_ALLOW,
+        )?;
+        let palette = Palette::system();
+        theme::style_window(hwnd, &palette);
+        let icons = set_icons(hwnd, dpi);
+        Ok(Dialog {
+            deny,
+            allow,
+            blocks,
+            palette,
+            fonts: Fonts::new(dpi),
+            content,
+            deadline: Instant::now() + timeout,
+            armed: false,
+            answer: None,
+            link: Arc::clone(link),
+            focus: deny,
+            icons,
+            badge: RECT::default(),
+            card: RECT::default(),
+            band_top: 0,
+        })
+    };
+    let dialog = match build() {
+        Ok(d) => d,
+        Err(e) => {
+            // SAFETY: destroys the window created above on this thread.
+            let _ = unsafe { DestroyWindow(hwnd) };
+            return Err(e);
+        }
+    };
+    DIALOG.with(|cell| *cell.borrow_mut() = Some(dialog));
+    if link.abandoned.load(Ordering::SeqCst) {
+        // The request gave up while the window was being built.
+        // SAFETY: destroys this thread's own window.
+        let _ = unsafe { DestroyWindow(hwnd) };
+        if let Some(d) = DIALOG.with(|cell| cell.borrow_mut().take()) {
+            for icon in d.icons {
+                // SAFETY: our icons; the window that used them is gone.
+                let _ = unsafe { DestroyIcon(icon) };
+            }
+        }
+        return Ok(false);
+    }
+    let client = with_dialog(|d| {
+        d.sync_text();
+        d.layout()
+    })
+    .unwrap_or((400, 300));
+    let (w, h) = window_size(client, dpi);
+    let x = work.left + ((work.right - work.left) - w) / 2;
+    let y = work.top + ((work.bottom - work.top) - h) / 3;
+    // SAFETY: positions, shows, and focuses this thread's own window; timers belong to it.
+    unsafe {
+        let _ = SetWindowPos(hwnd, None, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+        with_dialog(|d| {
+            let _ = EnableWindow(d.allow, false);
+        });
+        let _ = ShowWindow(hwnd, SW_SHOWNORMAL);
+        let _ = SetForegroundWindow(hwnd);
+        if GetForegroundWindow() != hwnd {
+            let _ = FlashWindowEx(&FLASHWINFO {
+                cbSize: size_of::<FLASHWINFO>() as u32,
+                hwnd,
+                dwFlags: FLASHW_ALL | FLASHW_TIMERNOFG,
+                uCount: 0,
+                dwTimeout: 0,
+            });
+        }
+        if let Some(deny) = with_dialog(|d| d.deny) {
+            let _ = SetFocus(Some(deny));
+        }
+        SetTimer(Some(hwnd), TIMER_TICK, 250, None);
+        SetTimer(Some(hwnd), TIMER_ARM, ARM_DELAY_MS, None);
+        let mut msg = MSG::default();
+        while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+            if !IsDialogMessageW(hwnd, &msg).as_bool() {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        }
+    }
+    let dialog = DIALOG.with(|cell| cell.borrow_mut().take());
+    let answer = dialog.as_ref().and_then(|d| d.answer).unwrap_or(false);
+    if let Some(d) = dialog {
+        for icon in d.icons {
+            // SAFETY: our icons; the window that used them is gone.
+            let _ = unsafe { DestroyIcon(icon) };
+        }
+    }
+    Ok(answer)
+}
+
+impl Dialog {
+    /// Pushes each block's text into its control (the accessible name) and fonts into the
+    /// buttons.
+    fn sync_text(&self) {
+        for b in &self.blocks {
+            let text = HSTRING::from(self.text_of(b.look));
+            // SAFETY: our own child windows; the string outlives the call.
+            unsafe {
+                let _ = SetWindowTextW(b.hwnd, &text);
+                let _ = InvalidateRect(Some(b.hwnd), None, false);
+            }
+        }
+        for button in [self.deny, self.allow] {
+            // SAFETY: WM_SETFONT with a font that lives as long as the dialog.
+            unsafe {
+                SendMessageW(
+                    button,
+                    WM_SETFONT,
+                    Some(WPARAM(self.fonts.body.handle().0 as usize)),
+                    Some(LPARAM(1)),
+                );
+            }
+        }
+    }
+
+    fn tick(&mut self) -> bool {
+        if Instant::now() >= self.deadline || self.link.abandoned.load(Ordering::SeqCst) {
+            self.answer = Some(false);
+            return true;
+        }
+        if let Some(b) = self.blocks.iter().find(|b| b.look == Look::Countdown) {
+            let text = HSTRING::from(self.text_of(Look::Countdown));
+            // SAFETY: our own child window; the string outlives the call.
+            unsafe {
+                let _ = SetWindowTextW(b.hwnd, &text);
+                let _ = InvalidateRect(Some(b.hwnd), None, false);
+            }
+        }
+        false
+    }
+}
+
+fn finish(hwnd: HWND, answer: bool) {
+    with_dialog(|d| {
+        if d.answer.is_none() {
+            d.answer = Some(answer);
+        }
+    });
+    // SAFETY: destroys this thread's own window (WM_DESTROY does not borrow the dialog).
+    let _ = unsafe { DestroyWindow(hwnd) };
+}
+
+fn paint(hwnd: HWND) {
+    let mut ps = PAINTSTRUCT::default();
+    // SAFETY: standard double-buffered WM_PAINT on this thread's window; every GDI object is
+    // released before EndPaint.
+    unsafe {
+        let hdc = BeginPaint(hwnd, &mut ps);
+        let mut client = RECT::default();
+        let _ = windows::Win32::UI::WindowsAndMessaging::GetClientRect(hwnd, &mut client);
+        let (w, h) = (client.right, client.bottom);
+        let mem = CreateCompatibleDC(Some(hdc));
+        let bitmap = CreateCompatibleBitmap(hdc, w.max(1), h.max(1));
+        let old = SelectObject(mem, HGDIOBJ(bitmap.0));
+        with_dialog(|d| d.paint(mem, client));
+        let _ = BitBlt(hdc, 0, 0, w, h, Some(mem), 0, 0, SRCCOPY);
+        SelectObject(mem, old);
+        let _ = DeleteObject(HGDIOBJ(bitmap.0));
+        let _ = DeleteDC(mem);
+        let _ = EndPaint(hwnd, &ps);
+    }
+}
+
+unsafe extern "system" fn dialog_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Option<LRESULT> {
+        match msg {
+            WM_PAINT => {
+                paint(hwnd);
+                Some(LRESULT(0))
+            }
+            WM_ERASEBKGND => Some(LRESULT(1)),
+            WM_DRAWITEM => {
+                // SAFETY: WM_DRAWITEM's lParam points at a DRAWITEMSTRUCT.
+                let d = unsafe { &*(lparam.0 as *const DRAWITEMSTRUCT) };
+                if d.CtlType.0 == ODT_STATIC {
+                    with_dialog(|dialog| dialog.draw_block(d));
+                }
+                Some(LRESULT(1))
+            }
+            WM_NOTIFY => {
+                // SAFETY: WM_NOTIFY's lParam points at an NMHDR.
+                let header = unsafe { &*(lparam.0 as *const NMHDR) };
+                if header.code == NM_CUSTOMDRAW {
+                    // SAFETY: NM_CUSTOMDRAW from a button carries an NMCUSTOMDRAW.
+                    let cd = unsafe { &*(lparam.0 as *const NMCUSTOMDRAW) };
+                    if cd.dwDrawStage == CDDS_PREPAINT
+                        && with_dialog(|d| d.draw_button(cd)).is_some()
+                    {
+                        return Some(LRESULT(CDRF_SKIPDEFAULT as isize));
+                    }
+                    return Some(LRESULT(CDRF_DODEFAULT as isize));
+                }
+                None
+            }
+            WM_COMMAND => {
+                match (wparam.0 & 0xFFFF) as i32 {
+                    ID_DENY => finish(hwnd, false),
+                    ID_ALLOW if with_dialog(|d| d.armed) == Some(true) => finish(hwnd, true),
+                    _ => {}
+                }
+                Some(LRESULT(0))
+            }
+            DM_GETDEFID => Some(LRESULT(((DC_HASDEFID as isize) << 16) | ID_DENY as isize)),
+            WM_TIMER => {
+                match wparam.0 {
+                    TIMER_TICK => {
+                        if with_dialog(Dialog::tick) == Some(true) {
+                            finish(hwnd, false);
+                        }
+                    }
+                    TIMER_ARM => {
+                        // SAFETY: stops this window's one-shot timer; enables our own button.
+                        unsafe {
+                            let _ = KillTimer(Some(hwnd), TIMER_ARM);
+                        }
+                        if let Some(allow) = with_dialog(|d| {
+                            d.armed = true;
+                            d.allow
+                        }) {
+                            // SAFETY: our own child window.
+                            let _ = unsafe { EnableWindow(allow, true) };
+                        }
+                    }
+                    _ => {}
+                }
+                Some(LRESULT(0))
+            }
+            WM_ACTIVATE => {
+                // Keep keyboard focus on the dialog's buttons across activation changes.
+                if (wparam.0 & 0xFFFF) as u32 == WA_INACTIVE {
+                    // SAFETY: reads this thread's focus window.
+                    let focused = unsafe { GetFocus() };
+                    with_dialog(|d| {
+                        if focused == d.deny || focused == d.allow {
+                            d.focus = focused;
+                        }
+                    });
+                } else if let Some(focus) = with_dialog(|d| d.focus) {
+                    // SAFETY: focuses our own child window.
+                    let _ = unsafe { SetFocus(Some(focus)) };
+                }
+                Some(LRESULT(0))
+            }
+            WM_DPICHANGED => {
+                let dpi = (wparam.0 & 0xFFFF) as u32;
+                // SAFETY: WM_DPICHANGED's lParam points at the suggested window RECT.
+                let suggested = unsafe { *(lparam.0 as *const RECT) };
+                let client = with_dialog(|d| {
+                    d.fonts = Fonts::new(dpi);
+                    d.sync_text();
+                    d.layout()
+                });
+                if let Some(client) = client {
+                    let (w, h) = window_size(client, dpi);
+                    // SAFETY: resizes this thread's own window.
+                    unsafe {
+                        let _ = SetWindowPos(
+                            hwnd,
+                            None,
+                            suggested.left,
+                            suggested.top,
+                            w,
+                            h,
+                            SWP_NOZORDER | SWP_NOACTIVATE,
+                        );
+                        let _ = InvalidateRect(Some(hwnd), None, false);
+                    }
+                }
+                Some(LRESULT(0))
+            }
+            WM_CLOSE => {
+                finish(hwnd, false);
+                Some(LRESULT(0))
+            }
+            WM_DESTROY => {
+                // SAFETY: ends this thread's message loop.
+                unsafe { PostQuitMessage(0) };
+                Some(LRESULT(0))
+            }
+            _ => None,
+        }
+    }));
+    match result {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            // SAFETY: forwards the unmodified message to the default procedure.
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        }
+        Err(_) => {
+            tracing::error!("confirmation dialog procedure panicked; denying");
+            with_dialog(|d| d.answer = Some(false));
+            // SAFETY: ends this thread's message loop so the prompt resolves as denied.
+            unsafe { PostQuitMessage(0) };
+            LRESULT(0)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use winwright_contracts::security::TargetSummary;
 
-    #[test]
-    fn dialog_names_the_action_window_and_reason() {
-        let text = dialog_text(&ConfirmationPrompt {
+    fn prompt() -> ConfirmationPrompt {
+        ConfirmationPrompt {
             summary: "Click Button \"Send\"".into(),
             target: Some(TargetSummary {
                 process: Some("outlook.exe".into()),
@@ -123,10 +952,28 @@ mod tests {
             }),
             reason: "action may send, submit, delete, or spend".into(),
             timeout_ms: 60_000,
-        });
+        }
+    }
+
+    #[test]
+    fn dialog_names_the_action_window_and_reason() {
+        let text = dialog_text(&prompt());
         assert!(text.contains("Click Button \"Send\""));
         assert!(text.contains("Window: Inbox - Outlook"));
         assert!(text.contains("App: outlook.exe"));
-        assert!(text.contains("denied after 60 seconds"));
+        assert!(text.contains("action may send"));
+        assert!(text.contains("Denied automatically in 60 s"));
+        assert!(text.contains("Deny is the default"));
+    }
+
+    #[test]
+    fn missing_target_has_no_context_line() {
+        let mut p = prompt();
+        p.target = None;
+        let c = Content::of(&p);
+        assert!(c.context.is_empty());
+        assert_eq!(c.seconds, 60);
+        p.timeout_ms = 10;
+        assert_eq!(Content::of(&p).seconds, 1, "never less than a second");
     }
 }

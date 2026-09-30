@@ -30,6 +30,7 @@ mod keys;
 mod layout;
 mod paint;
 mod render;
+pub mod theme;
 mod thread;
 mod tray;
 
@@ -297,6 +298,14 @@ impl TrayHost {
             state,
             callback: None,
             reply: None,
+        });
+    }
+
+    /// Shows a notification from the icon (a toast on Windows 11). Never blocks.
+    pub fn notify(&self, title: &str, body: &str) {
+        let _ = self.ui.submit(Command::TrayBalloon {
+            title: title.to_owned(),
+            body: body.to_owned(),
         });
     }
 
