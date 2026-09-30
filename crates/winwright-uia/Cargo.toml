@@ -1,0 +1,28 @@
+[package]
+name = "winwright-uia"
+description = "Raw UI Automation COM on a dedicated MTA worker thread."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+winwright-contracts.workspace = true
+winwright-security.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_Ole",
+    "Win32_System_Variant",
+    "Win32_UI_Accessibility",
+] }
+
+[dev-dependencies]
+winwright-win32.workspace = true
+tokio = { workspace = true, features = ["macros", "rt"] }
+
+[lints]
+workspace = true
