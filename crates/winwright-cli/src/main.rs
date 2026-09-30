@@ -35,14 +35,34 @@ fn print_json<T: serde::Serialize>(value: &T) {
     );
 }
 
-fn build_engine(config: Config) -> Result<Engine, WinwrightError> {
+/// Optional backends, started only for the commands that need them.
+#[derive(Clone, Copy, Default)]
+struct Extras {
+    capture: bool,
+    overlay: bool,
+    system: bool,
+}
+
+fn build_engine(config: Config, extras: Extras) -> Result<Engine, WinwrightError> {
     let uia = winwright_uia::UiaBackend::start()?;
-    Ok(Engine::new(
+    let mut engine = Engine::new(
         config,
         Arc::new(winwright_win32::Win32Windows),
         Arc::new(uia),
     )
-    .with_input(Arc::new(winwright_input::SendInputBackend::new())))
+    .with_input(Arc::new(winwright_input::SendInputBackend::new()));
+    if extras.capture {
+        engine = engine.with_capture(Arc::new(winwright_capture::WgcCapture::start()?));
+    }
+    if extras.overlay {
+        engine = engine.with_overlay(Arc::new(winwright_overlay::NativeOverlay::start()?));
+    }
+    if extras.system {
+        engine = engine
+            .with_processes(Arc::new(winwright_shell::SystemProcesses::new()))
+            .with_files(Arc::new(winwright_files::LocalFiles::new()));
+    }
+    Ok(engine)
 }
 
 fn print_windows(windows: &[WindowInfo]) {
@@ -195,7 +215,12 @@ async fn run(cli: Cli) -> Result<(), WinwrightError> {
     };
 
     let max_nodes = config.automation.max_snapshot_nodes;
-    let engine = build_engine(config)?;
+    let extras = Extras {
+        capture: matches!(command, Command::Screenshot(_)),
+        overlay: matches!(command, Command::Highlight(_)),
+        system: matches!(command, Command::Launch(_) | Command::Processes),
+    };
+    let engine = build_engine(config, extras)?;
     match command {
         Command::Version | Command::Config => unreachable!("handled above"),
         Command::Windows => {
@@ -219,6 +244,7 @@ async fn run(cli: Cli) -> Result<(), WinwrightError> {
                 max_list_items: a.max_list_items,
                 raw_debug: a.raw,
                 structured: a.structured,
+                diff: a.diff,
             };
             let session = engine.session(&cli_session(), "cli")?;
             let snapshot = engine.snapshot(&session, request).await?;
@@ -226,6 +252,9 @@ async fn run(cli: Cli) -> Result<(), WinwrightError> {
                 print_json(&snapshot);
             } else {
                 print!("{}", snapshot.tree);
+                if let Some(diff) = &snapshot.diff {
+                    print!("{diff}");
+                }
                 for w in &snapshot.warnings {
                     eprintln!("warning: {w}");
                 }
@@ -381,6 +410,122 @@ async fn run(cli: Cli) -> Result<(), WinwrightError> {
                 print_json(&result);
             } else {
                 print_action(&result);
+            }
+        }
+        Command::Wait(a) => {
+            let session = engine.session(&cli_session(), "cli")?;
+            let result = engine.wait_for(&session, a.request()?).await?;
+            if json {
+                print_json(&result);
+            } else {
+                let what = result
+                    .element
+                    .as_ref()
+                    .map(|e| format!(" {:?} {:?} [{}]", e.role, e.name, e.reference))
+                    .or_else(|| {
+                        result
+                            .window
+                            .as_ref()
+                            .map(|w| format!(" window {:?}", w.title))
+                    })
+                    .unwrap_or_default();
+                println!(
+                    "ok {:?}{what} after {} ms ({} checks, {} events)",
+                    result.state, result.elapsed_ms, result.checks, result.events
+                );
+            }
+        }
+        Command::Screenshot(a) => {
+            let session = engine.session(&cli_session(), "cli")?;
+            let image = engine.screenshot(&session, a.request()).await?;
+            std::fs::write(&a.out, &image.bytes).map_err(|e| {
+                WinwrightError::invalid(format!("cannot write {}: {e}", a.out.display()))
+            })?;
+            let info = serde_json::json!({
+                "path": a.out.display().to_string(),
+                "width": image.width,
+                "height": image.height,
+                "origin": [image.origin.x, image.origin.y],
+                "dpi": image.dpi,
+                "bytes": image.bytes.len(),
+            });
+            if json {
+                print_json(&info);
+            } else {
+                println!(
+                    "saved {} ({}x{} at {},{}; {} dpi)",
+                    a.out.display(),
+                    image.width,
+                    image.height,
+                    image.origin.x,
+                    image.origin.y,
+                    image.dpi
+                );
+            }
+        }
+        Command::Highlight(a) => {
+            use winwright_contracts::overlay::{HighlightRequest, OverlayStyle};
+            let session = engine.session(&cli_session(), "cli")?;
+            let result = engine
+                .highlight(
+                    &session,
+                    HighlightRequest {
+                        target: a.target.target()?,
+                        style: match a.style {
+                            args::OverlayStyleArg::Highlight => OverlayStyle::Highlight,
+                            args::OverlayStyleArg::Arrow => OverlayStyle::Arrow,
+                            args::OverlayStyleArg::ClickMarker => OverlayStyle::ClickMarker,
+                        },
+                        label: a.caption,
+                        step: None,
+                        color: None,
+                        duration_ms: Some(a.duration_ms.max(1)),
+                    },
+                )
+                .await?;
+            if json {
+                print_json(&result);
+            } else {
+                println!("highlighting {} [{}]", result.target, result.reference);
+            }
+            // Overlays live on this process's UI thread: stay alive while one is shown.
+            tokio::time::sleep(std::time::Duration::from_millis(a.duration_ms)).await;
+            engine.clear_overlays(None)?;
+        }
+        Command::Launch(a) => {
+            let session = engine.session(&cli_session(), "cli")?;
+            let result = engine
+                .launch_app(
+                    &session,
+                    winwright_contracts::system::LaunchRequest {
+                        app: a.app,
+                        args: a.args,
+                        working_dir: None,
+                    },
+                )
+                .await?;
+            if json {
+                print_json(&result);
+            } else {
+                match result.process_id {
+                    Some(pid) => println!("launched ({}) pid {pid}", result.method),
+                    None => println!("launched ({})", result.method),
+                }
+            }
+        }
+        Command::Processes => {
+            let list = engine.process_list()?;
+            if json {
+                print_json(&list);
+            } else {
+                for p in &list {
+                    println!(
+                        "{:>6} {:<8} {}",
+                        p.process_id,
+                        p.integrity.as_deref().unwrap_or("-"),
+                        p.name
+                    );
+                }
             }
         }
     }

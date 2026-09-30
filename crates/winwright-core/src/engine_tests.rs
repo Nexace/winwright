@@ -1185,3 +1185,252 @@ async fn invalid_requests_fail_before_touching_backends() {
     assert_eq!(err.code().as_str(), "INVALID_REQUEST");
     assert!(fake.s().captured_roots.is_empty());
 }
+
+// ---------------------------------------------------------------- waits (phase 4)
+
+fn wait(json: serde_json::Value) -> winwright_contracts::wait::WaitRequest {
+    serde_json::from_value(json).unwrap()
+}
+
+#[tokio::test]
+async fn wait_for_window_open_reports_what_it_saw_on_timeout() {
+    let fake = Fake::new();
+    let engine = engine(&fake);
+    let session = engine.session(&sid(), "test").unwrap();
+    let err = engine
+        .wait_for(
+            &session,
+            wait(serde_json::json!({"state": "window-open", "window": {"title": "Fixture Dialog"}, "timeoutMs": 150})),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.code().as_str(), "TIMEOUT");
+    assert!(err.to_string().contains("no window matches"), "{err}");
+
+    engine
+        .execute(&session, click(by("Button", "Open Dialog")))
+        .await
+        .unwrap();
+    let ok = engine
+        .wait_for(
+            &session,
+            wait(serde_json::json!({"state": "window-open", "window": {"title": "Fixture Dialog"}, "timeoutMs": 1000})),
+        )
+        .await
+        .unwrap();
+    assert_eq!(ok.window.unwrap().hwnd, DIALOG);
+    assert_eq!(ok.checks, 1);
+}
+
+#[tokio::test]
+async fn wait_for_element_states() {
+    let fake = Fake::new();
+    let engine = engine(&fake);
+    let session = engine.session(&sid(), "test").unwrap();
+    let visible = engine
+        .wait_for(
+            &session,
+            wait(serde_json::json!({"state": "visible", "locator": {"role": "Button", "name": "Target"}})),
+        )
+        .await
+        .unwrap();
+    let target_ref = visible.element.unwrap().reference;
+    assert!(target_ref.starts_with('e'));
+
+    let err = engine
+        .wait_for(
+            &session,
+            wait(serde_json::json!({"state": "enabled", "locator": {"name": "Disabled Action"}, "timeoutMs": 150})),
+        )
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("is disabled"), "{err}");
+
+    // The old Target disappears when it is recreated: a ref wait sees it go missing.
+    engine
+        .execute(&session, click(by("Button", "Recreate")))
+        .await
+        .unwrap();
+    let gone = engine
+        .wait_for(
+            &session,
+            wait(serde_json::json!({"state": "missing", "ref": target_ref, "timeoutMs": 500})),
+        )
+        .await
+        .unwrap();
+    assert_eq!(gone.state, winwright_contracts::wait::WaitState::Missing);
+
+    engine
+        .execute(
+            &session,
+            DesktopAction::Fill {
+                target: by("Edit", "Name:"),
+                text: "Ada Lovelace".into(),
+                clear: true,
+            },
+        )
+        .await
+        .unwrap();
+    let value = engine
+        .wait_for(
+            &session,
+            wait(serde_json::json!({"state": "value", "locator": {"role": "Edit", "name": "Name:"}, "value": "ada", "match": "contains"})),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        value.element.unwrap().value.as_deref(),
+        Some("Ada Lovelace")
+    );
+}
+
+#[tokio::test]
+async fn wait_is_cancellable_and_validates_input() {
+    let fake = Fake::new();
+    let engine = Arc::new(engine(&fake));
+    let session = engine.session(&sid(), "test").unwrap();
+    let err = engine
+        .wait_for(&session, wait(serde_json::json!({"state": "window-open"})))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code().as_str(), "INVALID_REQUEST");
+    let task = {
+        let engine = Arc::clone(&engine);
+        let session = Arc::clone(&session);
+        tokio::spawn(async move {
+            engine
+                .wait_for(
+                    &session,
+                    wait(serde_json::json!({"state": "visible", "locator": {"name": "Never"}, "timeoutMs": 60000})),
+                )
+                .await
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    session.cancel();
+    assert_eq!(
+        task.await.unwrap().unwrap_err().code().as_str(),
+        "CANCELLED"
+    );
+}
+
+// ---------------------------------------------------------------- safety services
+
+#[tokio::test]
+async fn emergency_stop_halts_everything_until_rearmed() {
+    let fake = Fake::new();
+    let input = Arc::new(FakeInput::default());
+    let engine = engine(&fake).with_input(input);
+    let session = engine.session(&sid(), "test").unwrap();
+    engine.emergency_stop();
+    assert_eq!(
+        engine
+            .execute(&session, click(by("Button", "Target")))
+            .await
+            .unwrap_err()
+            .code()
+            .as_str(),
+        "CANCELLED"
+    );
+    assert!(
+        engine.session(&sid(), "test").is_err(),
+        "no new sessions while stopped"
+    );
+    engine.rearm();
+    let fresh = engine.session(&sid(), "test").unwrap();
+    engine
+        .execute(&fresh, click(by("Button", "Target")))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn risky_system_operations_are_gated_by_policy() {
+    use winwright_contracts::system::{ExecRequest, FileOperation};
+    let fake = Fake::new();
+    let engine = engine(&fake);
+    let session = engine.session(&sid(), "test").unwrap();
+    let err = engine
+        .file_operation(
+            &session,
+            FileOperation::Delete {
+                path: r"C:\Users\x\Desktop\a.txt".into(),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.code().as_str(), "CONFIRMATION_REQUIRED");
+    let exec: ExecRequest =
+        serde_json::from_str(r#"{"program":"cmd.exe","args":["/c","echo","hi"]}"#).unwrap();
+    let err = engine.exec(&session, exec).await.unwrap_err();
+    assert_eq!(
+        err.code().as_str(),
+        "ACTION_BLOCKED",
+        "shell is off by default"
+    );
+    let err = engine
+        .file_operation(
+            &session,
+            FileOperation::List {
+                path: "C:\\".into(),
+                include_hidden: false,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.code().as_str(),
+        "BACKEND_UNAVAILABLE",
+        "reads pass policy"
+    );
+}
+
+#[tokio::test]
+async fn diff_snapshot_sends_only_changes() {
+    let fake = Fake::new();
+    let engine = engine(&fake);
+    let session = engine.session(&sid(), "test").unwrap();
+    let first = engine
+        .snapshot(
+            &session,
+            SnapshotRequest {
+                diff: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        first.diff.is_none() && !first.tree.is_empty(),
+        "nothing to diff against yet"
+    );
+    engine
+        .execute(
+            &session,
+            DesktopAction::Check {
+                target: by("CheckBox", "Enable feature"),
+            },
+        )
+        .await
+        .unwrap();
+    let second = engine
+        .snapshot(
+            &session,
+            SnapshotRequest {
+                diff: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(second.tree.is_empty());
+    let diff = second.diff.unwrap();
+    assert!(diff.starts_with("DIFF s_1 -> s_2\n"), "{diff}");
+    assert!(
+        diff.contains(
+            "~ CHECKBOX \"Enable feature\" unchecked -> CHECKBOX \"Enable feature\" checked"
+        ),
+        "{diff}"
+    );
+    assert_eq!(diff.lines().count(), 2, "only the checkbox changed: {diff}");
+}

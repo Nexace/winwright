@@ -12,8 +12,12 @@ path = "src/main.rs"
 
 [dependencies]
 winwright-contracts.workspace = true
+winwright-capture.workspace = true
 winwright-core.workspace = true
+winwright-files.workspace = true
 winwright-input.workspace = true
+winwright-overlay.workspace = true
+winwright-shell.workspace = true
 winwright-uia.workspace = true
 winwright-win32.workspace = true
 clap.workspace = true

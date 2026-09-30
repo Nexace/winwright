@@ -79,7 +79,7 @@ fn all_keys(node: &UiNode, out: &mut Vec<ElementKey>) {
 
 impl Engine {
     /// Records matches under refs (keeping their slots) and returns the rest for release.
-    fn record_matches(
+    pub(crate) fn record_matches(
         &self,
         session: &Session,
         matches: &[&Match],

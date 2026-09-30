@@ -73,6 +73,16 @@ pub enum Command {
     Read(ReadArgs),
     /// Control a top-level window.
     Window(WindowArgs),
+    /// Wait until an element or window reaches a state (no fixed sleeps).
+    Wait(WaitArgs),
+    /// Save an on-demand screenshot of a window, element region, monitor, or the desktop.
+    Screenshot(ScreenshotArgs),
+    /// Highlight an element with a click-through overlay (tutorial/debug).
+    Highlight(HighlightArgs),
+    /// Launch an app, shell URI (ms-settings:), or folder.
+    Launch(LaunchArgs),
+    /// List running processes.
+    Processes,
 }
 
 #[derive(Args, Clone, Default)]
@@ -167,7 +177,7 @@ impl LocatorArgs {
             && self.framework.is_none()
     }
 
-    fn match_mode(&self) -> MatchMode {
+    pub fn match_mode(&self) -> MatchMode {
         if self.regex {
             MatchMode::Regex
         } else if self.contains {
@@ -268,6 +278,9 @@ pub struct SnapshotArgs {
     /// Include the structured node tree in JSON output.
     #[arg(long)]
     pub structured: bool,
+    /// Only report changes since the previous snapshot in the same engine session.
+    #[arg(long)]
+    pub diff: bool,
 }
 
 #[derive(Args)]
@@ -557,4 +570,177 @@ mod tests {
             }
         ));
     }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+pub enum WaitStateArg {
+    Exists,
+    Missing,
+    Visible,
+    Hidden,
+    Enabled,
+    Disabled,
+    Focused,
+    Value,
+    Text,
+    WindowOpen,
+    WindowClosed,
+}
+
+#[derive(Args)]
+pub struct WaitArgs {
+    #[arg(value_enum)]
+    pub state: WaitStateArg,
+    /// Element ref/locator; for window-open/window-closed use --window/--process/--hwnd.
+    #[command(flatten)]
+    pub target: TargetArgs,
+    /// Expected value/text for the `value` and `text` states.
+    #[arg(long)]
+    pub value: Option<String>,
+    #[arg(long)]
+    pub timeout_ms: Option<u64>,
+}
+
+impl WaitArgs {
+    pub fn request(&self) -> WinwrightResult<winwright_contracts::wait::WaitRequest> {
+        use winwright_contracts::wait::{WaitRequest, WaitState};
+        let state = match self.state {
+            WaitStateArg::Exists => WaitState::Exists,
+            WaitStateArg::Missing => WaitState::Missing,
+            WaitStateArg::Visible => WaitState::Visible,
+            WaitStateArg::Hidden => WaitState::Hidden,
+            WaitStateArg::Enabled => WaitState::Enabled,
+            WaitStateArg::Disabled => WaitState::Disabled,
+            WaitStateArg::Focused => WaitState::Focused,
+            WaitStateArg::Value => WaitState::Value,
+            WaitStateArg::Text => WaitState::Text,
+            WaitStateArg::WindowOpen => WaitState::WindowOpen,
+            WaitStateArg::WindowClosed => WaitState::WindowClosed,
+        };
+        let value_match = self.target.locator.match_mode();
+        if state.is_window_state() {
+            return Ok(WaitRequest {
+                state,
+                reference: None,
+                locator: None,
+                scope: SnapshotTarget::Active,
+                window: Some(self.target.scope.selector()),
+                value: None,
+                value_match,
+                timeout_ms: self.timeout_ms,
+            });
+        }
+        let target = self.target.target()?;
+        Ok(WaitRequest {
+            state,
+            reference: target.reference,
+            locator: target.locator,
+            scope: target.scope,
+            window: None,
+            value: self.value.clone(),
+            value_match,
+            timeout_ms: self.timeout_ms,
+        })
+    }
+}
+
+#[derive(Args)]
+pub struct ScreenshotArgs {
+    /// Output file (.png or .jpg).
+    #[arg(long, default_value = "winwright-screenshot.png")]
+    pub out: PathBuf,
+    #[command(flatten)]
+    pub scope: ScopeArgs,
+    /// Monitor index (see --json output of a desktop capture for bounds).
+    #[arg(long, conflicts_with_all = ["window", "process", "hwnd", "region", "desktop"])]
+    pub monitor: Option<u32>,
+    /// Physical desktop region X,Y,WIDTH,HEIGHT.
+    #[arg(long, value_parser = parse_region, conflicts_with_all = ["window", "process", "hwnd", "desktop"])]
+    pub region: Option<winwright_contracts::geometry::PhysicalRect>,
+    /// Every monitor composed into one image.
+    #[arg(long, conflicts_with_all = ["window", "process", "hwnd"])]
+    pub desktop: bool,
+    #[arg(long, default_value_t = 85)]
+    pub quality: u8,
+}
+
+impl ScreenshotArgs {
+    pub fn request(&self) -> winwright_contracts::capture::ScreenshotRequest {
+        use winwright_contracts::capture::{ImageFormat, ScreenshotRequest, ScreenshotTarget};
+        let selector = self.scope.selector();
+        let target = if let Some(m) = self.monitor {
+            ScreenshotTarget::Monitor(m)
+        } else if let Some(r) = self.region {
+            ScreenshotTarget::Region(r)
+        } else if self.desktop {
+            ScreenshotTarget::Desktop
+        } else if !selector.is_empty() {
+            ScreenshotTarget::Window(selector)
+        } else {
+            ScreenshotTarget::Active
+        };
+        let jpeg = self
+            .out
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("jpg") || e.eq_ignore_ascii_case("jpeg"));
+        ScreenshotRequest {
+            target,
+            format: if jpeg {
+                ImageFormat::Jpeg
+            } else {
+                ImageFormat::Png
+            },
+            quality: Some(self.quality),
+        }
+    }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+pub enum OverlayStyleArg {
+    Highlight,
+    Arrow,
+    ClickMarker,
+}
+
+#[derive(Args)]
+pub struct HighlightArgs {
+    #[command(flatten)]
+    pub target: TargetArgs,
+    /// Text shown next to the highlight (e.g. "Click this").
+    #[arg(long)]
+    pub caption: Option<String>,
+    #[arg(long, value_enum, default_value = "highlight")]
+    pub style: OverlayStyleArg,
+    /// How long to keep it on screen; this command waits that long before exiting.
+    #[arg(long, default_value_t = 3000)]
+    pub duration_ms: u64,
+}
+
+#[derive(Args)]
+pub struct LaunchArgs {
+    /// Executable, shell URI (ms-settings:display), or folder/file path.
+    pub app: String,
+    /// Arguments passed to an executable.
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    pub args: Vec<String>,
+}
+
+fn parse_region(s: &str) -> Result<winwright_contracts::geometry::PhysicalRect, String> {
+    let parts: Vec<i32> = s
+        .split(',')
+        .map(|p| p.trim().parse::<i32>().map_err(|e| e.to_string()))
+        .collect::<Result<_, _>>()?;
+    let [x, y, w, h] = parts[..] else {
+        return Err("expected X,Y,WIDTH,HEIGHT".into());
+    };
+    if w <= 0 || h <= 0 {
+        return Err("width and height must be positive".into());
+    }
+    Ok(winwright_contracts::geometry::PhysicalRect::new(
+        x,
+        y,
+        x + w,
+        y + h,
+    ))
 }

@@ -17,6 +17,7 @@ pub mod overlay;
 pub mod security;
 pub mod snapshot;
 pub mod system;
+pub mod wait;
 pub mod window;
 
 pub use error::{ErrorCode, ErrorPayload, WinwrightError, WinwrightResult};

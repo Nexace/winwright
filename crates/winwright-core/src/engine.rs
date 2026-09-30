@@ -35,6 +35,8 @@ pub(crate) const KEEP_GENERATIONS: u64 = 3;
 const RAW_NODE_FACTOR: u32 = 6;
 pub(crate) const RAW_NODE_LIMIT: u32 = 5_000;
 const MAX_ALL_WINDOWS: usize = 24;
+/// Window sets whose last snapshot is remembered per session for diffs.
+const MAX_REMEMBERED_SNAPSHOTS: usize = 16;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InspectRequest {
@@ -373,6 +375,19 @@ impl Engine {
             .await?;
 
         let now = Instant::now();
+        let scope_key = {
+            let mut windows: Vec<String> = trees
+                .iter()
+                .map(|(_, w)| w.map_or("?".to_owned(), |h| format!("{h:#x}")))
+                .collect();
+            windows.sort();
+            match &request.target {
+                SnapshotTarget::Subtree { reference } => {
+                    format!("sub:{reference}:{}", windows.join(","))
+                }
+                _ => format!("win:{}", windows.join(",")),
+            }
+        };
         let (snapshot, release) = {
             let mut state = session.state();
             state.generation += 1;
@@ -381,6 +396,37 @@ impl Engine {
             for (tree, window) in &trees {
                 compressor.add_tree(tree, &mut state.refs, *window);
             }
+            let lines = crate::diff::lines(&compressor.text);
+            let diff = if request.diff {
+                state.snapshots.get(&scope_key).map(|(previous, old)| {
+                    crate::diff::render(
+                        &format_generation(*previous),
+                        &format_generation(generation),
+                        old,
+                        &lines,
+                    )
+                    .0
+                })
+            } else {
+                None
+            };
+            if request.diff && diff.is_none() {
+                warnings.push(
+                    "no earlier snapshot of these windows to diff against; sent the full tree"
+                        .into(),
+                );
+            }
+            if state.snapshots.len() >= MAX_REMEMBERED_SNAPSHOTS
+                && !state.snapshots.contains_key(&scope_key)
+                && let Some(oldest) = state
+                    .snapshots
+                    .iter()
+                    .min_by_key(|(_, (g, _))| *g)
+                    .map(|(k, _)| k.clone())
+            {
+                state.snapshots.remove(&oldest);
+            }
+            state.snapshots.insert(scope_key, (generation, lines));
             let plain: Vec<UiTree> = trees.into_iter().map(|(t, _)| t).collect();
             let mut release = compressor.unreferenced_keys(&plain);
             release.extend(state.refs.prune(
@@ -403,11 +449,16 @@ impl Engine {
                     title: w.title.clone(),
                     process: w.process_name.clone(),
                 }),
-                tree: compressor.text,
+                tree: if diff.is_some() {
+                    String::new()
+                } else {
+                    compressor.text
+                },
                 node_count: compressor.emitted,
                 truncated: compressor.truncated,
                 warnings,
                 nodes: request.structured.then_some(compressor.nodes),
+                diff,
             };
             (snapshot, release)
         };

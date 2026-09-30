@@ -306,6 +306,13 @@ pub trait UiAutomationBackend: Send + Sync {
     /// Drops worker slots the caller no longer references.
     fn release<'a>(&'a self, keys: Vec<ElementKey>) -> BackendFuture<'a, ()>;
 
+    /// A counter bumped whenever UI Automation reports a relevant change (window opened or
+    /// closed, focus moved, structure changed). Waits use it only to wake early; they always
+    /// re-check the real state. `None` when the backend has no event source.
+    fn events(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
+        None
+    }
+
     /// Re-reads the element's properties. `ELEMENT_STALE` when it no longer exists.
     fn refresh<'a>(
         &'a self,

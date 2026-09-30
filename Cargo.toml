@@ -62,6 +62,17 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 windows = "0.62"
 windows-core = "0.62"
 
+# Keep the build folder small: line tables are enough for backtraces in our crates, and
+# dependency debug info (windows-rs especially) is by far the largest part of target/.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
+[profile.release]
+strip = "debuginfo"
+
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 

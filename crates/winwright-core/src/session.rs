@@ -17,6 +17,8 @@ use crate::refs::RefTable;
 pub struct SessionState {
     pub generation: u64,
     pub refs: RefTable,
+    /// Last rendered snapshot per window set, for diffs: key -> (generation, lines).
+    pub snapshots: HashMap<String, (u64, Vec<crate::diff::Line>)>,
 }
 
 pub struct Session {
@@ -66,14 +68,14 @@ impl Session {
 
 pub struct SessionRegistry {
     /// Parent of every session token: cancelling it is the emergency stop.
-    root: CancellationToken,
+    root: Mutex<CancellationToken>,
     sessions: Mutex<HashMap<SessionId, Arc<Session>>>,
 }
 
 impl Default for SessionRegistry {
     fn default() -> Self {
         Self {
-            root: CancellationToken::new(),
+            root: Mutex::new(CancellationToken::new()),
             sessions: Mutex::default(),
         }
     }
@@ -86,8 +88,16 @@ impl SessionRegistry {
         self.sessions.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    fn root(&self) -> CancellationToken {
+        self.root
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
     pub fn get_or_create(&self, id: &SessionId, owner: &str) -> WinwrightResult<Arc<Session>> {
-        if self.root.is_cancelled() {
+        let root = self.root();
+        if root.is_cancelled() {
             return Err(WinwrightError::Cancelled);
         }
         let mut sessions = self.sessions();
@@ -100,7 +110,7 @@ impl SessionRegistry {
                 Self::MAX_SESSIONS
             )));
         }
-        let session = Arc::new(Session::new(id.clone(), owner.to_owned(), &self.root));
+        let session = Arc::new(Session::new(id.clone(), owner.to_owned(), &root));
         sessions.insert(id.clone(), Arc::clone(&session));
         Ok(session)
     }
@@ -120,7 +130,21 @@ impl SessionRegistry {
 
     /// Emergency stop: cancels every current and future session in this engine.
     pub fn cancel_all(&self) {
-        self.root.cancel();
+        self.root().cancel();
+    }
+
+    pub fn is_stopped(&self) -> bool {
+        self.root().is_cancelled()
+    }
+
+    /// Re-enables the registry after an emergency stop. Old sessions stay cancelled and are
+    /// dropped; callers start fresh sessions. User-initiated only.
+    pub fn rearm(&self) {
+        let mut root = self.root.lock().unwrap_or_else(PoisonError::into_inner);
+        if root.is_cancelled() {
+            *root = CancellationToken::new();
+            self.sessions().clear();
+        }
     }
 }
 
@@ -172,6 +196,12 @@ mod tests {
         reg.cancel_all();
         assert!(a.is_cancelled() && b.is_cancelled() && ctx.cancel.is_cancelled());
         assert!(reg.get_or_create(&sid("c"), "cli").is_err());
+        assert!(reg.is_stopped());
+        reg.rearm();
+        assert!(!reg.is_stopped());
+        let fresh = reg.get_or_create(&sid("a"), "cli").unwrap();
+        assert!(!fresh.is_cancelled(), "rearm starts clean sessions");
+        assert!(a.is_cancelled(), "old sessions stay cancelled");
     }
 
     #[test]

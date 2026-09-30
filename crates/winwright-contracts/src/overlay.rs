@@ -48,6 +48,34 @@ pub struct OverlayRequest {
 #[serde(transparent)]
 pub struct OverlayId(pub u64);
 
+/// Model-facing highlight (spec §21): the engine resolves `target` to bounds.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HighlightRequest {
+    pub target: crate::action::ElementTarget,
+    #[serde(default)]
+    pub style: OverlayStyle,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<u32>,
+    /// Defaults to 8 s so forgotten highlights disappear; `0` is rejected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct HighlightResult {
+    pub overlay: OverlayId,
+    #[serde(rename = "ref")]
+    pub reference: String,
+    pub target: String,
+    pub rect: PhysicalRect,
+}
+
 /// Native, click-through, never-activating overlays on their own message-loop thread.
 pub trait OverlayService: Send + Sync {
     fn show(&self, request: OverlayRequest) -> WinwrightResult<OverlayId>;

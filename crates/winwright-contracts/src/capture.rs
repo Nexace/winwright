@@ -97,6 +97,36 @@ pub struct MonitorInfo {
     pub primary: bool,
 }
 
+/// Model-facing screenshot target (spec §18). Resolved by the engine into a [`CaptureTarget`].
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum ScreenshotTarget {
+    /// The foreground window.
+    #[default]
+    Active,
+    Window(crate::window::WindowSelector),
+    /// An element's bounds (by ref), cropped from the screen.
+    Element {
+        #[serde(rename = "ref")]
+        reference: String,
+    },
+    Monitor(u32),
+    Region(PhysicalRect),
+    Desktop,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ScreenshotRequest {
+    #[serde(default)]
+    pub target: ScreenshotTarget,
+    #[serde(default)]
+    pub format: ImageFormat,
+    /// JPEG quality 1..=100 (default 85).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quality: Option<u8>,
+}
+
 pub trait CaptureService: Send + Sync {
     fn monitors(&self) -> WinwrightResult<Vec<MonitorInfo>>;
 

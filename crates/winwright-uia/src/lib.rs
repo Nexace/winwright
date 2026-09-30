@@ -4,6 +4,7 @@
 //! bounded channel and await oneshot replies. No COM interface ever leaves the worker thread.
 
 mod com;
+mod events;
 mod patterns;
 mod props;
 mod worker;
@@ -27,6 +28,7 @@ static NEXT_EPOCH: AtomicU64 = AtomicU64::new(1);
 pub struct UiaBackend {
     tx: mpsc::Sender<Command>,
     epoch: u64,
+    events: tokio::sync::watch::Receiver<u64>,
 }
 
 fn unavailable() -> WinwrightError {
@@ -42,16 +44,17 @@ impl UiaBackend {
         let epoch = NEXT_EPOCH.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::channel(QUEUE_DEPTH);
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (events_tx, events) = tokio::sync::watch::channel(0u64);
         std::thread::Builder::new()
             .name(format!("winwright-uia-{epoch}"))
             .stack_size(8 * 1024 * 1024)
-            .spawn(move || worker::run(epoch, rx, ready_tx))
+            .spawn(move || worker::run(epoch, rx, ready_tx, events_tx))
             .map_err(|e| WinwrightError::BackendUnavailable {
                 backend: "UIAutomation".into(),
                 reason: format!("cannot spawn worker thread: {e}"),
             })?;
         ready_rx.recv().map_err(|_| unavailable())??;
-        Ok(Self { tx, epoch })
+        Ok(Self { tx, epoch, events })
     }
 
     async fn call<T>(
@@ -109,6 +112,10 @@ fn outcome_unknown_on_timeout<T>(
 impl UiAutomationBackend for UiaBackend {
     fn worker_epoch(&self) -> u64 {
         self.epoch
+    }
+
+    fn events(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
+        Some(self.events.clone())
     }
 
     fn capture_tree<'a>(

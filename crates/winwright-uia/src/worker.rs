@@ -77,6 +77,7 @@ pub fn run(
     epoch: u64,
     mut rx: mpsc::Receiver<Command>,
     ready: std::sync::mpsc::Sender<WinwrightResult<()>>,
+    events: tokio::sync::watch::Sender<u64>,
 ) {
     // Drop order matters: `_apartment` is declared first so it is dropped after `worker`.
     let _apartment = match ComApartment::init_mta() {
@@ -93,8 +94,9 @@ pub fn run(
             return;
         }
     };
+    let subscribed = crate::events::subscribe(&worker.automation, &worker.root, events);
     let _ = ready.send(Ok(()));
-    tracing::debug!(epoch, "UIA worker ready");
+    tracing::debug!(epoch, subscribed, "UIA worker ready");
 
     while let Some(command) = rx.blocking_recv() {
         match command {
@@ -131,6 +133,8 @@ pub fn run(
         }
     }
     tracing::debug!(epoch, slots = worker.slots.len(), "UIA worker stopping");
+    // Handlers must be removed on this thread before the apartment is torn down.
+    crate::events::unsubscribe(&worker.automation);
 }
 
 fn collect_keys(node: &UiNode, out: &mut Vec<ElementKey>) {

@@ -421,3 +421,111 @@ async fn window_control_round_trip() {
         .unwrap();
     assert!(r.verified, "{r:?}");
 }
+
+#[tokio::test]
+#[ignore = "launches the fixture app"]
+async fn phase4_waits_replace_sleeps() {
+    use winwright_contracts::wait::{WaitRequest, WaitState};
+    let h = start();
+    let wait = |state,
+                locator: Option<ElementLocator>,
+                window: Option<WindowSelector>,
+                value: Option<&str>| WaitRequest {
+        state,
+        reference: None,
+        locator,
+        scope: h.scope(),
+        window,
+        value: value.map(Into::into),
+        value_match: Default::default(),
+        timeout_ms: Some(5_000),
+    };
+    let button = |name: &str| ElementLocator {
+        role: Some("Button".into()),
+        name: Some(name.into()),
+        ..Default::default()
+    };
+
+    h.run(click(h.target("Button", "Add Delayed"))).await;
+    let appeared = h
+        .engine
+        .wait_for(
+            &h.session,
+            wait(
+                WaitState::Visible,
+                Some(button("Delayed Button")),
+                None,
+                None,
+            ),
+        )
+        .await
+        .unwrap();
+    assert!(
+        appeared.elapsed_ms >= 1_000,
+        "the button is created after 1.5 s: {appeared:?}"
+    );
+    let delayed_ref = appeared.element.unwrap().reference;
+    h.run(click(ElementTarget::by_ref(&delayed_ref))).await;
+    let status = h
+        .engine
+        .wait_for(
+            &h.session,
+            wait(
+                WaitState::Text,
+                Some(ElementLocator {
+                    automation_id: Some("140".into()),
+                    ..Default::default()
+                }),
+                None,
+                Some("Delayed clicked"),
+            ),
+        )
+        .await
+        .unwrap();
+    assert!(status.checks >= 1);
+
+    let dialog = WindowSelector {
+        title: Some("Fixture Dialog".into()),
+        ..Default::default()
+    };
+    h.run(click(h.target("Button", "Open Dialog"))).await;
+    h.engine
+        .wait_for(
+            &h.session,
+            wait(WaitState::WindowOpen, None, Some(dialog.clone()), None),
+        )
+        .await
+        .unwrap();
+    h.run(click(ElementTarget::by_locator(
+        button("Cancel"),
+        SnapshotTarget::Window(dialog.clone()),
+    )))
+    .await;
+    h.engine
+        .wait_for(
+            &h.session,
+            wait(WaitState::WindowClosed, None, Some(dialog), None),
+        )
+        .await
+        .unwrap();
+
+    // A diff snapshot after one change reports only that change.
+    let snap = |diff| SnapshotRequest {
+        target: h.scope(),
+        diff,
+        ..Default::default()
+    };
+    h.engine.snapshot(&h.session, snap(false)).await.unwrap();
+    h.run(DesktopAction::Check {
+        target: h.target("CheckBox", "Enable feature"),
+    })
+    .await;
+    let d = h.engine.snapshot(&h.session, snap(true)).await.unwrap();
+    let diff = d.diff.expect("diff against the previous snapshot");
+    let changed = diff
+        .lines()
+        .find(|l| l.starts_with("~ CHECKBOX \"Enable feature\" unchecked"))
+        .unwrap_or_else(|| panic!("checkbox change missing: {diff}"));
+    assert!(changed.contains(" checked ["), "{diff}");
+    assert!(d.tree.is_empty());
+}

@@ -12,6 +12,8 @@ winwright-security.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
+# `#[implement]` (UIA event handlers) expands to `::windows_core` paths.
+windows-core.workspace = true
 windows = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_System_Com",

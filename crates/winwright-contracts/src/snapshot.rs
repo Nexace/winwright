@@ -61,6 +61,10 @@ pub struct SnapshotRequest {
     /// Also return the structured node tree next to the compact text.
     #[serde(default)]
     pub structured: bool,
+    /// Return only what changed since this session's previous snapshot of the same windows
+    /// (spec §41). The full tree is sent when there is nothing to compare against.
+    #[serde(default)]
+    pub diff: bool,
 }
 
 impl Default for SnapshotRequest {
@@ -77,6 +81,7 @@ impl Default for SnapshotRequest {
             max_list_items: default_max_list_items(),
             raw_debug: false,
             structured: false,
+            diff: false,
         }
     }
 }
@@ -145,6 +150,9 @@ pub struct DesktopSnapshot {
     pub warnings: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nodes: Option<Vec<SnapshotNode>>,
+    /// `DIFF s_1 -> s_2` followed by `+`/`-`/`~` lines and focus moves; `tree` is then empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff: Option<String>,
 }
 
 #[cfg(test)]
