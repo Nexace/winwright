@@ -1,0 +1,25 @@
+[package]
+name = "winwright-input"
+description = "Level-4 physical input fallback: SendInput pointer and keyboard synthesis."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+winwright-contracts.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_System_StationsAndDesktops",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[dev-dependencies]
+tokio-util.workspace = true
+winwright-win32.workspace = true
+
+[lints]
+workspace = true
