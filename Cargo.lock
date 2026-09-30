@@ -726,6 +726,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "winwright-overlay"
+version = "0.1.0"
+dependencies = [
+ "tracing",
+ "windows",
+ "winwright-contracts",
+]
+
+[[package]]
 name = "winwright-security"
 version = "0.1.0"
 dependencies = [

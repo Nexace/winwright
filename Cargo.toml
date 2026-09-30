@@ -7,6 +7,7 @@ members = [
     "crates/winwright-win32",
     "crates/winwright-uia",
     "crates/winwright-input",
+    "crates/winwright-overlay",
     "crates/winwright-cli",
     "crates/winwright-test-support",
     "fixtures/test-win32-app",
@@ -19,6 +20,7 @@ default-members = [
     "crates/winwright-win32",
     "crates/winwright-uia",
     "crates/winwright-input",
+    "crates/winwright-overlay",
     "crates/winwright-cli",
 ]
 
@@ -32,6 +34,7 @@ publish = false
 winwright-contracts = { path = "crates/winwright-contracts" }
 winwright-core = { path = "crates/winwright-core" }
 winwright-input = { path = "crates/winwright-input" }
+winwright-overlay = { path = "crates/winwright-overlay" }
 winwright-security = { path = "crates/winwright-security" }
 winwright-uia = { path = "crates/winwright-uia" }
 winwright-win32 = { path = "crates/winwright-win32" }
