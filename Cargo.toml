@@ -7,6 +7,7 @@ members = [
     "crates/winwright-win32",
     "crates/winwright-uia",
     "crates/winwright-cli",
+    "crates/winwright-test-support",
     "fixtures/test-win32-app",
     "fixtures/test-custom-canvas",
 ]
@@ -31,6 +32,7 @@ winwright-core = { path = "crates/winwright-core" }
 winwright-security = { path = "crates/winwright-security" }
 winwright-uia = { path = "crates/winwright-uia" }
 winwright-win32 = { path = "crates/winwright-win32" }
+winwright-test-support = { path = "crates/winwright-test-support" }
 
 clap = { version = "4.6", features = ["derive"] }
 schemars = "1.2"

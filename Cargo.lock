@@ -708,6 +708,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "winwright-test-support"
+version = "0.1.0"
+dependencies = [
+ "windows",
+]
+
+[[package]]
 name = "winwright-uia"
 version = "0.1.0"
 dependencies = [
