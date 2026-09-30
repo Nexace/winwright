@@ -1,0 +1,32 @@
+[package]
+name = "winwright-shell"
+description = "Level-1 process operations: launch, list, and typed (never shell-interpreted) execution."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+winwright-contracts.workspace = true
+tokio = { workspace = true, features = ["process", "io-util", "time", "sync", "rt"] }
+tracing.workspace = true
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Com",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_JobObjects",
+    "Win32_System_Registry",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
+tokio-util.workspace = true
+
+[lints]
+workspace = true
