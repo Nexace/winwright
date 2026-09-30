@@ -687,6 +687,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "winwright-input"
+version = "0.1.0"
+dependencies = [
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "windows",
+ "winwright-contracts",
+ "winwright-win32",
+]
+
+[[package]]
 name = "winwright-security"
 version = "0.1.0"
 dependencies = [
