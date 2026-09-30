@@ -6,6 +6,7 @@ members = [
     "crates/winwright-security",
     "crates/winwright-win32",
     "crates/winwright-uia",
+    "crates/winwright-capture",
     "crates/winwright-cli",
 ]
 default-members = [
@@ -14,6 +15,7 @@ default-members = [
     "crates/winwright-security",
     "crates/winwright-win32",
     "crates/winwright-uia",
+    "crates/winwright-capture",
     "crates/winwright-cli",
 ]
 
@@ -24,6 +26,7 @@ rust-version = "1.98"
 publish = false
 
 [workspace.dependencies]
+winwright-capture = { path = "crates/winwright-capture" }
 winwright-contracts = { path = "crates/winwright-contracts" }
 winwright-core = { path = "crates/winwright-core" }
 winwright-security = { path = "crates/winwright-security" }
