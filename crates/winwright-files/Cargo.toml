@@ -1,0 +1,27 @@
+[package]
+name = "winwright-files"
+description = "Level-1 file operations with canonical paths, protected locations, and Recycle-Bin-only deletes."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+winwright-contracts.workspace = true
+tokio = { workspace = true, features = ["rt"] }
+tracing.workspace = true
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_UI_Shell",
+] }
+# `#[implement]` expands to `::windows_core` paths (the Recycle Bin progress sink).
+windows-core.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
+tokio-util.workspace = true
+
+[lints]
+workspace = true

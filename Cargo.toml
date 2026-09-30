@@ -7,6 +7,7 @@ members = [
     "crates/winwright-win32",
     "crates/winwright-uia",
     "crates/winwright-shell",
+    "crates/winwright-files",
     "crates/winwright-cli",
 ]
 default-members = [
@@ -16,6 +17,7 @@ default-members = [
     "crates/winwright-win32",
     "crates/winwright-uia",
     "crates/winwright-shell",
+    "crates/winwright-files",
     "crates/winwright-cli",
 ]
 
@@ -28,6 +30,7 @@ publish = false
 [workspace.dependencies]
 winwright-contracts = { path = "crates/winwright-contracts" }
 winwright-core = { path = "crates/winwright-core" }
+winwright-files = { path = "crates/winwright-files" }
 winwright-security = { path = "crates/winwright-security" }
 winwright-shell = { path = "crates/winwright-shell" }
 winwright-uia = { path = "crates/winwright-uia" }
@@ -43,6 +46,7 @@ tokio-util = "0.7"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 windows = "0.62"
+windows-core = "0.62"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

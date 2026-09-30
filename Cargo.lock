@@ -735,6 +735,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "winwright-files"
+version = "0.1.0"
+dependencies = [
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "windows",
+ "windows-core",
+ "winwright-contracts",
+]
+
+[[package]]
 name = "winwright-security"
 version = "0.1.0"
 dependencies = [
