@@ -1,0 +1,13 @@
+[package]
+name = "winwright-security"
+description = "Winwright permission policy, sensitive-field detection, and redaction."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+winwright-contracts.workspace = true
+
+[lints]
+workspace = true

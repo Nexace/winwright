@@ -1,0 +1,22 @@
+[package]
+name = "winwright-cli"
+description = "winwright.exe: CLI, engine host, and MCP entry point."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "winwright"
+path = "src/main.rs"
+
+[dependencies]
+winwright-contracts.workspace = true
+winwright-core.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true
