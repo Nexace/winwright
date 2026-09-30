@@ -1,118 +1,21 @@
-use std::path::PathBuf;
+mod args;
+
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use clap::{Args, Parser, Subcommand};
+use clap::Parser;
 use winwright_contracts::WinwrightError;
+use winwright_contracts::action::{ActionResult, DesktopAction};
 use winwright_contracts::config::Config;
 use winwright_contracts::element::ElementDetails;
-use winwright_contracts::geometry::PhysicalPoint;
 use winwright_contracts::ids::SessionId;
-use winwright_contracts::snapshot::{SnapshotRequest, SnapshotTarget};
-use winwright_contracts::window::{WindowInfo, WindowSelector};
+use winwright_contracts::input::{MouseButton, parse_chord};
+use winwright_contracts::locator::FindResult;
+use winwright_contracts::snapshot::SnapshotRequest;
+use winwright_contracts::window::WindowInfo;
 use winwright_core::{Engine, InspectRequest};
 
-#[derive(Parser)]
-#[command(
-    name = "winwright",
-    version,
-    about = "Semantic Windows desktop automation"
-)]
-struct Cli {
-    /// Config file (default: %APPDATA%\winwright\config.json).
-    #[arg(long, global = true)]
-    config: Option<PathBuf>,
-
-    /// Emit machine-readable JSON.
-    #[arg(long, global = true)]
-    json: bool,
-
-    #[command(subcommand)]
-    command: Command,
-}
-
-#[derive(Subcommand)]
-enum Command {
-    /// Print version and build information.
-    Version,
-    /// Print the effective configuration.
-    Config,
-    /// List visible top-level windows (foreground marked with *).
-    Windows,
-    /// Compact semantic snapshot of a window's UI Automation tree.
-    Snapshot(SnapshotArgs),
-    /// Inspect one element in detail.
-    Inspect(InspectArgs),
-}
-
-#[derive(Args)]
-struct SnapshotArgs {
-    /// Window whose title contains this text (case-insensitive).
-    #[arg(long)]
-    window: Option<String>,
-    /// Window owned by this executable (e.g. notepad or notepad.exe).
-    #[arg(long)]
-    process: Option<String>,
-    /// Window handle (decimal or 0x-prefixed hex).
-    #[arg(long, value_parser = parse_u64)]
-    hwnd: Option<u64>,
-    /// Snapshot every visible window.
-    #[arg(long, conflicts_with_all = ["window", "process", "hwnd"])]
-    all_windows: bool,
-    /// Include named non-interactive containers too.
-    #[arg(long)]
-    all: bool,
-    /// Keep every node, including layout containers (debugging).
-    #[arg(long)]
-    raw: bool,
-    #[arg(long)]
-    no_text: bool,
-    #[arg(long)]
-    bounds: bool,
-    #[arg(long)]
-    patterns: bool,
-    #[arg(long)]
-    offscreen: bool,
-    #[arg(long, default_value_t = 12)]
-    max_depth: u32,
-    #[arg(long)]
-    max_nodes: Option<u32>,
-    #[arg(long, default_value_t = 20)]
-    max_list_items: u32,
-    /// Include the structured node tree in JSON output.
-    #[arg(long)]
-    structured: bool,
-}
-
-#[derive(Args)]
-#[group(multiple = false)]
-struct InspectArgs {
-    /// Element under the mouse cursor (default).
-    #[arg(long)]
-    under_cursor: bool,
-    /// Element with keyboard focus.
-    #[arg(long)]
-    focused: bool,
-    /// Element at physical screen coordinates X,Y.
-    #[arg(long, value_parser = parse_point)]
-    at: Option<PhysicalPoint>,
-}
-
-fn parse_u64(s: &str) -> Result<u64, String> {
-    let r = match s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
-        Some(hex) => u64::from_str_radix(hex, 16),
-        None => s.parse(),
-    };
-    r.map_err(|e| e.to_string())
-}
-
-fn parse_point(s: &str) -> Result<PhysicalPoint, String> {
-    let (x, y) = s.split_once(',').ok_or("expected X,Y")?;
-    Ok(PhysicalPoint {
-        x: x.trim().parse().map_err(|e| format!("{e}"))?,
-        y: y.trim().parse().map_err(|e| format!("{e}"))?,
-    })
-}
+use crate::args::{Cli, Command};
 
 fn init_logging() {
     // stderr only: stdout is reserved for command output and, later, MCP frames.
@@ -194,63 +97,131 @@ fn print_details(d: &ElementDetails) {
     row("HelpText", d.help_text.clone());
 }
 
+fn print_found(found: &FindResult) {
+    for m in &found.matches {
+        let mut line = format!("{:<5} {}", m.reference, m.path);
+        if !m.automation_id.is_empty() {
+            line.push_str(&format!("  id={:?}", m.automation_id));
+        }
+        if !m.enabled {
+            line.push_str("  disabled");
+        }
+        println!("{line}");
+    }
+    if found.count as usize > found.matches.len() {
+        println!("... {} more", found.count as usize - found.matches.len());
+    }
+    if found.count == 0 {
+        eprintln!("no matches");
+    }
+    for w in &found.warnings {
+        eprintln!("warning: {w}");
+    }
+}
+
+fn print_action(r: &ActionResult) {
+    let mut line = format!(
+        "{} {:?} {}",
+        if r.verified { "ok" } else { "done" },
+        r.method,
+        r.target
+    );
+    if let Some(reference) = &r.reference {
+        line.push_str(&format!(" [{reference}]"));
+    }
+    line.push_str(&format!(
+        " {} {} ms",
+        if r.verified { "verified" } else { "unverified" },
+        r.duration_ms
+    ));
+    println!("{line}");
+    if let Some(after) = &r.after {
+        println!("  after: {after}");
+    }
+    for w in &r.opened_windows {
+        println!("  opened: {w}");
+    }
+    for w in &r.closed_windows {
+        println!("  closed: {w}");
+    }
+    if let Some(text) = &r.text {
+        println!("{text}");
+    }
+    for w in &r.warnings {
+        eprintln!("warning: {w}");
+    }
+}
+
+/// One-shot CLI commands use a transient session; refs do not outlive the process until
+/// `winwright serve` provides a persistent per-user engine.
+fn cli_session() -> SessionId {
+    SessionId::parse("cli").expect("valid id")
+}
+
+async fn act(engine: &Engine, action: DesktopAction, json: bool) -> Result<(), WinwrightError> {
+    let session = engine.session(&cli_session(), "cli")?;
+    let result = engine.execute(&session, action).await?;
+    if json {
+        print_json(&result);
+    } else {
+        print_action(&result);
+    }
+    Ok(())
+}
+
 async fn run(cli: Cli) -> Result<(), WinwrightError> {
     let config = winwright_core::config::load_config(cli.config.as_deref())?;
-    match cli.command {
+    let json = cli.json;
+    let command = match cli.command {
         Command::Version => {
             let info = serde_json::json!({
                 "name": "winwright",
                 "version": env!("CARGO_PKG_VERSION"),
                 "target": format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS),
             });
-            if cli.json {
+            if json {
                 println!("{info}");
             } else {
                 println!("winwright {}", env!("CARGO_PKG_VERSION"));
             }
+            return Ok(());
         }
-        Command::Config => print_json(&config),
+        Command::Config => {
+            print_json(&config);
+            return Ok(());
+        }
+        other => other,
+    };
+
+    let max_nodes = config.automation.max_snapshot_nodes;
+    let engine = build_engine(config)?;
+    match command {
+        Command::Version | Command::Config => unreachable!("handled above"),
         Command::Windows => {
-            let engine = build_engine(config)?;
             let windows = engine.list_windows()?;
-            if cli.json {
+            if json {
                 print_json(&windows);
             } else {
                 print_windows(&windows);
             }
         }
-        Command::Snapshot(args) => {
-            let max_nodes = args
-                .max_nodes
-                .unwrap_or(config.automation.max_snapshot_nodes);
-            let selector = WindowSelector {
-                title: args.window,
-                process: args.process,
-                hwnd: args.hwnd,
-            };
+        Command::Snapshot(a) => {
             let request = SnapshotRequest {
-                target: if args.all_windows {
-                    SnapshotTarget::AllWindows
-                } else if selector.is_empty() {
-                    SnapshotTarget::Active
-                } else {
-                    SnapshotTarget::Window(selector)
-                },
-                interactive_only: !args.all,
-                include_text: !args.no_text,
-                include_bounds: args.bounds,
-                include_patterns: args.patterns,
-                max_depth: args.max_depth,
-                max_nodes,
-                include_offscreen: args.offscreen,
-                max_list_items: args.max_list_items,
-                raw_debug: args.raw,
-                structured: args.structured,
+                target: a.scope.target(),
+                interactive_only: !a.all,
+                include_text: !a.no_text,
+                include_bounds: a.bounds,
+                include_patterns: a.patterns,
+                max_depth: a.max_depth,
+                max_nodes: a.max_nodes.unwrap_or(max_nodes),
+                include_offscreen: a.offscreen,
+                max_list_items: a.max_list_items,
+                raw_debug: a.raw,
+                structured: a.structured,
             };
-            let engine = build_engine(config)?;
             let session = engine.session(&cli_session(), "cli")?;
             let snapshot = engine.snapshot(&session, request).await?;
-            if cli.json {
+            if json {
                 print_json(&snapshot);
             } else {
                 print!("{}", snapshot.tree);
@@ -259,29 +230,160 @@ async fn run(cli: Cli) -> Result<(), WinwrightError> {
                 }
             }
         }
-        Command::Inspect(args) => {
-            let request = match (args.focused, args.at) {
+        Command::Inspect(a) => {
+            let request = match (a.focused, a.at) {
                 (true, _) => InspectRequest::Focused,
                 (_, Some(p)) => InspectRequest::Point(p),
                 _ => InspectRequest::UnderCursor,
             };
-            let engine = build_engine(config)?;
             let session = engine.session(&cli_session(), "cli")?;
             let details = engine.inspect(&session, request).await?;
-            if cli.json {
+            if json {
                 print_json(&details);
             } else {
                 print_details(&details);
             }
         }
+        Command::Find(a) => {
+            let session = engine.session(&cli_session(), "cli")?;
+            let found = engine.find(&session, a.request()).await?;
+            if json {
+                print_json(&found);
+            } else {
+                print_found(&found);
+            }
+        }
+        Command::Click(a) => {
+            let button = if a.right {
+                MouseButton::Right
+            } else if a.middle {
+                MouseButton::Middle
+            } else {
+                MouseButton::Left
+            };
+            let action = DesktopAction::Click {
+                target: a.target.target()?,
+                button,
+                click_count: if a.double { 2 } else { 1 },
+                force_physical: a.physical,
+            };
+            act(&engine, action, json).await?;
+        }
+        Command::Fill(a) => {
+            let action = DesktopAction::Fill {
+                target: a.target.target()?,
+                text: a.value,
+                clear: !a.append,
+            };
+            act(&engine, action, json).await?;
+        }
+        Command::Type(a) => {
+            let action = DesktopAction::TypeText {
+                target: a.target.optional_target()?,
+                text: a.value,
+            };
+            act(&engine, action, json).await?;
+        }
+        Command::Focus(t) => {
+            act(
+                &engine,
+                DesktopAction::Focus {
+                    target: t.target()?,
+                },
+                json,
+            )
+            .await?
+        }
+        Command::Check(t) => {
+            act(
+                &engine,
+                DesktopAction::Check {
+                    target: t.target()?,
+                },
+                json,
+            )
+            .await?
+        }
+        Command::Uncheck(t) => {
+            act(
+                &engine,
+                DesktopAction::Uncheck {
+                    target: t.target()?,
+                },
+                json,
+            )
+            .await?
+        }
+        Command::Toggle(t) => {
+            act(
+                &engine,
+                DesktopAction::Toggle {
+                    target: t.target()?,
+                },
+                json,
+            )
+            .await?
+        }
+        Command::Expand(t) => {
+            act(
+                &engine,
+                DesktopAction::Expand {
+                    target: t.target()?,
+                },
+                json,
+            )
+            .await?
+        }
+        Command::Collapse(t) => {
+            act(
+                &engine,
+                DesktopAction::Collapse {
+                    target: t.target()?,
+                },
+                json,
+            )
+            .await?
+        }
+        Command::Select(a) => {
+            let action = DesktopAction::Select {
+                target: a.target.target()?,
+                option: a.option,
+            };
+            act(&engine, action, json).await?;
+        }
+        Command::Scroll(a) => {
+            let action = DesktopAction::Scroll {
+                target: a.target.target()?,
+                direction: a.direction.into(),
+                amount: a.amount,
+            };
+            act(&engine, action, json).await?;
+        }
+        Command::Press(a) => {
+            let action = DesktopAction::Press {
+                target: a.target.optional_target()?,
+                keys: parse_chord(&a.keys).map_err(WinwrightError::invalid)?,
+            };
+            act(&engine, action, json).await?;
+        }
+        Command::Read(a) => {
+            let action = DesktopAction::ReadText {
+                target: a.target.target()?,
+                max_chars: a.max_chars,
+            };
+            act(&engine, action, json).await?;
+        }
+        Command::Window(a) => {
+            let session = engine.session(&cli_session(), "cli")?;
+            let result = engine.window_action(&session, a.action()?).await?;
+            if json {
+                print_json(&result);
+            } else {
+                print_action(&result);
+            }
+        }
     }
     Ok(())
-}
-
-/// One-shot CLI commands use a transient session; refs do not outlive the process until
-/// `winwright serve` provides a persistent per-user engine.
-fn cli_session() -> SessionId {
-    SessionId::parse("cli").expect("valid id")
 }
 
 fn main() -> ExitCode {
@@ -306,6 +408,9 @@ fn main() -> ExitCode {
                 eprintln!("error [{}]: {err}", err.code().as_str());
                 if let Some(hint) = err.hint() {
                     eprintln!("hint: {hint}");
+                }
+                for m in err.payload().matches {
+                    eprintln!("  candidate: {m}");
                 }
             }
             ExitCode::FAILURE
