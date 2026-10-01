@@ -10,7 +10,6 @@ import { createSpeaker, cycleVoice, currentVoiceName } from './lib/tts'
 import * as sfx from './lib/sfx'
 import * as music from './lib/music'
 import * as hands from './lib/hands'
-import { listenForClap } from './lib/clap'
 import * as camera from './lib/camera'
 import * as kokoro from './lib/kokoro'
 import { TTS_ENGINE } from './config'
@@ -24,12 +23,13 @@ import {
   watchBlades,
   watchCapture,
   watchUi,
+  watchPtt,
   watchConnection,
   connectedLabels,
   usingBridge,
   type Msg,
 } from './lib/brain'
-import { startAnalyser, micLevel } from './lib/audio'
+import { startAnalyser, micLevel, releaseMic } from './lib/audio'
 import { probeCapabilities } from './lib/capabilities'
 import { env } from './config'
 
@@ -71,7 +71,6 @@ const LEADING_NAME = new RegExp(`^(?:hey|hi|ok|okay|yo)?\\s*${NAME}\\b[\\s,.:!?-
 
 export default function App() {
   const store = useStore
-  const phase = useStore((s) => s.phase)
   const history = useRef<Msg[]>([])
   const speaker = useRef<ReturnType<typeof createSpeaker> | null>(null)
   const voice = useRef<Voice | null>(null)
@@ -109,6 +108,7 @@ export default function App() {
     music.duck(false)
     sfx.duck(false)
     s.setPhase('dormant')
+    stopListening()
   }
 
   /** Open the mic and wait. `window` is how long before he gives up. */
@@ -227,7 +227,9 @@ export default function App() {
       case 'boot':
         return 'deaf'
       case 'dormant':
-        return 'wake'
+        // Push-to-talk only: nothing listens while he is dormant (the microphone
+        // is released), so there is no wake word to hunt for.
+        return 'deaf'
       case 'waking':
       case 'listening':
         return 'command'
@@ -424,6 +426,7 @@ export default function App() {
     // The interface is JARVIS's to drive. These arrive out of band, pushed
     // mid-turn the way panels are, so a command can retint the reactor or put
     // something into orbit while he is still speaking the sentence about it.
+    watchPtt(() => void pttPress())
     watchUi((op, args) => {
       const s = store.getState()
       const a = (args ?? {}) as Record<string, never>
@@ -496,25 +499,23 @@ export default function App() {
     store.getState().setConnected(connectedLabels())
     store.getState().setVoice(currentVoiceName())
 
-    // The analyser is what makes the reactor pulse with your voice. It needs a
-    // getUserMedia stream; speech recognition does not, and gets its own. So a
-    // failure here costs the animation and nothing else — saying "voice input
-    // is unavailable" was both alarming and untrue.
+    await probeCapabilities()
+
+    // No microphone yet: it opens when the hotkey is pressed (see pttPress) and is
+    // released again when he goes dormant. Nothing listens in between.
+    store.getState().setPhase('dormant')
+  }
+
+  // -- push to talk ---------------------------------------------------------
+
+  /** Open the microphone and the voice loop, only for as long as a turn needs them. */
+  const ensureListening = async () => {
+    if (voice.current) return
     try {
       await startAnalyser()
     } catch {
-      console.warn(
-        '[jarvis] no microphone stream — the reactor will not pulse with your ' +
-          'voice. Speech recognition is unaffected.',
-      )
+      /* the orb just will not pulse with the voice */
     }
-
-    // Ask the bridge which speech engines exist before the loop starts, so the
-    // first turn already uses ElevenLabs when a key is present and the browser
-    // fallback when it is not — no flag, no reload.
-    await probeCapabilities()
-
-    // One voice loop, started once, running until the page closes.
     voice.current = await startVoice({
       mode,
       onWake,
@@ -523,40 +524,30 @@ export default function App() {
       onUtterance,
       onError: onVoiceError,
     })
-
-    store.getState().setPhase('dormant')
   }
 
-  // -- clap to start --------------------------------------------------------
+  /** Close both again: no hot mic while he is dormant. */
+  const stopListening = () => {
+    voice.current?.stop()
+    voice.current = null
+    releaseMic()
+  }
 
   /**
-   * A clap brings him up, as an alternative to the button.
-   *
-   * Only while the ignition screen is showing, and torn down the moment he
-   * boots — the microphone is about to belong to the voice loop, and two
-   * analysers arguing over the same stream is how you get an assistant that
-   * hears half of what you say.
-   *
-   * Deliberately silent about failure. If the microphone is refused, or has not
-   * been granted yet, the button is still right there; announcing an error
-   * about a feature nobody asked for would be worse than quietly doing without.
+   * The hotkey (Winwright's global Ctrl+Space, relayed by the bridge) or the page's
+   * own Space bar: start listening now. He does not greet first, since a hotkey
+   * press is already an intention; talking over him still interrupts.
    */
-  useEffect(() => {
-    if (phase !== 'offline') return
-    let live: { stop: () => void } | null = null
-    let gone = false
-    void listenForClap(() => {
-      if (!gone) void powerOn()
-    }).then((l) => {
-      if (gone) l.stop()
-      else live = l
-    })
-    return () => {
-      gone = true
-      live?.stop()
+  const pttPress = async () => {
+    const phase = store.getState().phase
+    if (phase === 'offline' || phase === 'boot') return
+    store.getState().setError(null)
+    await ensureListening()
+    if (phase === 'thinking' || phase === 'tooling' || phase === 'speaking') {
+      onSpeechStart()
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [phase])
+    listen(AWAIT_SPEECH_MS)
+  }
 
   // -- level pump + keys ----------------------------------------------------
 
@@ -669,15 +660,8 @@ export default function App() {
         void powerOn()
       } else if (phase === 'boot') {
         /* ignore — the boot sequence owns the phase until it finishes */
-      } else if (
-        phase === 'thinking' ||
-        phase === 'tooling' ||
-        phase === 'speaking'
-      ) {
-        onSpeechStart()
-        listen(AWAIT_SPEECH_MS)
       } else {
-        onWake('')
+        void pttPress()
       }
     }
     window.addEventListener('keydown', onKey)

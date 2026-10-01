@@ -21,6 +21,16 @@ export async function getMic(): Promise<MediaStream> {
   return stream
 }
 
+/** Give the microphone back (the OS indicator goes off) until the next getMic. */
+export function releaseMic(): void {
+  stream?.getTracks().forEach((t) => t.stop())
+  stream = null
+  void ctx?.close().catch(() => {})
+  ctx = null
+  analyser = null
+  buf = null
+}
+
 export async function startAnalyser(): Promise<void> {
   if (analyser) return
   const s = await getMic()

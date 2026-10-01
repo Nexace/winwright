@@ -100,6 +100,12 @@ export function watchUi(fn: (op: string, args: any) => void) {
   onUi = fn
 }
 
+/** Push-to-talk: Winwright's global hotkey, relayed by the bridge. */
+let onPtt: (() => void) | null = null
+export function watchPtt(fn: () => void) {
+  onPtt = fn
+}
+
 /**
  * Connection state, for the UI.
  *
@@ -203,6 +209,8 @@ function dispatch(ws: WebSocket) {
           .then(reply)
           .catch((err) => reply({ error: String(err?.message ?? err) }))
       }
+    } else if (msg.type === 'ptt') {
+      onPtt?.()
     } else if (msg.type === 'ui' && msg.op) {
       // A `ui` frame with no args is normal — reset and clear take none — so an
       // absent args object is an empty one, not a reason to drop the command.

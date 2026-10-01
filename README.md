@@ -86,7 +86,7 @@ Logs go to stderr; set `WINWRIGHT_LOG=debug` for detail.
 
 ## Voice assistant (JARVIS)
 
-`apps/jarvis` is the [JARVIS](https://github.com/adewaskar/jarvis) browser voice assistant (MIT, vendored), wired to use Winwright as its desktop hands. Say "Hey Jarvis", and Claude Code (headless, via the Claude Agent SDK) drives your screen through `winwright mcp`.
+`apps/jarvis` is the [JARVIS](https://github.com/adewaskar/jarvis) browser voice assistant (MIT, vendored), wired to use Winwright as its desktop hands. Press **Ctrl+Space** (a global hotkey, works in any app and in games) to talk, and Claude Code (headless, via the Claude Agent SDK) drives your screen through `winwright mcp`.
 
 ```powershell
 cd apps\jarvis
@@ -100,3 +100,5 @@ Needs Node.js 20+, Chrome or Edge, and a logged-in Claude Code. No API key. Winw
 JARVIS's own tools (web search, image generation, its other MCP servers) keep JARVIS's own rules; see `apps/jarvis/README.md`. The only Winwright-specific edits are marked in `apps/jarvis/bridge/server.mjs` (`winwrightServer`, `decideTool`, and a short `DESKTOP` paragraph in the system prompt).
 
 **Idle shutdown.** Nothing keeps running when unused: `winwright mcp` exits after 10 minutes with no tool call (`WINWRIGHT_IDLE_MINUTES`, `0` = never), and the JARVIS bridge exits after 10 minutes with no connection or message from the page (`JARVIS_IDLE_MINUTES`); stopping the bridge stops the face with it. Note that an MCP client such as Claude Desktop will see the Winwright server disconnect after its idle period and may need a restart; set `WINWRIGHT_IDLE_MINUTES=0` in its config to keep it running.
+
+**Push-to-talk, not always listening.** There is no wake word. Nothing listens until you press the hotkey (`WINWRIGHT_PTT_HOTKEY`, default `Ctrl+Space`; Space also works in the JARVIS page). The microphone opens for that turn and is released when JARVIS goes dormant again, so the OS microphone indicator is off in between. Winwright owns the hotkey so it works while another app has focus, and relays it to the bridge with a per-run secret; a web page cannot trigger it. Ctrl+Space is claimed globally while `winwright assistant` runs (set another chord if it clashes with an editor shortcut). A press starts a turn; JARVIS ends it when you stop speaking, not on key release.

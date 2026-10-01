@@ -41,3 +41,6 @@ Next, in order (small):
 5. **One launcher**: `winwright assistant` is the only start command; it exports `JARVIS_WINWRIGHT_EXE` and shares the idle timer setting.
 6. **Audit**: Winwright's audit log stays the record of desktop actions; JARVIS logs conversation turns separately. No merged log (different trust levels).
 7. **Live check**: one end-to-end run: "open Notepad and type X" (Winwright), "search this on the web" (Playwright), "read my open tab" (`jarvis_chrome`), "save this page" (page by Playwright, Save As dialog by Winwright), then a Ctrl+Alt+Esc stop mid-task.
+
+## Push-to-talk (2026-10-01)
+Wake-word listening is removed; JARVIS's other features are untouched. Winwright (`winwright assistant`) registers the global hotkey (default Ctrl+Space) and POSTs `/ptt` to the bridge with a per-run token; the bridge relays `{type:'ptt'}` to the page, which opens the mic and starts a turn, and releases the mic when dormant. The ignition-screen clap listener is also removed (it held the mic open). Speech-to-text engine unchanged (ElevenLabs if keyed, else the browser's). Open: true hold-to-talk (end on key release) needs key-up detection; a later change. Brave has no browser speech recognition, so without an ElevenLabs key voice input will not work in Brave.

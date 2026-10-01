@@ -69,6 +69,11 @@ export function watchUi(fn: (op: string, args: any) => void): void {
   if (usingBridge) bridge.watchUi(fn)
 }
 
+/** Push-to-talk presses relayed by the bridge from Winwright's global hotkey. */
+export function watchPtt(fn: () => void): void {
+  if (usingBridge) bridge.watchPtt(fn)
+}
+
 /**
  * The one thing the bridge asks US for.
  *

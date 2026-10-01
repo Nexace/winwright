@@ -21,6 +21,7 @@ import { displayServer } from './panels.mjs'
 import { uiServer } from './ui.mjs'
 import { chromeAvailable, chromeServer } from './chrome.mjs'
 import { visionServer } from './vision.mjs'
+import { timingSafeEqual } from 'node:crypto'
 import { homedir, tmpdir } from 'node:os'
 import { readFileSync, realpathSync } from 'node:fs'
 import { readFile, realpath, stat } from 'node:fs/promises'
@@ -712,6 +713,29 @@ const handleRequest = async (req, res) => {
     return res.end('forbidden')
   }
   const cors = corsFor(req)
+
+  // Push-to-talk from Winwright's global hotkey. Only enabled when the launcher
+  // set JARVIS_PTT_TOKEN (a per-run secret), so a stand-alone bridge has no such
+  // endpoint, and a web page cannot call it (it never learns the token and the
+  // Origin check above has already refused it).
+  if (req.method === 'POST' && req.url === '/ptt') {
+    const want = process.env.JARVIS_PTT_TOKEN
+    const got = String(req.headers['x-jarvis-ptt'] ?? '')
+    const ok =
+      want &&
+      got.length === want.length &&
+      timingSafeEqual(Buffer.from(got), Buffer.from(want))
+    if (!ok) {
+      res.writeHead(403)
+      return res.end('forbidden')
+    }
+    touch()
+    for (const client of wss.clients) {
+      if (client.readyState === 1) client.send(JSON.stringify({ type: 'ptt' }))
+    }
+    res.writeHead(204)
+    return res.end()
+  }
 
   if (req.method === 'OPTIONS') {
     res.writeHead(204, cors)
