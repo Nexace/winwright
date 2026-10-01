@@ -91,3 +91,5 @@ Next steps, in order:
 5. ONE live-test agent, serialized: live_fixture, mcp_stdio, live_confirm, live_desktop, live_capture (repeat ~20x; add a 150 ms delay to test the black-capture race). Phase 7 physical-input test only with the user's OK (moves the mouse ~10 s). Never live-test file ops against the real user profile.
 6. Run JARVIS once with the user (`npm install` in apps/jarvis first).
 7. Final cleanup the user asked for: `cargo clean` (~11 GB), scratchpad temp files, apps/jarvis/node_modules if unused; keep only source and docs.
+
+- 2026-10-01 idle shutdown added: `winwright mcp` (WINWRIGHT_IDLE_MINUTES, default 10; edits in mcp/src/lib.rs + cli/src/main.rs, uncommitted with the agents' fixes) and JARVIS bridge (JARVIS_IDLE_MINUTES, default 10; committed). Verified live with short limits.

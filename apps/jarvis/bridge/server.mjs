@@ -1072,8 +1072,29 @@ const RESULT_FAILURES = {
   default: 'The turn ended without an answer.',
 }
 
+/**
+ * Idle shutdown. Nothing here should keep running while nobody is using it, so
+ * the bridge exits after JARVIS_IDLE_MINUTES (default 10, 0 = never) without a
+ * connection or a message from the page. scripts/start.mjs then stops the face
+ * with it, and the Winwright server it spawned goes when its pipe closes.
+ */
+const IDLE_MS = Number(process.env.JARVIS_IDLE_MINUTES ?? 10) * 60_000
+let lastActivity = Date.now()
+const touch = () => {
+  lastActivity = Date.now()
+}
+if (IDLE_MS > 0) {
+  setInterval(() => {
+    if (Date.now() - lastActivity < IDLE_MS) return
+    console.log(`[jarvis] idle for ${IDLE_MS / 60_000} min; shutting down`)
+    process.exit(0)
+  }, 15_000).unref()
+  console.log(`[jarvis] will stop after ${IDLE_MS / 60_000} idle minutes`)
+}
+
 wss.on('connection', (socket) => {
   console.log('[jarvis] client connected')
+  touch()
 
   // Answer the HUD straight away rather than making it wait for the agent's
   // first turn. Refined later by the real init message.
@@ -1429,6 +1450,7 @@ wss.on('connection', (socket) => {
   })()
 
   socket.on('message', (raw) => {
+    touch()
     let msg
     try {
       msg = JSON.parse(raw.toString())
