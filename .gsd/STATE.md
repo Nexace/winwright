@@ -68,3 +68,26 @@
 ## JARVIS integration (2026-10-01)
 - `apps/jarvis` = vendored github.com/adewaskar/jarvis (MIT). Bridge patched to add a `winwright` MCP server when `JARVIS_WINWRIGHT_EXE` is set and to pass its tools through `decideTool` (Winwright enforces its own gates). `winwright assistant` launches it; it refuses until `npm install` is run in `apps/jarvis` (not auto-run: large download).
 - Not yet run live (needs `npm install`, Chrome, and the user's Claude Code login). Next: run it once with the user.
+
+## CHECKPOINT 2026-10-01 (resume here)
+Committed: Phases 0-6, 8, 11; Winwright UI theme/tray/dialog/Inspector redesign; JARVIS vendored (apps/jarvis, `winwright assistant`).
+
+UNCOMMITTED in the working tree (~32 modified files) = fixes from 5 debugging agents, not yet verified together:
+- DONE (reports reviewed): MCP/CLI/contracts (20 fixes); platform adapters (files 8.3 short-name protected-path bypass, uia timeout labels / slot leaks / event-handler leaks, shell script-host blocklist); native UI (confirm dialog: drop before first poll, WM_CLOSE to a recycled handle, typing-approves; tray set() leaks; Inspector races).
+- INCOMPLETE: core+security agent hit the usage limit twice. Partial edits in winwright-core and winwright-security; winwright-security tests did not compile (classify.rs `program_capability`, test near line 189). Intended: every Engine entry point (incl. list_windows, process_list) refuses after emergency stop; guard_self refuses any winwright.exe process; classify interpreters on launch.
+
+Next steps, in order:
+1. `cargo check --workspace --all-targets`; fix winwright-security compile; then clippy `-D warnings` and `cargo test --workspace`. If the partial core/security edits are too broken, finish or revert only those two crates (git diff first).
+2. Security audit findings (full report was in chat):
+   - C1 app_launch runs cmd/powershell/winwright.exe with args and no confirm -> Confirm when args non-empty or image is an interpreter; always deny winwright.exe; show full args + resolved path in the prompt (M6).
+   - H1 Allow button must accept only real mouse/keyboard input (reject injected / BM_CLICK); documented limitation: no voice-control or on-screen-keyboard approval.
+   - H2 keyboard path: classify the focused element; Ctrl/Alt+Enter, Delete, Win chords, newline in type_text count as risky.
+   - H3 launch allowlist for URI schemes and file types; no UNC executables.
+   - M1 classifier: NFKC + strip format chars + more verbs + dialog context. M2 is_sensitive: include labeled_by/help_text, more terms.
+   - M3 protect %APPDATA%\winwright, %LOCALAPPDATA%\winwright and the exe folder; confirm move/rename. M4 confirm UNC / cross-volume / sensitive-source copies.
+   - M5 guard_self in highlight; no overlays while a confirm is pending. L1 powershell capability. L3 stop covers reads. L5 arm delay from first activation.
+3. Other agent-reported bugs: shell_execute capped at 10 s (services.rs ~327; use max(request timeout, default)); timeouts report "0 ms" in capture/worker.rs:35 and input/lib.rs:250 (use ctx.started); config-disabled backend should be ACTION_BLOCKED not BACKEND_UNAVAILABLE; load_config value sanity (defaultTimeoutMs 0); UIA depth-limit truncation never reported.
+4. Commit in logical chunks (fix(files), fix(uia), fix(mcp)/(cli)/(contracts), fix(overlay)/(inspector), fix(core)/(security)).
+5. ONE live-test agent, serialized: live_fixture, mcp_stdio, live_confirm, live_desktop, live_capture (repeat ~20x; add a 150 ms delay to test the black-capture race). Phase 7 physical-input test only with the user's OK (moves the mouse ~10 s). Never live-test file ops against the real user profile.
+6. Run JARVIS once with the user (`npm install` in apps/jarvis first).
+7. Final cleanup the user asked for: `cargo clean` (~11 GB), scratchpad temp files, apps/jarvis/node_modules if unused; keep only source and docs.
