@@ -93,3 +93,8 @@ Next steps, in order:
 7. Final cleanup the user asked for: `cargo clean` (~11 GB), scratchpad temp files, apps/jarvis/node_modules if unused; keep only source and docs.
 
 - 2026-10-01 idle shutdown added: `winwright mcp` (WINWRIGHT_IDLE_MINUTES, default 10; edits in mcp/src/lib.rs + cli/src/main.rs, uncommitted with the agents' fixes) and JARVIS bridge (JARVIS_IDLE_MINUTES, default 10; committed). Verified live with short limits.
+
+## Footprint (2026-10-01)
+- JARVIS: dropped unused Picovoice wake-word deps; the 208 MB `onnxruntime-node` is no longer installed (override stub in apps/jarvis/stubs, `onnxruntime-common` pinned for the web build); node_modules 1.1 GB -> 814 MB (253 MB of it is the Claude Agent SDK binary, required). 3D scene: low-power GPU, pixel ratio capped at 1.5. Bridge idles ~99 MB.
+- Winwright: idles ~23 MB / 11 threads (debug). Release profile now opt-level "s" + thin LTO + 1 codegen unit + stripped (not panic=abort: window procs use catch_unwind). Release build not made yet (storage); do it only when needed.
+- Cleanup at the end: `cargo clean` (~11 GB), `apps/jarvis/node_modules` if unused.

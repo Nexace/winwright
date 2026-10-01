@@ -80,7 +80,12 @@ debug = "line-tables-only"
 debug = false
 
 [profile.release]
-strip = "debuginfo"
+# Small and quick enough: Winwright mostly waits on Windows UI Automation, so size beats raw
+# speed. Not panic = "abort": the native window procedures rely on catch_unwind.
+opt-level = "s"
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

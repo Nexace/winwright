@@ -1,0 +1,7 @@
+{
+  "name": "onnxruntime-node",
+  "version": "1.21.0",
+  "description": "Empty stand-in: the bridge never runs ONNX models in Node (the browser build uses onnxruntime-web), so the 200 MB native package is not installed.",
+  "main": "index.js",
+  "private": true
+}

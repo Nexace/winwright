@@ -197,8 +197,9 @@ export function Scene() {
     <Canvas
       className="scene"
       camera={{ position: [0, 0, 6.2], fov: 45 }}
-      gl={{ antialias: true, alpha: true }}
-      dpr={[1, 2]}
+      // Low-power GPU and a capped pixel ratio: this is an always-open HUD, not a game.
+      gl={{ antialias: true, alpha: true, powerPreference: 'low-power' }}
+      dpr={[1, 1.5]}
     >
       <Rig />
       {/*
