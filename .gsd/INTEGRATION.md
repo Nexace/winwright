@@ -48,10 +48,27 @@ Wake-word listening is removed; JARVIS's other features are untouched. Winwright
 ## Memory and reports (Notion) — planned 2026-10-02
 Jev (classifier/router) was considered and dropped. Not building a classifier; JARVIS keeps its fixed effort, and Winwright stays the only safety authority.
 
-- **Reports are markdown files first.** After each task JARVIS writes a short report to `reports/YYYY-MM-DD-<topic>.md` in the repo (what was asked, what was done, which tools ran, outcome, anything denied). The file is the permanent record and works with no Notion.
+- **Decision 2026-10-02: Notion stays the cloud memory (user's choice); no local-only/opt-in downgrade.** Reports are still written as markdown files first. After each task JARVIS writes a short report to `reports/YYYY-MM-DD-<topic>.md` in the repo (what was asked, what was done, which tools ran, outcome, anything denied). The file is the permanent record and works with no Notion.
 - **Notion mirrors them** through a Notion MCP server from the user's Claude Code config (no new code to talk to Notion; JARVIS passes it through its normal gate, writes need JARVIS_ALLOW_WRITES). Each report becomes a page under one fixed parent page; the page body is the same markdown.
 - **Memory read-back:** before a turn, JARVIS may load the few most recent or most relevant reports (from disk, or from Notion if present) as context. It is labeled as data, never instructions, and capped in size.
 - **What never goes in a report:** screenshots, typed text, password-field values, anything Winwright redacts, full file contents. Reports hold summaries and names only.
 - **Owner:** JARVIS owns reports and memory (conversation layer). Winwright is not involved except that its audit log stays the separate, authoritative record of desktop actions.
 - **Steps:** (1) report writer in the bridge (turn end -> markdown file); (2) memory loader with size cap and data-label; (3) Notion mirror via the MCP server, off unless configured; (4) live check: do a task, see the file, see the Notion page, ask a follow-up that needs the memory.
 - **Open:** user to confirm a Notion MCP server is connected in Claude Code and which parent page to use.
+
+## Decisions and changes from the plan review (2026-10-02)
+
+**Speech: ElevenLabs.** Chosen over local Whisper/Kokoro (too heavy) and Brave's missing browser speech. With a key, JARVIS uses ElevenLabs Scribe for input and an ElevenLabs voice for output; nothing runs locally. The user supplies the key later and sets it themselves as a user environment variable, `ELEVENLABS_API_KEY` (e.g. PowerShell: `[Environment]::SetEnvironmentVariable('ELEVENLABS_API_KEY','<key>','User')`, then restart the terminal). `winwright assistant` passes it to the bridge; it is never written to the repo, config or chat. Audio goes to ElevenLabs while the hotkey is held. Brave then works.
+
+**Order (feature freeze until green).**
+1. Get the workspace compiling and passing (`scripts/check.ps1`), commit the agents' fixes in chunks. No new features before this.
+2. Security fixes (the audit list in STATE.md), starting with `app_launch`.
+3. Taint rule (below).
+4. Live tests, one at a time, then JARVIS end to end, then ElevenLabs.
+5. Reports/Notion, last.
+
+**Taint rule (web -> desktop injection).** Once the session has read untrusted content (a web page via Playwright or `jarvis_chrome`, a Notion page, memory), any desktop action that changes something (type, press, launch, file ops, shell, window close) needs the native confirmation, until the user clears it (new conversation, or Winwright re-enable). Winwright enforces it: `winwright mcp` accepts a `taint` signal from the bridge (the bridge marks it when a web or Notion tool result arrives). Reads (snapshot, find, screenshot) stay free.
+
+**Pruned.** Dropped: Phase 1b (named-pipe service; the MCP process already persists), Phase 12 (recorder), Phase 9 (own browser bridge), and any local speech models. Kept: Phase 7 acceptance, Phase 10 (vision, screen pixels only).
+
+**Smaller.** `scripts/check.ps1` is the one command for build, lint and tests (`-Live` adds the live tests). JARVIS shows a reconnect message after an idle shutdown. Every edit to the vendored JARVIS code is listed in `apps/jarvis/WINWRIGHT-EDITS.md`.

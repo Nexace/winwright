@@ -1,3 +1,6 @@
 /target
 *.pdb
 /.claude/
+.env
+.env.*
+!.env.example
