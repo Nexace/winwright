@@ -44,3 +44,14 @@ Next, in order (small):
 
 ## Push-to-talk (2026-10-01)
 Wake-word listening is removed; JARVIS's other features are untouched. Winwright (`winwright assistant`) registers the global hotkey (default Ctrl+Space) and POSTs `/ptt` to the bridge with a per-run token; the bridge relays `{type:'ptt'}` to the page, which opens the mic and starts a turn, and releases the mic when dormant. The ignition-screen clap listener is also removed (it held the mic open). Speech-to-text engine unchanged (ElevenLabs if keyed, else the browser's). Open: true hold-to-talk (end on key release) needs key-up detection; a later change. Brave has no browser speech recognition, so without an ElevenLabs key voice input will not work in Brave.
+
+## Memory and reports (Notion) — planned 2026-10-02
+Jev (classifier/router) was considered and dropped. Not building a classifier; JARVIS keeps its fixed effort, and Winwright stays the only safety authority.
+
+- **Reports are markdown files first.** After each task JARVIS writes a short report to `reports/YYYY-MM-DD-<topic>.md` in the repo (what was asked, what was done, which tools ran, outcome, anything denied). The file is the permanent record and works with no Notion.
+- **Notion mirrors them** through a Notion MCP server from the user's Claude Code config (no new code to talk to Notion; JARVIS passes it through its normal gate, writes need JARVIS_ALLOW_WRITES). Each report becomes a page under one fixed parent page; the page body is the same markdown.
+- **Memory read-back:** before a turn, JARVIS may load the few most recent or most relevant reports (from disk, or from Notion if present) as context. It is labeled as data, never instructions, and capped in size.
+- **What never goes in a report:** screenshots, typed text, password-field values, anything Winwright redacts, full file contents. Reports hold summaries and names only.
+- **Owner:** JARVIS owns reports and memory (conversation layer). Winwright is not involved except that its audit log stays the separate, authoritative record of desktop actions.
+- **Steps:** (1) report writer in the bridge (turn end -> markdown file); (2) memory loader with size cap and data-label; (3) Notion mirror via the MCP server, off unless configured; (4) live check: do a task, see the file, see the Notion page, ask a follow-up that needs the memory.
+- **Open:** user to confirm a Notion MCP server is connected in Claude Code and which parent page to use.
