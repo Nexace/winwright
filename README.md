@@ -83,3 +83,18 @@ elevated apps are refused (`UIPI_BLOCKED`).
 App-by-app results live in [docs/app-compatibility.md](docs/app-compatibility.md).
 
 Logs go to stderr; set `WINWRIGHT_LOG=debug` for detail.
+
+## Voice assistant (JARVIS)
+
+`apps/jarvis` is the [JARVIS](https://github.com/adewaskar/jarvis) browser voice assistant (MIT, vendored), wired to use Winwright as its desktop hands. Say "Hey Jarvis", and Claude Code (headless, via the Claude Agent SDK) drives your screen through `winwright mcp`.
+
+```powershell
+cd apps\jarvis
+npm install          # one time; several hundred MB (three.js, speech models)
+cd ..\..
+winwright assistant  # starts JARVIS; open the printed URL in Chrome or Edge
+```
+
+Needs Node.js 20+, Chrome or Edge, and a logged-in Claude Code. No API key. Winwright keeps every safety gate for voice: the native Allow/Deny dialog, default-deny shell, Ctrl+Alt+Esc stop, and the audit log. The dialog accepts only your own mouse or keyboard, so voice-control and on-screen-keyboard tools cannot approve it.
+
+JARVIS's own tools (web search, image generation, its other MCP servers) keep JARVIS's own rules; see `apps/jarvis/README.md`. The only Winwright-specific edits are marked in `apps/jarvis/bridge/server.mjs` (`winwrightServer`, `decideTool`, and a short `DESKTOP` paragraph in the system prompt).

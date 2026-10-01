@@ -64,3 +64,7 @@
 - Win32 list/tab selection via UIA may skip the app's change notification (e.g. LBN_SELCHANGE).
 - Mixed-DPI multi-monitor untested (single monitor).
 - MCP loopback HTTP transport not built (stdio only).
+
+## JARVIS integration (2026-10-01)
+- `apps/jarvis` = vendored github.com/adewaskar/jarvis (MIT). Bridge patched to add a `winwright` MCP server when `JARVIS_WINWRIGHT_EXE` is set and to pass its tools through `decideTool` (Winwright enforces its own gates). `winwright assistant` launches it; it refuses until `npm install` is run in `apps/jarvis` (not auto-run: large download).
+- Not yet run live (needs `npm install`, Chrome, and the user's Claude Code login). Next: run it once with the user.
