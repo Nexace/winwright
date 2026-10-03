@@ -27,14 +27,15 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub json: bool,
 
+    /// With no command, `winwright` starts the assistant (the same as `winwright assistant`).
     #[command(subcommand)]
-    pub command: Command,
+    pub command: Option<Command>,
 }
 
 impl Cli {
     /// `--json` errors go to stdout, except in MCP mode where stdout carries protocol frames only.
     pub fn json_errors(&self) -> bool {
-        self.json && !matches!(self.command, Command::Mcp(_))
+        self.json && !matches!(self.command, Some(Command::Mcp(_)))
     }
 }
 
@@ -551,7 +552,7 @@ mod tests {
             "Notepad",
         ])
         .unwrap();
-        let Command::Click(c) = cli.command else {
+        let Some(Command::Click(c)) = cli.command else {
             panic!()
         };
         let t = c.target.target().unwrap();
@@ -563,7 +564,7 @@ mod tests {
     #[test]
     fn ref_and_locator_conflict() {
         let cli = Cli::try_parse_from(["winwright", "focus", "e3", "--name", "x"]).unwrap();
-        let Command::Focus(t) = cli.command else {
+        let Some(Command::Focus(t)) = cli.command else {
             panic!()
         };
         assert!(t.target().is_err());
@@ -572,7 +573,7 @@ mod tests {
     #[test]
     fn press_takes_chord_then_optional_target() {
         let cli = Cli::try_parse_from(["winwright", "press", "Ctrl+Shift+S"]).unwrap();
-        let Command::Press(p) = cli.command else {
+        let Some(Command::Press(p)) = cli.command else {
             panic!()
         };
         assert_eq!(p.keys, "Ctrl+Shift+S");
@@ -593,7 +594,7 @@ mod tests {
             "20",
         ])
         .unwrap();
-        let Command::Window(w) = cli.command else {
+        let Some(Command::Window(w)) = cli.command else {
             panic!()
         };
         assert!(matches!(
@@ -620,14 +621,14 @@ mod tests {
     #[test]
     fn points_and_regions_left_of_the_primary_monitor_parse() {
         let cli = Cli::try_parse_from(["winwright", "inspect", "--at", "-100,200"]).unwrap();
-        let Command::Inspect(i) = cli.command else {
+        let Some(Command::Inspect(i)) = cli.command else {
             panic!()
         };
         assert_eq!(i.at, Some(PhysicalPoint { x: -100, y: 200 }));
         let cli =
             Cli::try_parse_from(["winwright", "screenshot", "--region", "-1920,-200,800,600"])
                 .unwrap();
-        let Command::Screenshot(s) = cli.command else {
+        let Some(Command::Screenshot(s)) = cli.command else {
             panic!()
         };
         assert!(s.region.is_some());
@@ -642,14 +643,22 @@ mod tests {
     }
 
     #[test]
+    fn winwright_alone_parses_with_no_command() {
+        let cli = Cli::try_parse_from(["winwright"]).unwrap();
+        assert!(cli.command.is_none(), "main starts the assistant");
+        assert!(Cli::try_parse_from(["winwright", "--json"]).is_ok());
+    }
+
+    #[test]
     fn mcp_takes_an_optional_taint_file() {
         let cli =
             Cli::try_parse_from(["winwright", "mcp", "--taint-file", r"C:\t\conv-1"]).unwrap();
-        let Command::Mcp(m) = cli.command else {
+        let Some(Command::Mcp(m)) = cli.command else {
             panic!()
         };
         assert_eq!(m.taint_file, Some(PathBuf::from(r"C:\t\conv-1")));
-        let Command::Mcp(m) = Cli::try_parse_from(["winwright", "mcp"]).unwrap().command else {
+        let Some(Command::Mcp(m)) = Cli::try_parse_from(["winwright", "mcp"]).unwrap().command
+        else {
             panic!()
         };
         assert_eq!(m.taint_file, None);
@@ -658,7 +667,7 @@ mod tests {
     #[test]
     fn screenshot_rejects_all_windows() {
         let cli = Cli::try_parse_from(["winwright", "screenshot", "--all-windows"]).unwrap();
-        let Command::Screenshot(s) = cli.command else {
+        let Some(Command::Screenshot(s)) = cli.command else {
             panic!()
         };
         assert!(s.request().is_err());

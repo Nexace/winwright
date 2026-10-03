@@ -415,7 +415,10 @@ async fn act(engine: &Engine, action: DesktopAction, json: bool) -> Result<(), W
 async fn run(cli: Cli) -> Result<(), WinwrightError> {
     let config = winwright_core::config::load_config(cli.config.as_deref())?;
     let json = cli.json;
-    let command = match cli.command {
+    let Some(command) = cli.command else {
+        unreachable!("main starts the assistant when no command is given")
+    };
+    let command = match command {
         Command::Version => {
             let info = serde_json::json!({
                 "name": "winwright",
@@ -788,12 +791,12 @@ fn main() -> ExitCode {
     winwright_win32::enable_per_monitor_dpi_awareness();
     let cli = Cli::parse();
     let json = cli.json_errors();
-    if matches!(cli.command, Command::Inspector) {
+    match cli.command {
         // The Inspector drives its own window loop and runtime on this thread.
-        return report(run_inspector(cli.config.as_deref()), json);
-    }
-    if matches!(cli.command, Command::Assistant) {
-        return report(run_assistant(), json);
+        Some(Command::Inspector) => return report(run_inspector(cli.config.as_deref()), json),
+        // `winwright` alone starts the assistant, the way `claude` starts Claude Code.
+        None | Some(Command::Assistant) => return report(run_assistant(), json),
+        _ => {}
     }
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_time()
@@ -802,16 +805,37 @@ fn main() -> ExitCode {
     report(runtime.block_on(run(cli)), json)
 }
 
-/// Where JARVIS lives: `WINWRIGHT_JARVIS_DIR`, else `apps/jarvis` above the executable
-/// (`target/{debug,release}/winwright.exe` inside a checkout).
+/// Where the assistant lives: `WINWRIGHT_JARVIS_DIR`, else `apps/jarvis` above the
+/// executable (`target/{debug,release}/winwright.exe` inside a checkout), else in the
+/// checkout this binary was built from (an installed copy, e.g. in `~\.cargo\bin`).
 fn jarvis_dir() -> Option<std::path::PathBuf> {
     if let Some(dir) = std::env::var_os("WINWRIGHT_JARVIS_DIR") {
         return Some(dir.into());
     }
+    let built_from = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps/jarvis");
     let exe = std::env::current_exe().ok()?;
     exe.ancestors()
         .map(|a| a.join("apps").join("jarvis"))
+        .chain(std::iter::once(built_from))
         .find(|d| d.join("bridge").join("server.mjs").is_file())
+}
+
+/// Opens the page in the default browser once the bridge answers on `port` (up to 30 s),
+/// so `winwright` alone takes you straight in.
+fn open_page_when_ready(port: &str, url: &str) {
+    let Ok(addr) = format!("127.0.0.1:{port}").parse::<std::net::SocketAddr>() else {
+        return;
+    };
+    for _ in 0..120 {
+        if std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(200))
+            .is_ok()
+        {
+            // explorer.exe hands a URL to the default browser.
+            let _ = std::process::Command::new("explorer.exe").arg(url).spawn();
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
 }
 
 /// A per-run secret for the bridge's local push-to-talk endpoint (OS-seeded hashing, 128 bits).
@@ -894,7 +918,12 @@ fn run_assistant() -> Result<(), WinwrightError> {
         "Starting the assistant from {} (Ctrl+C to stop).",
         dir.display()
     );
-    println!("Open http://localhost:{port}/ in your browser, then type, or press {chord} to talk.");
+    let url = format!("http://localhost:{port}/");
+    println!("Opening {url} in your browser: type there, or press {chord} to talk.");
+    {
+        let (port, url) = (port.clone(), url.clone());
+        std::thread::spawn(move || open_page_when_ready(&port, &url));
+    }
     // One process: the bridge also serves the page, so there is no dev server.
     let status = std::process::Command::new("node")
         .arg("bridge/server.mjs")
@@ -955,7 +984,10 @@ mod tests {
     use super::*;
 
     fn command(args: &[&str]) -> Command {
-        Cli::try_parse_from(args).unwrap().command
+        Cli::try_parse_from(args)
+            .unwrap()
+            .command
+            .expect("a command")
     }
 
     #[test]
