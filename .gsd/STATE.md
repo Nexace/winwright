@@ -1,7 +1,7 @@
 # Winwright State
 
 **Updated:** 2026-10-03
-**Current phase:** CHECKPOINT. Tree green; security audit H1-L5 and the leftover bugs are fixed and committed (327fa5f..e40dadf). Next: taint rule, see "CHECKPOINT 2026-10-03".
+**Current phase:** CHECKPOINT. Tree green; security audit H1-L5, the leftover bugs, and the taint rule are done (327fa5f..24ef6a3). Next: Phase 7 physical-input live test (ask the user first).
 **Toolchain:** Rust 1.98.1 MSVC (pinned), windows-rs 0.62.2, tokio 1.53, schemars 1.2, regex 1.13, rmcp 3.5
 
 ## Done
@@ -30,6 +30,11 @@
   in front, send shortcuts/Win chords/typed line breaks, launch allowlists, classifier hardening,
   dialog context, own folders protected, risky copies/moves confirmed, prompts show the resolved
   program and all arguments, reads and screenshots audited, 128 KB output cap.
+- Taint rule (2026-10-03, 8569de4 Winwright + 24ef6a3 bridge; mechanism in INTEGRATION.md):
+  `winwright mcp --taint-file`; once the bridge's PreToolUse hook writes the marker (before any
+  web/Notion/sub-agent/third-party MCP tool), every allowed desktop change needs the native
+  confirmation until a new conversation or Re-enable. Unit-tested on both sides
+  (`node --test bridge/taint.test.mjs`); not yet exercised live with JARVIS running.
 - Tests: all workspace tests pass; clippy `-D warnings` clean. Live after the audit fixes
   (2026-10-03): `live_fixture` 7/7, `mcp_stdio` 2/2, `live_confirm` 2/2, `live_desktop` 3/3.
 
@@ -42,10 +47,10 @@
   (shows the confirm dialog twice, ~5 s; do not click it). `... manual_` asks a person to click Allow.
 
 ## Next (in order; plan in .gsd/INTEGRATION.md "Decisions and changes from the plan review")
-1. Taint rule (web/Notion content read -> desktop changes need confirmation).
-2. Phase 7 physical-input live test (ask the user first; moves the mouse ~10 s).
-3. JARVIS end to end, then ElevenLabs (user sets ELEVENLABS_API_KEY as a user env var).
-4. Reports + Notion memory (cloud, user's choice), last.
+1. Phase 7 physical-input live test (ask the user first; moves the mouse ~10 s).
+2. JARVIS end to end (includes a live check of the taint rule: read a web page, then a desktop
+   change must prompt), then ElevenLabs (user sets ELEVENLABS_API_KEY as a user env var).
+3. Reports + Notion memory (cloud, user's choice), last.
 Dropped: Phase 1b, Phase 9, Phase 12, local speech models (Whisper/Kokoro), Jev.
 
 ## Decisions
