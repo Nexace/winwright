@@ -1,7 +1,7 @@
 # Winwright State
 
 **Updated:** 2026-10-03
-**Current phase:** CHECKPOINT. Tree green but the debugging batch is UNCOMMITTED (user commits on request). See "CHECKPOINT 2026-10-03".
+**Current phase:** CHECKPOINT. Tree green; the debugging batch is committed (c48e464..39a2a16). Next: remaining security fixes, see "CHECKPOINT 2026-10-03".
 **Toolchain:** Rust 1.98.1 MSVC (pinned), windows-rs 0.62.2, tokio 1.53, schemars 1.2, regex 1.13, rmcp 3.5
 
 ## Done
@@ -36,12 +36,11 @@
   (opens the Win32 fixture; UIA patterns plus one guarded Enter for the combo; ~8 s)
 
 ## Next (in order; plan in .gsd/INTEGRATION.md "Decisions and changes from the plan review")
-1. When the user says "commit": commit the uncommitted batch in chunks (see checkpoint).
-2. Remaining security fixes (list in the checkpoint).
-3. Taint rule (web/Notion content read -> desktop changes need confirmation).
-4. Phase 7 physical-input live test (ask the user first; moves the mouse ~10 s).
-5. JARVIS end to end, then ElevenLabs (user sets ELEVENLABS_API_KEY as a user env var).
-6. Reports + Notion memory (cloud, user's choice), last.
+1. Remaining security fixes (list in the checkpoint).
+2. Taint rule (web/Notion content read -> desktop changes need confirmation).
+3. Phase 7 physical-input live test (ask the user first; moves the mouse ~10 s).
+4. JARVIS end to end, then ElevenLabs (user sets ELEVENLABS_API_KEY as a user env var).
+5. Reports + Notion memory (cloud, user's choice), last.
 Dropped: Phase 1b, Phase 9, Phase 12, local speech models (Whisper/Kokoro), Jev.
 
 ## Decisions
@@ -72,12 +71,11 @@ Dropped: Phase 1b, Phase 9, Phase 12, local speech models (Whisper/Kokoro), Jev.
 ## CHECKPOINT 2026-10-03 (resume here)
 State of the tree: `cargo fmt --check`, `cargo clippy --workspace --all-targets -D warnings`, `cargo test --workspace` all pass; live `live_fixture` 7/7, `mcp_stdio` 2/2, `live_confirm` 1/1 (run 2026-10-03). `scripts/check.ps1` runs the same (`-Live` adds live tests).
 
-UNCOMMITTED (~32 files; the user said to commit only when they ask, then in chunks):
+COMMITTED 2026-10-03 as c48e464 (contracts/mcp/cli, incl. idle timer + push-to-talk), 1b6a954 files, c4afe04 uia, 9bb432d shell, 8c3ad61 overlay, e276d97 inspector, 39a2a16 core/security:
 - contracts/mcp/cli: 20 fixes (camelCase file-op fields, typo-rejecting actions, stdout purity in mcp mode, negative coords, config switches honoured, overflow panics, CANCELLED hint, real elapsed ms) + my MCP idle timer (WINWRIGHT_IDLE_MINUTES) + `winwright assistant` push-to-talk hotkey (Ctrl+Space, /ptt relay).
 - files/uia/shell: 8.3 short-name protected-path bypass fixed; UIA timeout labels, slot leaks, event-handler leaks, ELEMENT_STALE on inspect; script-host file types blocked.
 - overlay/inspector: confirm dialog (abandon-before-poll, no WM_CLOSE to recycled handle, typing cannot approve, BN_CLICKED from Allow only, per-thread DPI), tray set() leaks + single menu, Inspector races/splitter/Esc/clipboard fixes.
 - core/security: every Engine entry refuses after emergency stop (ensure_running); guard_self refuses any winwright.exe process; interpreters (cmd, powershell, python, wscript, mshta, rundll32, ..., and winwright itself) count as shell execution so app_launch of them is default-denied; PowerShell keeps its own switch in exec; shell_execute gets its requested timeout; Delete key, risky Select options and Enter on send-style buttons need confirmation; redaction/classifier extensions; snapshot/diff/wait fixes. 93 core tests.
-Suggested commit chunks: fix(contracts,mcp,cli) | fix(files) | fix(uia) | fix(shell) | fix(overlay) | fix(inspector) | fix(core,security) | feat(cli): idle timer + push-to-talk.
 
 Remaining security audit items (not yet done):
 - H1: Allow must accept only real hardware input (reject injected/BM_CLICK/UIA Invoke via GetCurrentInputMessageSource); document: no voice-control/OSK approval.
