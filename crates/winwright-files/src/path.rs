@@ -5,9 +5,12 @@
 //! spaces). Existing paths are then canonicalized, so links and 8.3 names cannot dodge the
 //! protected-location check.
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
+use std::os::windows::ffi::OsStringExt;
 use std::path::{Component, Path, PathBuf, Prefix};
 
+use windows::Win32::Storage::FileSystem::{FindClose, FindFirstFileW, WIN32_FIND_DATAW};
+use windows::core::PCWSTR;
 use winwright_contracts::{WinwrightError, WinwrightResult};
 
 use crate::io_platform;
@@ -167,6 +170,35 @@ pub(crate) fn resolve_entry(path: &Path) -> WinwrightResult<PathBuf> {
     let parent = std::fs::canonicalize(parent).map_err(|e| missing(parent, &e))?;
     normalize(&parent)?;
     Ok(parent.join(name))
+}
+
+/// [`resolve_entry`] for an entry about to be mutated in place, under the name its directory
+/// stores: an 8.3 alias (`C:\Users\JOHNSM~1`) would otherwise key differently from the
+/// protected long name. Missing entries and roots resolve as [`resolve_entry`] does.
+pub(crate) fn resolve_stored_entry(path: &Path) -> WinwrightResult<PathBuf> {
+    let entry = resolve_entry(path)?;
+    Ok(match (entry.parent(), stored_name(&entry)) {
+        (Some(parent), Some(name)) => parent.join(name),
+        _ => entry,
+    })
+}
+
+/// The name the directory stores for an existing entry, which the caller may have spelled as
+/// its 8.3 short alias. Does not follow a final link. `None` when the entry does not exist.
+fn stored_name(entry: &Path) -> Option<OsString> {
+    let wide = crate::wide(entry);
+    let mut data = WIN32_FIND_DATAW::default();
+    // SAFETY: `wide` is NUL-terminated and free of wildcards (`validate_name` refuses `*`, `?`,
+    // `<`, `>`, and `"`); `data` is a valid out pointer for the duration of the call.
+    let handle = unsafe { FindFirstFileW(PCWSTR(wide.as_ptr()), &mut data) }.ok()?;
+    // SAFETY: `handle` is the search handle opened above; it is closed exactly once.
+    let _ = unsafe { FindClose(handle) };
+    let len = data
+        .cFileName
+        .iter()
+        .position(|&unit| unit == 0)
+        .unwrap_or(data.cFileName.len());
+    (len > 0).then(|| OsString::from_wide(&data.cFileName[..len]))
 }
 
 pub(crate) fn missing(path: &Path, err: &std::io::Error) -> WinwrightError {
@@ -490,6 +522,57 @@ mod tests {
         ] {
             blocked(&protected, path);
         }
+    }
+
+    /// A fresh folder under the workspace `target\` directory, removed on drop.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(tag: &str) -> Self {
+            let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+                r"..\..\target\winwright-files-{tag}-{}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(std::fs::canonicalize(&dir).unwrap())
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn short_path(path: &Path) -> Option<PathBuf> {
+        use windows::Win32::Storage::FileSystem::GetShortPathNameW;
+
+        let wide = crate::wide(path);
+        let mut buf = vec![0u16; 1024];
+        // SAFETY: `wide` is NUL-terminated; the API writes at most `buf.len()` units.
+        let len = unsafe { GetShortPathNameW(PCWSTR(wide.as_ptr()), Some(&mut buf)) } as usize;
+        (len > 0 && len < buf.len()).then(|| PathBuf::from(OsString::from_wide(&buf[..len])))
+    }
+
+    #[test]
+    fn short_name_aliases_cannot_dodge_the_protected_check() {
+        let scratch = Scratch::new("short-names");
+        let profile = scratch.0.join("Long Profile Name");
+        std::fs::create_dir(&profile).unwrap();
+        let Some(short) = short_path(&profile).filter(|s| s.file_name() != profile.file_name())
+        else {
+            eprintln!("8.3 names are disabled on this volume; nothing to check");
+            return;
+        };
+        // `C:\Users\LONGPR~1` must be keyed (and refused) like `C:\Users\Long Profile Name`.
+        let entry = resolve_stored_entry(&display(&short)).unwrap();
+        assert_eq!(key(&entry), key(&profile), "{}", entry.display());
+        let protected = Protected::new([], Some(profile.clone()));
+        let err = protected.check(&entry).unwrap_err();
+        assert_eq!(err.code(), ErrorCode::ActionBlocked);
+        // Entries that do not exist yet keep the name as written.
+        let fresh = profile.join("not-created-yet.txt");
+        assert_eq!(key(&resolve_stored_entry(&fresh).unwrap()), key(&fresh));
     }
 
     #[test]

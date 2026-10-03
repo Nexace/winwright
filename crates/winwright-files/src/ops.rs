@@ -21,7 +21,7 @@ use winwright_contracts::{WinwrightError, WinwrightResult};
 use crate::glob::Glob;
 use crate::path::{
     Protected, display, is_within, key, missing, normalize, resolve_entry, resolve_existing,
-    validate_name,
+    resolve_stored_entry, validate_name,
 };
 use crate::shell::{KNOWN_FOLDER_NAMES, folder_id, known_folder_path, recycle};
 use crate::{io_platform, platform, wide};
@@ -143,7 +143,7 @@ fn metadata(path: &Path) -> WinwrightResult<FileResult> {
 /// An existing entry about to be mutated in place (moved, renamed, recycled): the entry itself
 /// and, for links, their target must both be outside protected locations.
 fn mutable_entry(path: &Path, protected: &Protected) -> WinwrightResult<(PathBuf, Metadata)> {
-    let entry = resolve_entry(path)?;
+    let entry = resolve_stored_entry(path)?;
     protected.check(&entry)?;
     let meta = fs::symlink_metadata(&entry).map_err(|e| missing(&entry, &e))?;
     if is_reparse_point(&meta)
@@ -517,6 +517,36 @@ mod tests {
         let err = known_folder("Startup").unwrap_err();
         assert_eq!(err.code(), winwright_contracts::ErrorCode::InvalidRequest);
         assert!(err.to_string().contains("Downloads"), "{err}");
+    }
+
+    #[test]
+    fn case_only_moves_keep_the_requested_spelling() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+            r"..\..\target\winwright-files-recase-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let dir = fs::canonicalize(&dir).unwrap();
+        let result = (|| {
+            fs::write(dir.join("recase.txt"), "x").unwrap();
+            let protected = Protected::default();
+            move_entry(
+                &dir.join("recase.txt"),
+                &dir.join("ReCase.txt"),
+                false,
+                &protected,
+            )?;
+            // A source spelled differently from the stored name still names the same entry.
+            rename(&dir.join("RECASE.TXT"), "recase.TXT", &protected)
+        })();
+        let names: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
+        let _ = fs::remove_dir_all(&dir);
+        result.unwrap();
+        assert_eq!(names, ["recase.TXT"]);
     }
 
     #[test]
