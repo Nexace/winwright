@@ -1,7 +1,7 @@
 # Winwright State
 
-**Updated:** 2026-10-01
-**Current phase:** paused after Phase 11 (clean point for context compaction)
+**Updated:** 2026-10-03
+**Current phase:** CHECKPOINT. Tree green but the debugging batch is UNCOMMITTED (user commits on request). See "CHECKPOINT 2026-10-03".
 **Toolchain:** Rust 1.98.1 MSVC (pinned), windows-rs 0.62.2, tokio 1.53, schemars 1.2, regex 1.13, rmcp 3.5
 
 ## Done
@@ -35,14 +35,14 @@
 - `cargo test -p winwright-cli --test live_fixture --test mcp_stdio -- --ignored --test-threads=1`
   (opens the Win32 fixture; UIA patterns plus one guarded Enter for the combo; ~8 s)
 
-## Next (in order; ask the user which first)
-- Phase 7 acceptance: physical-input live test on the canvas fixture (moves the mouse, ~10 s).
-  **Waiting for user permission. Do not run without a yes.**
-- Phase 1b: `winwright serve` + current-user named pipe so refs survive CLI processes.
-- Phase 12: recorder / codegen.
-- Phase 13: assistant conversation mode (Claude API, key from env var only; local Windows speech;
-  push-to-talk). Load the claude-api skill before coding.
-- Phase 9 (browser bridge) and 10 (vision fallback): optional.
+## Next (in order; plan in .gsd/INTEGRATION.md "Decisions and changes from the plan review")
+1. When the user says "commit": commit the uncommitted batch in chunks (see checkpoint).
+2. Remaining security fixes (list in the checkpoint).
+3. Taint rule (web/Notion content read -> desktop changes need confirmation).
+4. Phase 7 physical-input live test (ask the user first; moves the mouse ~10 s).
+5. JARVIS end to end, then ElevenLabs (user sets ELEVENLABS_API_KEY as a user env var).
+6. Reports + Notion memory (cloud, user's choice), last.
+Dropped: Phase 1b, Phase 9, Phase 12, local speech models (Whisper/Kokoro), Jev.
 
 ## Decisions
 - One ref namespace (`eN`); refs per session; reused across snapshots when runtime id +
@@ -69,30 +69,27 @@
 - `apps/jarvis` = vendored github.com/adewaskar/jarvis (MIT). Bridge patched to add a `winwright` MCP server when `JARVIS_WINWRIGHT_EXE` is set and to pass its tools through `decideTool` (Winwright enforces its own gates). `winwright assistant` launches it; it refuses until `npm install` is run in `apps/jarvis` (not auto-run: large download).
 - Not yet run live (needs `npm install`, Chrome, and the user's Claude Code login). Next: run it once with the user.
 
-## CHECKPOINT 2026-10-01 (resume here)
-Committed: Phases 0-6, 8, 11; Winwright UI theme/tray/dialog/Inspector redesign; JARVIS vendored (apps/jarvis, `winwright assistant`).
+## CHECKPOINT 2026-10-03 (resume here)
+State of the tree: `cargo fmt --check`, `cargo clippy --workspace --all-targets -D warnings`, `cargo test --workspace` all pass; live `live_fixture` 7/7, `mcp_stdio` 2/2, `live_confirm` 1/1 (run 2026-10-03). `scripts/check.ps1` runs the same (`-Live` adds live tests).
 
-UNCOMMITTED in the working tree (~32 modified files) = fixes from 5 debugging agents, not yet verified together:
-- DONE (reports reviewed): MCP/CLI/contracts (20 fixes); platform adapters (files 8.3 short-name protected-path bypass, uia timeout labels / slot leaks / event-handler leaks, shell script-host blocklist); native UI (confirm dialog: drop before first poll, WM_CLOSE to a recycled handle, typing-approves; tray set() leaks; Inspector races).
-- INCOMPLETE: core+security agent hit the usage limit twice. Partial edits in winwright-core and winwright-security; winwright-security tests did not compile (classify.rs `program_capability`, test near line 189). Intended: every Engine entry point (incl. list_windows, process_list) refuses after emergency stop; guard_self refuses any winwright.exe process; classify interpreters on launch.
+UNCOMMITTED (~32 files; the user said to commit only when they ask, then in chunks):
+- contracts/mcp/cli: 20 fixes (camelCase file-op fields, typo-rejecting actions, stdout purity in mcp mode, negative coords, config switches honoured, overflow panics, CANCELLED hint, real elapsed ms) + my MCP idle timer (WINWRIGHT_IDLE_MINUTES) + `winwright assistant` push-to-talk hotkey (Ctrl+Space, /ptt relay).
+- files/uia/shell: 8.3 short-name protected-path bypass fixed; UIA timeout labels, slot leaks, event-handler leaks, ELEMENT_STALE on inspect; script-host file types blocked.
+- overlay/inspector: confirm dialog (abandon-before-poll, no WM_CLOSE to recycled handle, typing cannot approve, BN_CLICKED from Allow only, per-thread DPI), tray set() leaks + single menu, Inspector races/splitter/Esc/clipboard fixes.
+- core/security: every Engine entry refuses after emergency stop (ensure_running); guard_self refuses any winwright.exe process; interpreters (cmd, powershell, python, wscript, mshta, rundll32, ..., and winwright itself) count as shell execution so app_launch of them is default-denied; PowerShell keeps its own switch in exec; shell_execute gets its requested timeout; Delete key, risky Select options and Enter on send-style buttons need confirmation; redaction/classifier extensions; snapshot/diff/wait fixes. 93 core tests.
+Suggested commit chunks: fix(contracts,mcp,cli) | fix(files) | fix(uia) | fix(shell) | fix(overlay) | fix(inspector) | fix(core,security) | feat(cli): idle timer + push-to-talk.
 
-Next steps, in order:
-1. `cargo check --workspace --all-targets`; fix winwright-security compile; then clippy `-D warnings` and `cargo test --workspace`. If the partial core/security edits are too broken, finish or revert only those two crates (git diff first).
-2. Security audit findings (full report was in chat):
-   - C1 app_launch runs cmd/powershell/winwright.exe with args and no confirm -> Confirm when args non-empty or image is an interpreter; always deny winwright.exe; show full args + resolved path in the prompt (M6).
-   - H1 Allow button must accept only real mouse/keyboard input (reject injected / BM_CLICK); documented limitation: no voice-control or on-screen-keyboard approval.
-   - H2 keyboard path: classify the focused element; Ctrl/Alt+Enter, Delete, Win chords, newline in type_text count as risky.
-   - H3 launch allowlist for URI schemes and file types; no UNC executables.
-   - M1 classifier: NFKC + strip format chars + more verbs + dialog context. M2 is_sensitive: include labeled_by/help_text, more terms.
-   - M3 protect %APPDATA%\winwright, %LOCALAPPDATA%\winwright and the exe folder; confirm move/rename. M4 confirm UNC / cross-volume / sensitive-source copies.
-   - M5 guard_self in highlight; no overlays while a confirm is pending. L1 powershell capability. L3 stop covers reads. L5 arm delay from first activation.
-3. Other agent-reported bugs: shell_execute capped at 10 s (services.rs ~327; use max(request timeout, default)); timeouts report "0 ms" in capture/worker.rs:35 and input/lib.rs:250 (use ctx.started); config-disabled backend should be ACTION_BLOCKED not BACKEND_UNAVAILABLE; load_config value sanity (defaultTimeoutMs 0); UIA depth-limit truncation never reported.
-4. Commit in logical chunks (fix(files), fix(uia), fix(mcp)/(cli)/(contracts), fix(overlay)/(inspector), fix(core)/(security)).
-5. ONE live-test agent, serialized: live_fixture, mcp_stdio, live_confirm, live_desktop, live_capture (repeat ~20x; add a 150 ms delay to test the black-capture race). Phase 7 physical-input test only with the user's OK (moves the mouse ~10 s). Never live-test file ops against the real user profile.
-6. Run JARVIS once with the user (`npm install` in apps/jarvis first).
-7. Final cleanup the user asked for: `cargo clean` (~11 GB), scratchpad temp files, apps/jarvis/node_modules if unused; keep only source and docs.
+Remaining security audit items (not yet done):
+- H1: Allow must accept only real hardware input (reject injected/BM_CLICK/UIA Invoke via GetCurrentInputMessageSource); document: no voice-control/OSK approval.
+- H2 rest: classify the focused element when keys have no target; Ctrl/Alt+Enter, Win chords, newline in type_text.
+- H3: launch allowlist for URI schemes and file types; no UNC executables; .lnk/.url targets.
+- M1 classifier: strip zero-width/format chars, more verbs, dialog context. M2: is_sensitive uses labeled_by/help_text.
+- M3: protect %APPDATA%\winwright, %LOCALAPPDATA%\winwright, the exe folder; confirm move/rename. M4: confirm UNC/cross-volume/sensitive-source copies.
+- M5: guard_self in highlight; no overlays while a confirm is pending. M6: show full args + resolved path in prompts.
+- L2 audit screenshots/reads. L4 output caps. L5 arm delay from first activation.
+- Other reported: capture/input timeouts still say 0 ms (use ctx.started); config-disabled backend should be ACTION_BLOCKED; load_config value sanity; UIA depth-limit truncation never reported.
 
-- 2026-10-01 idle shutdown added: `winwright mcp` (WINWRIGHT_IDLE_MINUTES, default 10; edits in mcp/src/lib.rs + cli/src/main.rs, uncommitted with the agents' fixes) and JARVIS bridge (JARVIS_IDLE_MINUTES, default 10; committed). Verified live with short limits.
+Nothing is running (JARVIS and Winwright stopped). Final cleanup still owed: `cargo clean` (~11 GB), apps/jarvis/node_modules if unused.
 
 ## Footprint (2026-10-01)
 - JARVIS: dropped unused Picovoice wake-word deps; the 208 MB `onnxruntime-node` is no longer installed (override stub in apps/jarvis/stubs, `onnxruntime-common` pinned for the web build); node_modules 1.1 GB -> 814 MB (253 MB of it is the Claude Agent SDK binary, required). 3D scene: low-power GPU, pixel ratio capped at 1.5. Bridge idles ~99 MB.
