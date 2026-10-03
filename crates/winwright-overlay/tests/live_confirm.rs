@@ -128,6 +128,11 @@ async fn allow_arms_only_in_front_and_ignores_clicks_no_person_made() {
         "the dialog never came to the front armed, so this run cannot test where clicks come          from; rerun while the desktop is free"
     );
     assert!(!approved, "a click no person made approved the action");
+    assert!(
+        was_active && was_enabled,
+        "the dialog did not come to the front and arm by itself, so a person's first click \
+         would only activate it"
+    );
 }
 
 #[tokio::test]
