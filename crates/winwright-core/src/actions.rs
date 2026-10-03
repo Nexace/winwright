@@ -288,14 +288,15 @@ impl Engine {
 
     /// Risk of what a dialog asks when the action says yes to it ("Delete 3 files?", then
     /// "Yes"): its title and text, never its other buttons. Only owned windows and standard
-    /// dialogs count, so unrelated text in a main window cannot make "OK" look risky.
+    /// dialogs count, so unrelated text in a main window cannot make "OK" look risky. `None`
+    /// when the action does not answer a dialog.
     async fn dialog_risk(
         &self,
         action: &DesktopAction,
         target: Option<&Resolved>,
         focused: Option<&UiProps>,
         ctx: &OperationContext,
-    ) -> ActionRisk {
+    ) -> Option<ActionRisk> {
         let activates = match action {
             DesktopAction::Click { .. } => true,
             DesktopAction::Press { keys, .. } => {
@@ -305,16 +306,13 @@ impl Engine {
         };
         let receiver = target.map(|r| &r.props).or(focused);
         if !activates || !receiver.is_some_and(|p| is_affirmative(&p.name)) {
-            return ActionRisk::Normal;
+            return None;
         }
         let window = match target {
             Some(r) => r.window.and_then(|w| self.windows.window(w).ok().flatten()),
             None => self.windows.foreground_window().ok().flatten(),
         };
-        let Some(window) = window.filter(|w| w.owner_hwnd.is_some() || w.class_name == "#32770")
-        else {
-            return ActionRisk::Normal;
-        };
+        let window = window.filter(|w| w.owner_hwnd.is_some() || w.class_name == "#32770")?;
         let mut text = vec![window.title.clone()];
         let request = UiTreeRequest {
             root: TreeRoot::Window(window.hwnd),
@@ -338,7 +336,7 @@ impl Engine {
             walk(&tree.root, &mut text, &mut keys);
             self.release(keys).await;
         }
-        classify_activation(&text.join("\n"), "")
+        Some(classify_activation(&text.join("\n"), ""))
     }
 
     /// `focused` is the element keys without a target would reach; `dialog` is the risk of
@@ -348,7 +346,7 @@ impl Engine {
         action: &DesktopAction,
         target: Option<&Resolved>,
         focused: Option<&UiProps>,
-        dialog: ActionRisk,
+        dialog: Option<ActionRisk>,
     ) -> ProposedAction {
         let summary = target
             .map(|r| TargetSummary {
@@ -447,7 +445,8 @@ impl Engine {
         ProposedAction {
             tool: format!("desktop_{}", action.name()),
             capability,
-            risk: risk.max(dialog),
+            // No dialog context leaves the risk as it is (a read stays ReadOnly).
+            risk: dialog.map_or(risk, |d| risk.max(d)),
             target: summary,
         }
     }

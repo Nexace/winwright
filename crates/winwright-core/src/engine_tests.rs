@@ -2601,3 +2601,27 @@ async fn prompts_show_the_resolved_program_and_every_argument() {
         "allowed through: {err}"
     );
 }
+
+#[tokio::test]
+async fn strict_mode_confirms_changes_but_never_reads() {
+    let fake = Fake::new();
+    let mut config = Config::default();
+    config.security.confirmation_mode = winwright_contracts::config::ConfirmationMode::Strict;
+    let engine = Engine::new(config, fake.clone(), fake.clone());
+    let session = engine.session(&sid(), "test").unwrap();
+    engine
+        .execute(
+            &session,
+            DesktopAction::ReadText {
+                target: by("Document", "Notes"),
+                max_chars: 100,
+            },
+        )
+        .await
+        .unwrap();
+    let err = engine
+        .execute(&session, click(by("Button", "Target")))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code().as_str(), "CONFIRMATION_REQUIRED", "{err}");
+}
