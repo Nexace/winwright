@@ -55,8 +55,8 @@
    check ("weather in Pune", then "Open Notepad" must show Winwright's dialog). Then the user's
    feedback on the page's look.
 2. Reports + Notion memory: reports and local memory DONE 2026-10-04 (see INTEGRATION.md
-   "Memory and reports"). Notion copy built (bridge/notion.mjs); waits on the user to set
-   JARVIS_NOTION_TOKEN + JARVIS_NOTION_PARENT, then a live check (task -> file -> Notion page).
+   "Memory and reports"). Notion copy DONE and live-checked (task -> file -> Notion page);
+   JARVIS_NOTION_TOKEN + JARVIS_NOTION_PARENT are set as user env vars.
 3. The user retests the confirm dialog in Codex after the focus fix (a907911): create a file on
    the Desktop, then delete it; one click on Allow should work.
 Dropped: Phase 1b, Phase 9, Phase 12, local speech models (Whisper/Kokoro), Jev.
