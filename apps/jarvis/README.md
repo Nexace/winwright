@@ -11,16 +11,18 @@ bridge serves itself. What changed is listed in `WINWRIGHT-EDITS.md`.
 
 ## Run it
 
-From the Winwright checkout:
+Install once, from the Winwright checkout (puts `winwright` on your PATH via
+`~\.cargo\bin`; run it again after changing the Rust code):
 
 ```
-cargo build -p winwright-cli
-target\debug\winwright.exe assistant
+cargo install --path crates/winwright-cli --locked
 ```
 
-Then open <http://localhost:8787/> in any browser. Type, or press **Ctrl+Space**
+Then type `winwright` in any terminal. It starts the assistant and opens
+<http://localhost:8787/> in your browser. Type, or press **Ctrl+Space**
 (anywhere, any app) and talk; it stops listening when you pause. **Esc** stops a
-reply. The assistant stops by itself after 10 idle minutes.
+reply. Ctrl+C in the terminal stops it; it also stops by itself after 10 idle
+minutes.
 
 First time only: `npm install` in this folder.
 

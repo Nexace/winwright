@@ -1,7 +1,7 @@
 # Winwright State
 
 **Updated:** 2026-10-04
-**Current phase:** CHECKPOINT. Tree green; security audit, taint rule, Phase 7 (live), and our own assistant page (old JARVIS face deleted) are done. Next: the user tries the page in Brave (voice + taint dialog).
+**Current phase:** CHECKPOINT (2026-10-04, resume here). Tree green, all pushed except the last two commits. Done: security audit, taint rule, Phase 7 (live), our own assistant page (old JARVIS face deleted), and `winwright` as a one-word command (installed to ~\.cargo\bin). Next: the user tries `winwright` in Brave (voice + taint dialog).
 **Toolchain:** Rust 1.98.1 MSVC (pinned), windows-rs 0.62.2, tokio 1.53, schemars 1.2, regex 1.13, rmcp 3.5
 
 ## Done
@@ -51,8 +51,9 @@
   (shows the confirm dialog twice, ~5 s; do not click it). `... manual_` asks a person to click Allow.
 
 ## Next (in order; plan in .gsd/INTEGRATION.md "Decisions and changes from the plan review")
-1. Assistant end to end in Brave with the user: voice round trip, then the taint check (read a
-   web page, then a desktop change must prompt). ElevenLabs key is already set.
+1. Assistant end to end in Brave with the user (`winwright`): voice round trip, then the taint
+   check ("weather in Pune", then "Open Notepad" must show Winwright's dialog). Then the user's
+   feedback on the page's look.
 2. Reports + Notion memory (cloud, user's choice), last.
 Dropped: Phase 1b, Phase 9, Phase 12, local speech models (Whisper/Kokoro), Jev.
 
@@ -90,6 +91,8 @@ Dropped: Phase 1b, Phase 9, Phase 12, local speech models (Whisper/Kokoro), Jev.
 - Started as vendored github.com/adewaskar/jarvis (MIT); only its Node bridge is kept. Our own chat page (`winwright-ui/`, plain HTML/CSS/JS) is served by the bridge at http://localhost:8787/; the JARVIS React/Three.js face is deleted. `winwright assistant` runs `node bridge/server.mjs` (one process); it refuses until `npm install` was run in `apps/jarvis`.
 - Live so far: typed turns work (desktop_windows + a card; a WebSocket turn from a script); push-to-talk reached `/stt` in Brave. Not yet confirmed by the user in Brave: voice round trip and the taint dialog ("weather in Pune", then "Open Notepad").
 - ElevenLabs key is set as the user env var ELEVENLABS_API_KEY (sk_, 51 chars; the first try had angle brackets and the wrong value).
+- Start: type `winwright` in any PowerShell (no subcommand = assistant; it opens http://localhost:8787/ in the default browser, Brave). It is a release build in `~\.cargo\bin\winwright.exe` (on the user PATH) that finds `apps\jarvis` via the checkout it was built from. After changing the Rust code, reinstall with `cargo install --path crates/winwright-cli --locked` (~1 min). The debug `target\debug\winwright.exe` still works too.
+- Background tasks in a Claude session are killed after 10 min, so run the assistant in the user's own window, not as a session background task. The Terminal panel's PowerShell did not reach a prompt in 60 s (slow profile); `Start-Process powershell -NoExit -NoProfile ...` worked.
 
 ## CHECKPOINT 2026-10-03 (resume here)
 State of the tree: `cargo fmt --check`, `cargo clippy --workspace --all-targets -D warnings`, `cargo test --workspace` all pass (2026-10-03, after the audit fixes); live `live_fixture` 7/7, `mcp_stdio` 2/2, `live_confirm` 2/2 and `live_desktop` 3/3 after the fixes. `scripts/check.ps1` runs the same (`-Live` adds live tests).
