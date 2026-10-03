@@ -3,14 +3,15 @@
 //!
 //! - "Deny" is the default and focused button: Enter, Esc, Alt+F4 and closing all deny.
 //! - "Allow once" stays disabled for a moment after the dialog appears, so a click or key
-//!   meant for another window cannot approve an action.
+//!   meant for another window cannot approve an action. From the keyboard it also counts only
+//!   after a pause, so typing that runs into the dialog (Tab, then Space) cannot approve.
 //! - A prompt that is not answered in time, or whose request is abandoned, is denied and the
 //!   window closes itself.
 //!
 //! Every piece of text is an owner-drawn STATIC control, so screen readers read the prompt
 //! while it keeps the Winwright look.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::time::{Duration, Instant};
@@ -26,19 +27,23 @@ use windows::Win32::UI::Controls::{
     CDDS_PREPAINT, CDIS_DISABLED, CDIS_FOCUS, CDIS_HOT, CDIS_SELECTED, CDRF_DODEFAULT,
     CDRF_SKIPDEFAULT, DRAWITEMSTRUCT, NM_CUSTOMDRAW, NMCUSTOMDRAW, NMHDR,
 };
-use windows::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForMonitor, MDT_EFFECTIVE_DPI};
+use windows::Win32::UI::HiDpi::{
+    AdjustWindowRectExForDpi, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForMonitor,
+    MDT_EFFECTIVE_DPI, SetThreadDpiAwarenessContext,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, GetFocus, SetFocus};
 use windows::Win32::UI::WindowsAndMessaging::{
-    BS_DEFPUSHBUTTON, BS_PUSHBUTTON, CreateWindowExW, DC_HASDEFID, DM_GETDEFID, DefWindowProcW,
-    DestroyIcon, DestroyWindow, DispatchMessageW, FLASHW_ALL, FLASHW_TIMERNOFG, FLASHWINFO,
-    FlashWindowEx, GetCursorPos, GetForegroundWindow, GetMessageW, HICON, HMENU, ICON_BIG,
-    ICON_SMALL, IDCANCEL, IsDialogMessageW, KillTimer, MSG, PostMessageW, PostQuitMessage,
-    SM_CXICON, SM_CXSMICON, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOZORDER, SendMessageW,
-    SetForegroundWindow, SetTimer, SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage,
-    WA_INACTIVE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_CLOSE, WM_COMMAND, WM_DESTROY,
-    WM_DPICHANGED, WM_DRAWITEM, WM_ERASEBKGND, WM_NOTIFY, WM_PAINT, WM_SETFONT, WM_SETICON,
-    WM_TIMER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_EX_APPWINDOW, WS_EX_TOPMOST, WS_OVERLAPPED,
-    WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    BN_CLICKED, BS_DEFPUSHBUTTON, BS_PUSHBUTTON, CreateWindowExW, DC_HASDEFID, DM_GETDEFID,
+    DefWindowProcW, DestroyIcon, DestroyWindow, DispatchMessageW, FLASHW_ALL, FLASHW_TIMERNOFG,
+    FLASHWINFO, FlashWindowEx, GetCursorPos, GetForegroundWindow, GetMessageW, HICON, HMENU,
+    ICON_BIG, ICON_SMALL, IDCANCEL, IsDialogMessageW, KillTimer, MSG, PostMessageW,
+    PostQuitMessage, SM_CXICON, SM_CXSMICON, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOZORDER,
+    SendMessageW, SetForegroundWindow, SetTimer, SetWindowPos, SetWindowTextW, ShowWindow,
+    TranslateMessage, WA_INACTIVE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_CLOSE,
+    WM_COMMAND, WM_DESTROY, WM_DPICHANGED, WM_DRAWITEM, WM_ERASEBKGND, WM_KEYDOWN, WM_KEYFIRST,
+    WM_KEYLAST, WM_NOTIFY, WM_PAINT, WM_SETFONT, WM_SETICON, WM_SYSKEYDOWN, WM_TIMER, WS_CAPTION,
+    WS_CHILD, WS_CLIPCHILDREN, WS_EX_APPWINDOW, WS_EX_TOPMOST, WS_OVERLAPPED, WS_SYSMENU,
+    WS_TABSTOP, WS_VISIBLE,
 };
 use windows::core::{HSTRING, PCWSTR, w};
 use winwright_contracts::WinwrightResult;
@@ -56,6 +61,7 @@ const ID_ALLOW: i32 = 100;
 const TIMER_TICK: usize = 1;
 const TIMER_ARM: usize = 2;
 const ARM_DELAY_MS: u32 = 800;
+const ARM_DELAY: Duration = Duration::from_millis(ARM_DELAY_MS as u64);
 const WIDTH: i32 = 460;
 const SS_OWNERDRAW: u32 = 0x0D;
 const SS_NOPREFIX: u32 = 0x80;
@@ -129,7 +135,8 @@ impl Content {
 /// Shared by a request and its dialog thread.
 #[derive(Default)]
 struct Link {
-    /// The dialog window once it exists (0 before).
+    /// The dialog window while it exists (0 before and after: window handles are recycled,
+    /// so a stale one could name another app's window).
     hwnd: AtomicIsize,
     /// The request stopped waiting (timeout, cancellation): the dialog must deny and close.
     abandoned: AtomicBool,
@@ -157,6 +164,32 @@ impl Drop for DenyOnDrop {
     }
 }
 
+/// Clears [`Link::hwnd`] when the dialog thread is done with its window, on every path.
+struct ForgetWindow<'a>(&'a Link);
+
+impl Drop for ForgetWindow<'_> {
+    fn drop(&mut self) {
+        self.0.hwnd.store(0, Ordering::SeqCst);
+    }
+}
+
+/// The dialog's answer: `false` on timeout or when the dialog thread ends without one. The
+/// guard is created by the caller and owned by the returned future (an `async fn` holds its
+/// arguments from the call), so dropping the future at any point, even before its first
+/// poll, denies and closes the dialog.
+async fn wait_for_answer(
+    guard: DenyOnDrop,
+    rx: tokio::sync::oneshot::Receiver<bool>,
+    timeout: Duration,
+) -> bool {
+    let _guard = guard;
+    tokio::time::timeout(timeout, rx)
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or(false)
+}
+
 impl Confirmer for NativeConfirmer {
     fn confirm<'a>(&'a self, prompt: ConfirmationPrompt) -> BackendFuture<'a, bool> {
         let timeout = Duration::from_millis(prompt.timeout_ms.max(1_000));
@@ -175,17 +208,12 @@ impl Confirmer for NativeConfirmer {
                 };
                 let _ = tx.send(answer);
             });
-        Box::pin(async move {
-            if spawned.is_err() {
-                return Ok(false);
-            }
-            let _deny_on_drop = DenyOnDrop(link);
-            Ok(tokio::time::timeout(timeout, rx)
-                .await
-                .ok()
-                .and_then(Result::ok)
-                .unwrap_or(false))
-        })
+        // Created now, not on the first poll: the dialog already exists.
+        let answer = wait_for_answer(DenyOnDrop(link), rx, timeout);
+        if spawned.is_err() {
+            return Box::pin(async { Ok(false) });
+        }
+        Box::pin(async move { Ok(answer.await) })
     }
 }
 
@@ -228,8 +256,54 @@ struct Dialog {
     band_top: i32,
 }
 
+/// Keyboard activity seen by the dialog, so typing meant for another window that runs into
+/// it (Tab to "Allow once", then Space or Enter) cannot approve.
+#[derive(Clone, Copy, Debug, Default)]
+struct Keys {
+    last_press: Option<Instant>,
+    /// The latest key press came at least `ARM_DELAY` after the one before it.
+    paused: bool,
+    /// A keyboard message is being handled right now.
+    handling: bool,
+}
+
+impl Keys {
+    /// Starts handling a keyboard message (`press`: key down, including auto-repeat).
+    fn begin(self, press: bool, now: Instant) -> Self {
+        let mut next = Self {
+            handling: true,
+            ..self
+        };
+        if press {
+            next.paused = self
+                .last_press
+                .is_none_or(|t| now.saturating_duration_since(t) >= ARM_DELAY);
+            next.last_press = Some(now);
+        }
+        next
+    }
+
+    fn end(self) -> Self {
+        Self {
+            handling: false,
+            ..self
+        }
+    }
+
+    /// A click from the mouse or assistive technology, or a key pressed after a pause.
+    fn may_allow(self) -> bool {
+        !self.handling || self.paused
+    }
+}
+
+/// Whether a WM_COMMAND for `ID_ALLOW` approves: only the armed Allow button's own click.
+fn allow_counts(armed: bool, code: u32, from_allow: bool, keys: Keys) -> bool {
+    armed && code == BN_CLICKED && from_allow && keys.may_allow()
+}
+
 thread_local! {
     static DIALOG: RefCell<Option<Dialog>> = const { RefCell::new(None) };
+    static KEYS: Cell<Keys> = Cell::new(Keys::default());
 }
 
 fn with_dialog<R>(f: impl FnOnce(&mut Dialog) -> R) -> Option<R> {
@@ -574,6 +648,10 @@ fn run_dialog(
     prompt: &ConfirmationPrompt,
     timeout: Duration,
 ) -> WinwrightResult<bool> {
+    // Sized from the monitor's real DPI, so the window must not be DPI-virtualized in hosts
+    // without a Per-Monitor-V2 manifest.
+    // SAFETY: affects only this dedicated dialog thread, before it creates any window.
+    let _ = unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
     let hinstance = theme::register_class(CLASS, Some(dialog_proc))?;
     let (dpi, work) = cursor_monitor_dpi_and_work_area();
     // SAFETY: the class is registered; the window is created hidden and shown below.
@@ -595,6 +673,7 @@ fn run_dialog(
     }
     .map_err(|e| platform("CreateWindowExW(confirm)", &e))?;
     link.hwnd.store(hwnd.0 as isize, Ordering::SeqCst);
+    let _forget = ForgetWindow(link);
     let build = || -> WinwrightResult<Dialog> {
         let content = Content::of(prompt);
         let mut blocks = Vec::new();
@@ -704,11 +783,25 @@ fn run_dialog(
         }
         SetTimer(Some(hwnd), TIMER_TICK, 250, None);
         SetTimer(Some(hwnd), TIMER_ARM, ARM_DELAY_MS, None);
+        KEYS.with(|k| {
+            k.set(Keys {
+                last_press: Some(Instant::now()),
+                ..Keys::default()
+            })
+        });
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+            let keyboard = (WM_KEYFIRST..=WM_KEYLAST).contains(&msg.message);
+            if keyboard {
+                let press = msg.message == WM_KEYDOWN || msg.message == WM_SYSKEYDOWN;
+                KEYS.with(|k| k.set(k.get().begin(press, Instant::now())));
+            }
             if !IsDialogMessageW(hwnd, &msg).as_bool() {
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
+            }
+            if keyboard {
+                KEYS.with(|k| k.set(k.get().end()));
             }
         }
     }
@@ -770,6 +863,8 @@ fn finish(hwnd: HWND, answer: bool) {
         if d.answer.is_none() {
             d.answer = Some(answer);
         }
+        // Nothing may post to this handle once the window is gone.
+        d.link.hwnd.store(0, Ordering::SeqCst);
     });
     // SAFETY: destroys this thread's own window (WM_DESTROY does not borrow the dialog).
     let _ = unsafe { DestroyWindow(hwnd) };
@@ -833,9 +928,17 @@ unsafe extern "system" fn dialog_proc(
                 None
             }
             WM_COMMAND => {
+                let code = ((wparam.0 >> 16) & 0xFFFF) as u32;
                 match (wparam.0 & 0xFFFF) as i32 {
                     ID_DENY => finish(hwnd, false),
-                    ID_ALLOW if with_dialog(|d| d.armed) == Some(true) => finish(hwnd, true),
+                    ID_ALLOW
+                        if with_dialog(|d| {
+                            let from_allow = lparam.0 == d.allow.0 as isize;
+                            allow_counts(d.armed, code, from_allow, KEYS.with(Cell::get))
+                        }) == Some(true) =>
+                    {
+                        finish(hwnd, true)
+                    }
                     _ => {}
                 }
                 Some(LRESULT(0))
@@ -975,5 +1078,105 @@ mod tests {
         assert_eq!(c.seconds, 60);
         p.timeout_ms = 10;
         assert_eq!(Content::of(&p).seconds, 1, "never less than a second");
+    }
+
+    fn abandoned(link: &Link) -> bool {
+        link.abandoned.load(Ordering::SeqCst)
+    }
+
+    #[test]
+    fn a_request_dropped_before_its_first_poll_abandons_the_dialog() {
+        let link = Arc::new(Link::default());
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        let pending = wait_for_answer(DenyOnDrop(Arc::clone(&link)), rx, Duration::from_secs(60));
+        assert!(!abandoned(&link));
+        drop(pending);
+        assert!(abandoned(&link), "the dialog must deny and close at once");
+    }
+
+    #[tokio::test]
+    async fn only_the_dialog_answer_true_allows() {
+        let answer = |sent: Option<bool>| async move {
+            let link = Arc::new(Link::default());
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            match sent {
+                Some(a) => tx.send(a).unwrap(),
+                None => drop(tx),
+            }
+            let got =
+                wait_for_answer(DenyOnDrop(Arc::clone(&link)), rx, Duration::from_secs(5)).await;
+            assert!(
+                abandoned(&link),
+                "a finished request always releases its dialog"
+            );
+            got
+        };
+        assert!(answer(Some(true)).await);
+        assert!(!answer(Some(false)).await);
+        assert!(
+            !answer(None).await,
+            "a dialog thread that ends without an answer denies"
+        );
+        let link = Arc::new(Link::default());
+        let (_tx, rx) = tokio::sync::oneshot::channel::<bool>();
+        let late = wait_for_answer(DenyOnDrop(Arc::clone(&link)), rx, Duration::from_millis(20));
+        assert!(!late.await, "no answer in time denies");
+        assert!(abandoned(&link));
+    }
+
+    #[test]
+    fn the_dialog_forgets_its_window_handle_on_every_exit() {
+        let link = Link::default();
+        link.hwnd.store(0x1234, Ordering::SeqCst);
+        drop(ForgetWindow(&link));
+        assert_eq!(
+            link.hwnd.load(Ordering::SeqCst),
+            0,
+            "a late DenyOnDrop must not post WM_CLOSE to a recycled handle"
+        );
+    }
+
+    #[test]
+    fn typing_that_runs_into_the_dialog_cannot_allow() {
+        let t0 = Instant::now();
+        let ms = |n| t0 + Duration::from_millis(n);
+        // Typing: Tab moves focus to "Allow once", Space follows 120 ms later.
+        let keys = Keys::default().begin(true, ms(0)).end();
+        let space_down = keys.begin(true, ms(120));
+        assert!(!allow_counts(true, BN_CLICKED, true, space_down));
+        let space_up = space_down.end().begin(false, ms(180));
+        assert!(
+            !allow_counts(true, BN_CLICKED, true, space_up),
+            "Space clicks on key up"
+        );
+        // A deliberate press after a pause counts, on key down (Enter) or key up (Space).
+        let pause = space_up.end().begin(true, ms(180 + 900));
+        assert!(allow_counts(true, BN_CLICKED, true, pause));
+        assert!(allow_counts(
+            true,
+            BN_CLICKED,
+            true,
+            pause.end().begin(false, ms(1_150))
+        ));
+        // The mouse (or UI Automation's Invoke) is not keyboard input.
+        assert!(allow_counts(true, BN_CLICKED, true, space_up.end()));
+    }
+
+    #[test]
+    fn allow_needs_the_armed_allow_buttons_own_click() {
+        let idle = Keys::default();
+        assert!(allow_counts(true, BN_CLICKED, true, idle));
+        assert!(
+            !allow_counts(false, BN_CLICKED, true, idle),
+            "not armed yet"
+        );
+        assert!(
+            !allow_counts(true, 6, true, idle),
+            "BN_SETFOCUS is not a click"
+        );
+        assert!(
+            !allow_counts(true, BN_CLICKED, false, idle),
+            "not from the button"
+        );
     }
 }

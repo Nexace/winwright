@@ -216,25 +216,38 @@ pub fn set(
     }
     .map_err(|e| platform("CreateWindowExW(tray)", &e))?;
     let (small, large) = icon_sizes();
-    let icons = [
-        theme::brand_icon(small, false)?,
-        theme::brand_icon(small, true)?,
-    ];
-    let large = theme::brand_icon(large, false)?;
+    let mut made = Vec::new();
+    for (size, stopped) in [(small, false), (small, true), (large, false)] {
+        match theme::brand_icon(size, stopped) {
+            Ok(icon) => made.push(icon),
+            Err(err) => {
+                // SAFETY: destroys what was created above on this thread, each exactly once.
+                unsafe {
+                    for icon in made {
+                        let _ = DestroyIcon(icon);
+                    }
+                    let _ = DestroyWindow(owner);
+                }
+                return Err(err);
+            }
+        }
+    }
+    let (icons, large) = ([made[0], made[1]], made[2]);
     // SAFETY: registers (or looks up) a system-wide message name.
     let taskbar_created = unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) };
-    notify(owner, icons, &state, NIM_ADD)?;
+    // Kept even if adding fails (Explorer not started yet, or busy): TaskbarCreated adds the
+    // icon later, and `remove` deletes an icon that was added after all.
     TRAY.with(|cell| {
         *cell.borrow_mut() = Some(Tray {
             owner,
-            state,
+            state: state.clone(),
             callback,
             icons,
             large,
             taskbar_created,
         });
     });
-    Ok(())
+    notify(owner, icons, &state, NIM_ADD)
 }
 
 /// Shows a notification from the icon (a toast on Windows 11). Quiet hours are respected.
@@ -333,6 +346,11 @@ fn build_menu(menu: HMENU, rows: &[Row]) {
 }
 
 fn show_menu(owner: HWND, anchor: Option<POINT>) {
+    // One menu at a time: a tray event dispatched by the open menu's modal loop must not
+    // replace (and on return clear) the rows the open menu draws from.
+    if MENU.with(|m| m.try_borrow().map_or(true, |m| m.is_some())) {
+        return;
+    }
     let Some((state, callback)) = TRAY.with(|cell| {
         cell.try_borrow().ok().and_then(|t| {
             t.as_ref()
@@ -345,6 +363,10 @@ fn show_menu(owner: HWND, anchor: Option<POINT>) {
     let dpi = unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(owner) }.max(96);
     let palette = Palette::system();
     let rows = rows_for(&state);
+    // SAFETY: an empty popup menu, destroyed below on this thread.
+    let Ok(menu) = (unsafe { CreatePopupMenu() }) else {
+        return;
+    };
     MENU.with(|m| {
         *m.borrow_mut() = Some(MenuStyle {
             rows: rows.clone(),
@@ -358,9 +380,6 @@ fn show_menu(owner: HWND, anchor: Option<POINT>) {
     // SAFETY: the menu is created, shown modally, and destroyed on this thread; strings and
     // the brush outlive the menu.
     let chosen = unsafe {
-        let Ok(menu) = CreatePopupMenu() else {
-            return;
-        };
         build_menu(menu, &rows);
         let _ = SetMenuInfo(
             menu,
