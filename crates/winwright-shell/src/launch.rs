@@ -1,6 +1,11 @@
 //! `launch`: URIs, folders, and documents open through `ShellExecuteExW("open")`; executables
 //! start through `CreateProcessW` with an explicit image path and a quoted argument vector,
 //! never through `cmd.exe`. No elevation verb exists anywhere in this module.
+//!
+//! What the shell opens is allowlisted: a few URI schemes and document, image and media
+//! types. Anything else (custom protocol handlers, shortcuts, scripts, installers) is started
+//! by naming the program, with the file as an argument, so policy sees the real program.
+//! Executables only run from local disks.
 
 use std::ffi::{OsStr, OsString};
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
@@ -8,10 +13,14 @@ use std::path::{Path, PathBuf};
 
 use windows::Win32::Foundation::{
     ERROR_ACCESS_DENIED, ERROR_BAD_EXE_FORMAT, ERROR_CANCELLED, ERROR_ELEVATION_REQUIRED,
-    ERROR_FILE_NOT_FOUND, ERROR_NO_ASSOCIATION, ERROR_PATH_NOT_FOUND,
+    ERROR_FILE_NOT_FOUND, ERROR_NO_ASSOCIATION, ERROR_PATH_NOT_FOUND, ERROR_SUCCESS,
 };
+use windows::Win32::Storage::FileSystem::GetDriveTypeW;
 use windows::Win32::System::Com::{
     COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoUninitialize,
+};
+use windows::Win32::System::Registry::{
+    HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RegGetValueW,
 };
 use windows::Win32::System::SystemInformation::{GetSystemDirectoryW, GetWindowsDirectoryW};
 use windows::Win32::System::Threading::{
@@ -32,63 +41,22 @@ use crate::{platform, reject_nul};
 /// Image types `CreateProcessW` runs directly.
 const EXECUTABLE_EXTENSIONS: &[&str] = &["exe", "com"];
 
-/// Files that run code through a script host, `cmd.exe`, or an installer when "opened".
-/// Launching them would bypass the argument-vector guarantee; `exec` with an explicit
-/// interpreter (behind policy) is the supported route.
-const SCRIPT_EXTENSIONS: &[&str] = &[
-    "appinstaller",
-    "application",
-    "appref-ms",
-    "appx",
-    "appxbundle",
-    "bat",
-    "chm",
-    "cmd",
-    "cpl",
-    "diagcab",
-    "hta",
-    "jar",
-    "js",
-    "jse",
-    "msi",
-    "msix",
-    "msixbundle",
-    "msp",
-    "pif",
-    "ps1",
-    "psc1",
-    "psm1",
-    "py",
-    "pyw",
-    "pyz",
-    "pyzw",
-    "reg",
-    "scr",
-    "settingcontent-ms",
-    "vb",
-    "vbe",
-    "vbs",
-    "ws",
-    "wsf",
-    "wsh",
+/// Files the shell opens with their default handler: documents, images, and media. Anything
+/// else (shortcuts that point anywhere, scripts, installers, unknown types) would run code the
+/// policy never saw; starting the program with the file as an argument is the route for those.
+const DOCUMENT_EXTENSIONS: &[&str] = &[
+    "avi", "bmp", "csv", "doc", "docx", "flac", "gif", "heic", "htm", "html", "ico", "jpeg", "jpg",
+    "json", "log", "m4a", "md", "mkv", "mov", "mp3", "mp4", "odp", "ods", "odt", "ogg", "pdf",
+    "png", "ppt", "pptx", "rtf", "svg", "tif", "tiff", "tsv", "txt", "wav", "webm", "webp", "wma",
+    "wmv", "xls", "xlsx", "xml", "yaml", "yml", "zip",
 ];
 
-/// URI schemes that execute local content or have a history of remote-code-execution abuse.
-/// `file:` is refused so paths always go through the file classification above.
-const BLOCKED_SCHEMES: &[&str] = &[
-    "file",
-    "hcp",
-    "its",
-    "javascript",
-    "mk",
-    "ms-appinstaller",
-    "ms-its",
-    "ms-msdt",
-    "ms-officecmd",
-    "search",
-    "search-ms",
-    "vbscript",
-];
+/// URI schemes the shell opens. Custom protocol handlers are a long-running source of
+/// remote-code-execution bugs, and `file:` would skip the file checks, so the rest are refused.
+const ALLOWED_SCHEMES: &[&str] = &["http", "https", "mailto", "ms-settings", "shell"];
+
+/// `GetDriveTypeW` result for a mapped network drive.
+const DRIVE_REMOTE: u32 = 4;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Target {
@@ -206,18 +174,26 @@ pub(crate) fn uri_scheme(app: &str) -> Option<&str> {
 
 pub(crate) fn classify(app: &str, working_dir: Option<&Path>) -> WinwrightResult<Target> {
     if let Some(scheme) = uri_scheme(app) {
-        if BLOCKED_SCHEMES.contains(&scheme.to_ascii_lowercase().as_str()) {
+        let lower = scheme.to_ascii_lowercase();
+        // `shell:Downloads` names a folder; `shell:::{CLSID}` and `shell:Desktop\x.lnk` can
+        // reach anything.
+        let rest = &app[scheme.len() + 1..];
+        let plain_folder = rest.chars().all(|c| c.is_ascii_alphanumeric() || c == ' ');
+        if !ALLOWED_SCHEMES.contains(&lower.as_str()) || (lower == "shell" && !plain_folder) {
             return Err(WinwrightError::ActionBlocked {
-                reason: format!("`{scheme}:` URIs are not launched; pass a folder or file path"),
+                reason: format!(
+                    "`{scheme}:` URIs are not opened (allowed: http, https, mailto, ms-settings, \
+                     shell:<folder>); launch the app itself instead"
+                ),
             });
         }
         return Ok(Target::Shell(OsString::from(app)));
     }
 
     if !app.contains(['\\', '/', ':']) {
-        // Bare name: `notepad`, `notepad.exe`, `calc`, or `notes.txt` inside `working_dir`.
+        // Bare name: `notepad`, `notepad.exe`, `msedge`, or `notes.txt` inside `working_dir`.
         check_extension(app)?;
-        if let Some(image) = search_executable(app) {
+        if let Some(image) = search_executable(app).or_else(|| app_path(app)) {
             return classify_file(image);
         }
         if let Some(local) = working_dir.map(|dir| dir.join(app))
@@ -225,8 +201,11 @@ pub(crate) fn classify(app: &str, working_dir: Option<&Path>) -> WinwrightResult
         {
             return classify_path(local, app);
         }
-        // Not found: let the shell resolve App Paths (`msedge`, `winword`).
-        return Ok(Target::Shell(OsString::from(app)));
+        // Never left to ShellExecute: its own search tries the current folder and `.bat`/`.lnk`.
+        return Err(WinwrightError::invalid(format!(
+            "`{app}` was not found in System32, the Windows folder, PATH, or App Paths; pass \
+             its full path"
+        )));
     }
 
     // Anything after the drive (`C:`) or verbatim-drive (`\\?\C:`) prefix that contains a
@@ -244,6 +223,11 @@ pub(crate) fn classify(app: &str, working_dir: Option<&Path>) -> WinwrightResult
     {
         path = dir.join(path);
     }
+    let path = std::path::absolute(&path).unwrap_or(path);
+    // Refused before touching the path: even a metadata read sends a server our credentials.
+    if on_network(&path) && is_executable(app) {
+        return Err(remote_executable(&path));
+    }
     classify_path(path, app)
 }
 
@@ -251,7 +235,11 @@ fn classify_path(path: PathBuf, app: &str) -> WinwrightResult<Target> {
     match std::fs::metadata(&path) {
         Ok(meta) if meta.is_dir() => Ok(Target::Shell(path.into_os_string())),
         Ok(_) => classify_file(path),
-        Err(_) if path.extension().is_none() && path.with_extension("exe").is_file() => {
+        Err(_)
+            if path.extension().is_none()
+                && !on_network(&path)
+                && path.with_extension("exe").is_file() =>
+        {
             classify_file(path.with_extension("exe"))
         }
         Err(_) => Err(WinwrightError::invalid(format!("`{app}` does not exist"))),
@@ -264,24 +252,102 @@ fn classify_file(path: PathBuf) -> WinwrightResult<Target> {
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
     check_extension(&name)?;
-    match extension_of(&name) {
-        Some(ext) if EXECUTABLE_EXTENSIONS.contains(&ext.as_str()) => Ok(Target::Process(path)),
-        _ => Ok(Target::Shell(path.into_os_string())),
+    if is_executable(&name) {
+        if on_network(&path) {
+            return Err(remote_executable(&path));
+        }
+        Ok(Target::Process(path))
+    } else {
+        Ok(Target::Shell(path.into_os_string()))
     }
 }
 
+fn is_executable(name: &str) -> bool {
+    extension_of(name).is_some_and(|ext| EXECUTABLE_EXTENSIONS.contains(&ext.as_str()))
+}
+
+/// Executables, documents on the allowlist, and names without an extension (folders, or
+/// programs found by name) pass.
 fn check_extension(name: &str) -> WinwrightResult<()> {
     match extension_of(name) {
-        Some(ext) if SCRIPT_EXTENSIONS.contains(&ext.as_str()) => {
+        Some(ext)
+            if !EXECUTABLE_EXTENSIONS.contains(&ext.as_str())
+                && !DOCUMENT_EXTENSIONS.contains(&ext.as_str()) =>
+        {
             Err(WinwrightError::ActionBlocked {
                 reason: format!(
-                    "`.{ext}` files run through a script host, cmd.exe, or an installer; \
-                     use exec with an explicit interpreter instead"
+                    "`.{ext}` files are not opened with their default handler (only documents, \
+                     images and media are); start the program that should open it and pass \
+                     the file as an argument"
                 ),
             })
         }
         _ => Ok(()),
     }
+}
+
+/// On a share (`\\server\share`, `\\?\UNC\…`, a device path) or a mapped network drive.
+fn on_network(path: &Path) -> bool {
+    use std::path::{Component, Prefix};
+    let Some(Component::Prefix(prefix)) = path.components().next() else {
+        return false;
+    };
+    match prefix.kind() {
+        Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => {
+            let root = wide(format!("{}:\\", char::from(letter)));
+            // SAFETY: `root` is a NUL-terminated drive root such as `Z:\`.
+            unsafe { GetDriveTypeW(PCWSTR(root.as_ptr())) == DRIVE_REMOTE }
+        }
+        _ => true,
+    }
+}
+
+fn remote_executable(path: &Path) -> WinwrightError {
+    WinwrightError::ActionBlocked {
+        reason: format!(
+            "{} is on a network share or drive; Winwright only starts programs from local disks",
+            path.display()
+        ),
+    }
+}
+
+/// The program registered for `name` under App Paths (`msedge`, `winword`), current user
+/// first: the lookup `ShellExecute` makes, without its search of the current folder.
+fn app_path(name: &str) -> Option<PathBuf> {
+    let key = if extension_of(name).is_some() {
+        name.to_owned()
+    } else {
+        format!("{name}.exe")
+    };
+    let subkey = wide(format!(
+        r"Software\Microsoft\Windows\CurrentVersion\App Paths\{key}"
+    ));
+    [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE]
+        .into_iter()
+        .find_map(|root| {
+            let mut buf = vec![0u16; 1024];
+            let mut bytes = (buf.len() * 2) as u32;
+            // SAFETY: `subkey` is NUL-terminated; `buf` is writable for `bytes` bytes. The
+            // default value is read; REG_EXPAND_SZ values come back expanded.
+            let status = unsafe {
+                RegGetValueW(
+                    root,
+                    PCWSTR(subkey.as_ptr()),
+                    PCWSTR::null(),
+                    RRF_RT_REG_SZ,
+                    None,
+                    Some(buf.as_mut_ptr().cast()),
+                    Some(&mut bytes),
+                )
+            };
+            if status != ERROR_SUCCESS {
+                return None;
+            }
+            let units = (bytes as usize / 2).min(buf.len());
+            let text = String::from_utf16_lossy(&buf[..units]);
+            let text = text.trim_end_matches('\0').trim().trim_matches('"');
+            (!text.is_empty()).then(|| PathBuf::from(text))
+        })
 }
 
 /// Lower-case extension as Windows resolves it: trailing dots and spaces are ignored, so
@@ -571,15 +637,29 @@ mod tests {
     }
 
     #[test]
-    fn uris_open_through_the_shell_and_dangerous_schemes_are_blocked() {
-        assert_eq!(
-            classify("ms-settings:display", None).unwrap(),
-            Target::Shell("ms-settings:display".into())
-        );
+    fn only_allowlisted_uri_schemes_open() {
+        for uri in [
+            "ms-settings:display",
+            "HTTPS://example.com/a",
+            "mailto:someone@example.com",
+            "shell:Downloads",
+            "shell:Common Startup",
+        ] {
+            assert_eq!(
+                classify(uri, None).unwrap(),
+                Target::Shell(uri.into()),
+                "{uri}"
+            );
+        }
         for uri in [
             "file:///C:/Windows/System32/calc.exe",
             "ms-msdt:/id x",
             "SEARCH-MS:query=x",
+            "zoommtg://join?x",
+            "vscode://file/C:/x",
+            "shell:::{2559a1f3-21d7-11d4-bdaf-00c04f60b9f0}",
+            r"shell:Desktop\run.lnk",
+            r"shell:AppsFolder\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App",
         ] {
             let err = classify(uri, None).unwrap_err();
             assert_eq!(err.code(), ErrorCode::ActionBlocked, "{uri}");
@@ -607,11 +687,43 @@ mod tests {
     }
 
     #[test]
-    fn unknown_bare_names_fall_back_to_app_paths() {
+    fn bare_names_resolve_through_app_paths_and_never_through_the_shell() {
+        // Edge is not on PATH; its App Paths entry names its executable.
+        match classify("msedge", None).unwrap() {
+            Target::Process(path) => assert!(
+                path.to_string_lossy()
+                    .to_lowercase()
+                    .ends_with("msedge.exe"),
+                "{}",
+                path.display()
+            ),
+            other => panic!("msedge classified as {other:?}"),
+        }
         assert_eq!(
-            classify("winwright-no-such-app-4711", None).unwrap(),
-            Target::Shell("winwright-no-such-app-4711".into())
+            classify("winwright-no-such-app-4711", None)
+                .unwrap_err()
+                .code(),
+            ErrorCode::InvalidRequest
         );
+    }
+
+    #[test]
+    fn executables_on_shares_are_refused_without_touching_them() {
+        for app in [
+            r"\\winwright-no-such-host\share\tool.exe",
+            r"\\?\UNC\winwright-no-such-host\share\tool.EXE",
+            "//winwright-no-such-host/share/tool.com",
+            r"\\.\winwright-no-such-device\tool.exe",
+        ] {
+            let started = std::time::Instant::now();
+            let err = classify(app, None).unwrap_err();
+            assert_eq!(err.code(), ErrorCode::ActionBlocked, "{app}: {err}");
+            // A lookup of the host would take seconds.
+            assert!(
+                started.elapsed() < std::time::Duration::from_millis(500),
+                "{app}"
+            );
+        }
     }
 
     #[test]
@@ -620,9 +732,19 @@ mod tests {
         let doc = scratch.0.join("notes.txt");
         let script = scratch.0.join("run.bat");
         let installer = scratch.0.join("setup.MSI");
-        std::fs::write(&doc, b"hi").unwrap();
-        std::fs::write(&script, b"@echo off").unwrap();
-        std::fs::write(&installer, b"x").unwrap();
+        let shortcut = scratch.0.join("app.lnk");
+        let web_shortcut = scratch.0.join("site.url");
+        let unknown = scratch.0.join("data.xyz");
+        for file in [
+            &doc,
+            &script,
+            &installer,
+            &shortcut,
+            &web_shortcut,
+            &unknown,
+        ] {
+            std::fs::write(file, b"x").unwrap();
+        }
 
         assert_eq!(
             classify(scratch.0.to_str().unwrap(), None).unwrap(),
@@ -636,10 +758,19 @@ mod tests {
             classify("notes.txt", Some(&scratch.0)).unwrap(),
             Target::Shell(doc.clone().into_os_string())
         );
-        for blocked in [&script, &installer] {
+        for blocked in [&script, &installer, &shortcut, &web_shortcut, &unknown] {
             let err = classify(blocked.to_str().unwrap(), None).unwrap_err();
-            assert_eq!(err.code(), ErrorCode::ActionBlocked);
+            assert_eq!(
+                err.code(),
+                ErrorCode::ActionBlocked,
+                "{}",
+                blocked.display()
+            );
         }
+        assert_eq!(
+            classify("app.lnk", Some(&scratch.0)).unwrap_err().code(),
+            ErrorCode::ActionBlocked
+        );
         assert_eq!(
             classify("run.cmd", None).unwrap_err().code(),
             ErrorCode::ActionBlocked

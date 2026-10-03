@@ -12,8 +12,8 @@ use crate::backend::{BackendFuture, OperationContext};
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LaunchRequest {
-    /// Executable name or path (`notepad.exe`), a shell URI (`ms-settings:display`), or a
-    /// folder/file path to open with its default handler.
+    /// Executable name or path (`notepad.exe`), an allowlisted URI (`ms-settings:display`), or
+    /// a folder or document/image/media path to open with its default handler.
     pub app: String,
     #[serde(default)]
     pub args: Vec<String>,

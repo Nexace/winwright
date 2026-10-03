@@ -638,7 +638,9 @@ impl HighlightInput {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LaunchInput {
-    /// notepad.exe, ms-settings:display, or a folder/file path.
+    /// notepad.exe, msedge, a program path, a folder, or a document/image/media file. URIs:
+    /// http(s), mailto, ms-settings, shell:<folder>. Other files (shortcuts, scripts): start
+    /// the program that opens them with the file in `args`.
     pub app: String,
     /// Arguments for an executable.
     pub args: Option<Vec<String>>,
