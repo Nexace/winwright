@@ -11,7 +11,7 @@ use winwright_contracts::system::{
 };
 use winwright_contracts::window::WindowInfo;
 use winwright_contracts::{WinwrightError, WinwrightResult};
-use winwright_security::{program_capability, transfer_risk};
+use winwright_security::{program_capability, stricter, transfer_risk};
 
 use std::time::{Duration, Instant};
 
@@ -88,16 +88,6 @@ fn with_args(args: &[String]) -> String {
         " with arguments {shown}\u{2026} ({} more characters)",
         total - MAX_PROMPT_ARGS
     )
-}
-
-/// The stricter of the capabilities two spellings of a program need.
-fn stricter(a: Capability, b: Capability) -> Capability {
-    let rank = |c: Capability| match c {
-        Capability::PowerShell => 2,
-        Capability::Shell => 1,
-        _ => 0,
-    };
-    if rank(b) > rank(a) { b } else { a }
 }
 
 fn unavailable(backend: &str) -> WinwrightError {

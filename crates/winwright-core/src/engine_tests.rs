@@ -73,6 +73,9 @@ const STATUS: i32 = 16;
 const COMBO: i32 = 7;
 /// Another Winwright process (a CLI call next to the MCP server).
 const OTHER_WINWRIGHT: u32 = 77;
+/// Windows Terminal and Explorer (the Run box), where Enter runs what was typed.
+const TERMINAL: u32 = 78;
+const EXPLORER: u32 = 79;
 
 struct State {
     els: BTreeMap<i32, El>,
@@ -298,10 +301,11 @@ impl WindowBackend for Fake {
         })
     }
     fn process_name(&self, pid: u32) -> String {
-        if pid == OTHER_WINWRIGHT {
-            "winwright.exe".into()
-        } else {
-            "fixture.exe".into()
+        match pid {
+            OTHER_WINWRIGHT => "winwright.exe".into(),
+            TERMINAL => "WindowsTerminal.exe".into(),
+            EXPLORER => "explorer.exe".into(),
+            _ => "fixture.exe".into(),
         }
     }
     fn focus_window(&self, hwnd: u64) -> WinwrightResult<()> {
@@ -2218,7 +2222,6 @@ async fn win_chords_and_send_shortcuts_need_confirmation() {
     let press =
         |target: Option<ElementTarget>, keys: Vec<Key>| DesktopAction::Press { target, keys };
     for (target, keys) in [
-        (None, vec![Key::Win, Key::Char('r')]),
         (None, vec![Key::Win]),
         (Some(by("Edit", "Name:")), vec![Key::Ctrl, Key::Enter]),
         (Some(by("Document", "Notes")), vec![Key::Alt, Key::Enter]),
@@ -2674,6 +2677,96 @@ async fn strict_mode_confirms_changes_but_never_reads() {
         .unwrap();
     let err = engine
         .execute(&session, click(by("Button", "Target")))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code().as_str(), "CONFIRMATION_REQUIRED", "{err}");
+}
+
+#[tokio::test]
+async fn relaxed_mode_sends_without_asking_but_not_deletes() {
+    let fake = Fake::new();
+    {
+        let mut s = fake.s();
+        for (rid, name) in [(63, "Send"), (64, "Delete"), (65, "Pay now")] {
+            s.els
+                .insert(rid, el(ControlRole::Button, name, "", &[UiPattern::Invoke]));
+            s.els.get_mut(&1).unwrap().children.push(rid);
+        }
+    }
+    let mut config = Config::default();
+    config.security.confirmation_mode = winwright_contracts::config::ConfirmationMode::Relaxed;
+    let engine = Engine::new(config, fake.clone(), fake.clone());
+    let session = engine.session(&sid(), "test").unwrap();
+    engine
+        .execute(&session, click(by("Button", "Send")))
+        .await
+        .unwrap();
+    for name in ["Delete", "Pay now"] {
+        let err = engine
+            .execute(&session, click(by("Button", name)))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code().as_str(), "CONFIRMATION_REQUIRED", "{name}");
+    }
+}
+
+#[tokio::test]
+async fn commands_typed_into_terminals_and_the_run_box_are_shell_execution() {
+    let fake = Fake::new();
+    {
+        let mut s = fake.s();
+        for (rid, name, pid) in [(61, "Command", TERMINAL), (62, "Open:", EXPLORER)] {
+            let mut field = el(ControlRole::Edit, name, "", &[UiPattern::Value]);
+            field.pid = pid;
+            s.els.insert(rid, field);
+            s.els.get_mut(&1).unwrap().children.push(rid);
+        }
+    }
+    let input = Arc::new(FakeInput::default());
+    let mut config = Config::default();
+    config.security.confirmation_mode = winwright_contracts::config::ConfirmationMode::Relaxed;
+    let engine = Engine::new(config.clone(), fake.clone(), fake.clone()).with_input(input.clone());
+    let session = engine.session(&sid(), "test").unwrap();
+    let typing = |name: &str, text: &str| DesktopAction::TypeText {
+        target: Some(by("Edit", name)),
+        text: text.into(),
+    };
+    let enter = |name: &str| DesktopAction::Press {
+        target: Some(by("Edit", name)),
+        keys: vec![Key::Enter],
+    };
+    fake.s().els.get_mut(&62).unwrap().value = Some("cmd /c del x".into());
+    for action in [
+        typing("Command", "Remove-Item x\n"),
+        enter("Command"),
+        typing("Open:", "powershell -c Remove-Item x\n"),
+        enter("Open:"),
+        DesktopAction::Press {
+            target: None,
+            keys: vec![Key::Win, Key::Char('r')],
+        },
+    ] {
+        let err = engine.execute(&session, action).await.unwrap_err();
+        assert_eq!(err.code().as_str(), "ACTION_BLOCKED", "{err}");
+    }
+    assert!(input.log.lock().unwrap().is_empty(), "nothing was sent");
+    // Typing without Enter, and starting an ordinary program, stay ordinary.
+    fake.s().els.get_mut(&62).unwrap().value = Some(String::new());
+    engine
+        .execute(&session, typing("Command", "Remove-Item x"))
+        .await
+        .unwrap();
+    engine
+        .execute(&session, typing("Open:", "notepad\n"))
+        .await
+        .unwrap();
+    // With the shell enabled, every command still asks.
+    config.security.allow_shell = true;
+    config.security.allow_powershell = true;
+    let engine = Engine::new(config, fake.clone(), fake.clone()).with_input(input);
+    let session = engine.session(&sid(), "test").unwrap();
+    let err = engine
+        .execute(&session, enter("Command"))
         .await
         .unwrap_err();
     assert_eq!(err.code().as_str(), "CONFIRMATION_REQUIRED", "{err}");

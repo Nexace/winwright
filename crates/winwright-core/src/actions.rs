@@ -61,7 +61,8 @@ fn describe(
 }
 use winwright_contracts::{WinwrightError, WinwrightResult};
 use winwright_security::{
-    classify_activation, classify_submit, is_affirmative, is_sensitive, redacted_value,
+    classify_activation, classify_submit, command_capability, console_capability, is_affirmative,
+    is_launcher, is_sensitive, redacted_value, stricter,
 };
 
 use crate::engine::Engine;
@@ -237,6 +238,19 @@ fn typed_risk(text: &str, receiver: Option<&UiProps>) -> ActionRisk {
     }
 }
 
+/// The lines typed text submits, one per line break; text after the last break is only typed.
+/// The first line is judged both alone (typing replaced a selected value, as in an address bar)
+/// and after the field's current value.
+fn submitted_lines(value: Option<&str>, text: &str) -> Vec<String> {
+    let mut lines: Vec<String> = text.split(['\n', '\r']).map(str::to_owned).collect();
+    lines.pop();
+    if let (Some(first), Some(value)) = (lines.first(), value.filter(|v| !v.is_empty())) {
+        let joined = format!("{value}{first}");
+        lines.push(joined);
+    }
+    lines
+}
+
 /// Window edges beyond this are refused; real virtual desktops are far smaller.
 const MAX_WINDOW_COORD: i64 = 1 << 20;
 
@@ -377,6 +391,24 @@ impl Engine {
         };
         let sensitive_target = target.is_some_and(|r| is_sensitive(&r.props));
         let receiver = target.map(|r| &r.props).or(focused);
+        // Enter that runs a command line is shell execution, however the text got there: in a
+        // terminal, or in the Run box, Start search, or an address bar holding a shell command.
+        let process = receiver.map(|p| self.windows.process_name(p.process_id));
+        let runs = |lines: &[String]| -> Option<Capability> {
+            let process = process.as_deref().filter(|_| !lines.is_empty())?;
+            if let Some(shell) = console_capability(process) {
+                return Some(shell);
+            }
+            if !(is_launcher(process) && receiver.is_some_and(is_text_input)) {
+                return None;
+            }
+            let command = lines
+                .iter()
+                .map(|l| command_capability(l))
+                .fold(Capability::ProcessLaunch, stricter);
+            matches!(command, Capability::Shell | Capability::PowerShell).then_some(command)
+        };
+        let value = receiver.and_then(|p| p.value.as_deref());
         let (capability, risk) = match action {
             DesktopAction::ReadText { .. } if sensitive_target => {
                 (Capability::ReadSensitive, ActionRisk::Sensitive)
@@ -389,7 +421,7 @@ impl Engine {
             | DesktopAction::Collapse { .. } => (Capability::Interact, ActionRisk::Normal),
             // Fill types too when the field has no settable value.
             DesktopAction::Fill { text, .. } | DesktopAction::TypeText { text, .. } => (
-                Capability::Interact,
+                runs(&submitted_lines(value, text)).unwrap_or(Capability::Interact),
                 typed_risk(text, receiver).max(if sensitive_target {
                     ActionRisk::Sensitive
                 } else {
@@ -418,7 +450,17 @@ impl Engine {
                 if has(Key::Delete) && !in_text {
                     risk = risk.max(ActionRisk::Destructive);
                 }
-                (Capability::PhysicalInput, risk)
+                // Win+R opens the Run box and Win+X a menu with Terminal and Run: both run
+                // any command, so they are judged as PowerShell.
+                let capability = if has(Key::Win) && (has(Key::Char('r')) || has(Key::Char('x'))) {
+                    Capability::PowerShell
+                } else if has(Key::Enter) {
+                    runs(&[value.unwrap_or_default().to_owned()])
+                        .unwrap_or(Capability::PhysicalInput)
+                } else {
+                    Capability::PhysicalInput
+                };
+                (capability, risk)
             }
             DesktopAction::Click { force_physical, .. } => (
                 if *force_physical {

@@ -73,6 +73,9 @@ pub enum ConfirmationMode {
     /// Confirm sensitive/destructive actions only (spec §24 defaults).
     #[default]
     Balanced,
+    /// Confirm only what can't be taken back: deleting, spending money, changing security,
+    /// closing programs, and running commands. Sending and submitting go through.
+    Relaxed,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

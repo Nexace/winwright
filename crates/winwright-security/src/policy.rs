@@ -66,13 +66,21 @@ impl Policy {
         match action.risk {
             ActionRisk::ReadOnly => verdict(Allow, "read-only"),
             ActionRisk::Normal => match self.config.confirmation_mode {
-                ConfirmationMode::Balanced => verdict(Allow, "ordinary interaction"),
+                ConfirmationMode::Balanced | ConfirmationMode::Relaxed => {
+                    verdict(Allow, "ordinary interaction")
+                }
                 ConfirmationMode::Strict => {
                     verdict(Confirm, "strict mode confirms every state change")
                 }
             },
-            ActionRisk::Sensitive | ActionRisk::Destructive => {
-                verdict(Confirm, "action may send, submit, delete, or spend")
+            ActionRisk::Sensitive => match self.config.confirmation_mode {
+                ConfirmationMode::Relaxed => verdict(Allow, "relaxed mode lets sends through"),
+                ConfirmationMode::Balanced | ConfirmationMode::Strict => {
+                    verdict(Confirm, "action may send, submit, or move things")
+                }
+            },
+            ActionRisk::Destructive => {
+                verdict(Confirm, "action may delete, spend, or change security")
             }
             ActionRisk::Privileged => verdict(Deny, "privileged actions are blocked by default"),
         }
@@ -141,6 +149,34 @@ mod tests {
             decide(&p, Capability::Observe, ActionRisk::ReadOnly),
             PermissionDecision::Allow
         );
+    }
+
+    #[test]
+    fn relaxed_mode_asks_only_before_what_cannot_be_undone() {
+        use ActionRisk::*;
+        use PermissionDecision::*;
+        let p = Policy::new(SecurityConfig {
+            confirmation_mode: ConfirmationMode::Relaxed,
+            ..Default::default()
+        });
+        assert_eq!(decide(&p, Capability::Interact, Normal), Allow);
+        assert_eq!(decide(&p, Capability::Interact, Sensitive), Allow);
+        assert_eq!(decide(&p, Capability::FileWrite, Sensitive), Allow);
+        assert_eq!(decide(&p, Capability::Interact, Destructive), Confirm);
+        assert_eq!(decide(&p, Capability::FileDelete, Normal), Confirm);
+        assert_eq!(decide(&p, Capability::ProcessTerminate, Normal), Confirm);
+        assert_eq!(decide(&p, Capability::Interact, Privileged), Deny);
+        assert_eq!(decide(&p, Capability::Shell, Normal), Deny);
+        assert_eq!(decide(&p, Capability::PowerShell, Normal), Deny);
+        assert_eq!(decide(&p, Capability::ReadSensitive, ReadOnly), Deny);
+        let shell = Policy::new(SecurityConfig {
+            confirmation_mode: ConfirmationMode::Relaxed,
+            allow_shell: true,
+            allow_powershell: true,
+            ..Default::default()
+        });
+        assert_eq!(decide(&shell, Capability::Shell, Sensitive), Confirm);
+        assert_eq!(decide(&shell, Capability::PowerShell, Sensitive), Confirm);
     }
 
     #[test]

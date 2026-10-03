@@ -42,13 +42,9 @@ const DESTRUCTIVE: &[&str] = &[
     "unpublish",
 ];
 
-/// Phrases that send, publish, spend, or install.
-const SENSITIVE: &[&str] = &[
-    "send",
-    "submit",
-    "publish",
-    "post",
-    "reply all",
+/// Phrases that spend money or change security. Judged with the destructive ones, so even
+/// relaxed mode asks before them.
+const SPEND_OR_SECURITY: &[&str] = &[
     "buy",
     "buy now",
     "purchase",
@@ -65,27 +61,36 @@ const SENSITIVE: &[&str] = &[
     "withdraw",
     "donate",
     "subscribe",
+    "upgrade",
+    "redeem",
+    "place bid",
+    "book now",
     "install",
     "run as administrator",
     "grant",
     "allow",
     "authorize",
+    "approve",
+    "change password",
+    "turn off protection",
+    "deploy",
+];
+
+/// Phrases that send, publish, share, or agree.
+const SENSITIVE: &[&str] = &[
+    "send",
+    "submit",
+    "publish",
+    "post",
+    "reply all",
     "accept",
     "agree",
     "i agree",
-    "change password",
-    "turn off protection",
     "share",
     "forward",
     "invite",
-    "approve",
     "upload",
-    "deploy",
     "unsubscribe",
-    "upgrade",
-    "redeem",
-    "place bid",
-    "book now",
 ];
 
 /// Buttons that agree to whatever their dialog asks: judged by the dialog's text.
@@ -161,7 +166,11 @@ fn contains_phrase(haystack: &[String], phrase: &str) -> bool {
 pub fn classify_activation(name: &str, automation_id: &str) -> ActionRisk {
     let mut tokens = words(name);
     tokens.extend(words(&split_camel(automation_id)));
-    if DESTRUCTIVE.iter().any(|p| contains_phrase(&tokens, p)) {
+    if DESTRUCTIVE
+        .iter()
+        .chain(SPEND_OR_SECURITY)
+        .any(|p| contains_phrase(&tokens, p))
+    {
         ActionRisk::Destructive
     } else if SENSITIVE.iter().any(|p| contains_phrase(&tokens, p)) {
         ActionRisk::Sensitive
@@ -333,6 +342,75 @@ pub fn program_capability(program: &str) -> Capability {
     }
 }
 
+/// The stricter of two capabilities, ranking PowerShell above other shells above the rest.
+pub fn stricter(a: Capability, b: Capability) -> Capability {
+    let rank = |c: Capability| match c {
+        Capability::PowerShell => 2,
+        Capability::Shell => 1,
+        _ => 0,
+    };
+    if rank(b) > rank(a) { b } else { a }
+}
+
+/// Capability a typed command line needs when Enter runs it (the Run box, Start search, the
+/// Explorer address bar). `cmd/c ...` counts as `cmd` too.
+pub fn command_capability(command: &str) -> Capability {
+    let command = command.trim_start();
+    let program = match command.strip_prefix('"') {
+        Some(rest) => rest.split('"').next().unwrap_or_default(),
+        None => command.split_whitespace().next().unwrap_or_default(),
+    };
+    let before_switch = program.split('/').next().unwrap_or_default();
+    stricter(
+        program_capability(program),
+        program_capability(before_switch),
+    )
+}
+
+/// Terminal windows: whatever shell they host, Enter in them runs a command.
+const TERMINALS: &[&str] = &[
+    "alacritty",
+    "conemu",
+    "conemu64",
+    "conhost",
+    "mintty",
+    "openconsole",
+    "tabby",
+    "wezterm-gui",
+    "windowsterminal",
+    "wt",
+];
+
+/// Where typed text plus Enter starts a program: the Run box and the address bar (Explorer) and
+/// Start search.
+const LAUNCHERS: &[&str] = &[
+    "explorer",
+    "searchapp",
+    "searchhost",
+    "searchui",
+    "startmenuexperiencehost",
+];
+
+fn process_stem(process: &str) -> String {
+    let name = process.trim().to_ascii_lowercase();
+    name.strip_suffix(".exe").unwrap_or(&name).to_owned()
+}
+
+/// Capability that pressing Enter in a window of `process` needs, when that runs a command
+/// line: shells and terminals. A terminal may host any shell, so it counts as PowerShell.
+pub fn console_capability(process: &str) -> Option<Capability> {
+    match process_stem(process).as_str() {
+        s if TERMINALS.contains(&s) || POWERSHELLS.contains(&s) => Some(Capability::PowerShell),
+        "cmd" | "bash" | "wsl" => Some(Capability::Shell),
+        _ => None,
+    }
+}
+
+/// Whether text typed into `process`'s fields can be run as a command by Enter.
+pub fn is_launcher(process: &str) -> bool {
+    LAUNCHERS.contains(&process_stem(process).as_str())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -345,10 +423,20 @@ mod tests {
             ActionRisk::Destructive
         );
         assert_eq!(classify_activation("Send", ""), ActionRisk::Sensitive);
-        assert_eq!(
-            classify_activation("Place order", ""),
-            ActionRisk::Sensitive
-        );
+        // Spending money and changing security are judged like deleting: relaxed mode asks.
+        for name in [
+            "Place order",
+            "Pay now",
+            "Install",
+            "Turn off protection",
+            "Allow",
+        ] {
+            assert_eq!(
+                classify_activation(name, ""),
+                ActionRisk::Destructive,
+                "{name}"
+            );
+        }
         assert_eq!(classify_activation("Submit", ""), ActionRisk::Sensitive);
         assert_eq!(
             classify_activation("", "btnDelete"),
@@ -393,8 +481,8 @@ mod tests {
         for (name, id, risk) in [
             ("Move to Recycle Bin", "", ActionRisk::Destructive),
             ("Move to Trash", "", ActionRisk::Destructive),
-            ("Sell", "", ActionRisk::Sensitive),
-            ("Withdraw funds", "", ActionRisk::Sensitive),
+            ("Sell", "", ActionRisk::Destructive),
+            ("Withdraw funds", "", ActionRisk::Destructive),
             ("", "IDDelete", ActionRisk::Destructive),
             ("", "btnOKSend", ActionRisk::Sensitive),
             ("Undelete", "", ActionRisk::Normal),
@@ -403,6 +491,40 @@ mod tests {
         ] {
             assert_eq!(classify_activation(name, id), risk, "{name:?} {id:?}");
         }
+    }
+
+    #[test]
+    fn typed_command_lines_name_their_program() {
+        for (line, want) in [
+            ("powershell -c Remove-Item x", Capability::PowerShell),
+            ("  pwsh.exe", Capability::PowerShell),
+            (
+                "\"C:\\Windows\\System32\\cmd.exe\" /c del x",
+                Capability::Shell,
+            ),
+            ("cmd/c del x", Capability::Shell),
+            ("notepad", Capability::ProcessLaunch),
+            ("C:\\Users\\Ann\\Documents", Capability::ProcessLaunch),
+            ("", Capability::ProcessLaunch),
+        ] {
+            assert_eq!(command_capability(line), want, "{line:?}");
+        }
+    }
+
+    #[test]
+    fn terminals_and_launchers_are_recognized() {
+        assert_eq!(
+            console_capability("WindowsTerminal.exe"),
+            Some(Capability::PowerShell)
+        );
+        assert_eq!(console_capability("cmd.exe"), Some(Capability::Shell));
+        assert_eq!(
+            console_capability("powershell.exe"),
+            Some(Capability::PowerShell)
+        );
+        assert_eq!(console_capability("notepad.exe"), None);
+        assert!(is_launcher("explorer.exe") && is_launcher("SearchHost.exe"));
+        assert!(!is_launcher("notepad.exe"));
     }
 
     #[test]
@@ -473,9 +595,9 @@ mod tests {
             ("Share", ActionRisk::Sensitive),
             ("Forward", ActionRisk::Sensitive),
             ("Invite people", ActionRisk::Sensitive),
-            ("Approve", ActionRisk::Sensitive),
+            ("Approve", ActionRisk::Destructive),
             ("Upload files", ActionRisk::Sensitive),
-            ("Upgrade to Pro", ActionRisk::Sensitive),
+            ("Upgrade to Pro", ActionRisk::Destructive),
             ("Clear", ActionRisk::Normal),
             ("Shared with me", ActionRisk::Normal),
             ("Merge cells", ActionRisk::Normal),
