@@ -46,6 +46,8 @@ First time only: `npm install` in this folder.
   checkout root (question, tools, answer; never what was typed). A new
   conversation starts with the newest five as memory, marked as data; answers
   given after reading a web page are left out of memory.
+- `bridge/notion.mjs`: copies each report to Notion when `JARVIS_NOTION_TOKEN`
+  and `JARVIS_NOTION_PARENT` are set (see `.env.example`).
 - `bridge/panels.mjs`, `bridge/chrome.mjs`, `bridge/net.mjs`, `bridge/page.mjs`:
   cards, the user's Chrome (via the Claude extension), and safe fetching.
 - `winwright-ui/`: the page (HTML, CSS, JS; no framework, no build).

@@ -90,12 +90,13 @@ export function reportMarkdown(turn, { outcome, answer }) {
   return lines.join('\n')
 }
 
-/** Writes the report; returns its path. */
+/** Writes the report; returns its path and text. */
 export function writeReport(dir, turn, result) {
   mkdirSync(dir, { recursive: true })
   const path = join(dir, reportFileName(turn.at, turn.asked))
-  writeFileSync(path, reportMarkdown(turn, result))
-  return path
+  const markdown = reportMarkdown(turn, result)
+  writeFileSync(path, markdown)
+  return { path, markdown }
 }
 
 /** Memory text for a report: without the answer when outside content was read. */

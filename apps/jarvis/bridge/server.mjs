@@ -22,6 +22,7 @@ import { displayServer } from './panels.mjs'
 import { chromeAvailable, chromeServer } from './chrome.mjs'
 import { bringsOutsideContent, taintMarker } from './taint.mjs'
 import { isTask, loadMemory, newTurn, writeReport } from './reports.mjs'
+import { mirrorToNotion, notionConfig } from './notion.mjs'
 import { WINWRIGHT_PROMPT, serveFace } from './winwright-face.mjs'
 import { fileURLToPath } from 'node:url'
 import { timingSafeEqual } from 'node:crypto'
@@ -43,6 +44,9 @@ const REPORTS_DIR =
     ? null
     : (process.env.JARVIS_REPORTS_DIR ??
       fileURLToPath(new URL('../../../reports', import.meta.url)))
+
+/** Each report is also copied to Notion when configured (notion.mjs). */
+const NOTION = REPORTS_DIR ? notionConfig() : null
 
 /**
  * A crash here takes the whole assistant down mid-sentence, and most of what
@@ -912,6 +916,11 @@ console.log(
 )
 console.log(`[jarvis] model ${MODEL} · effort ${EFFORT}`)
 console.log(`[jarvis] task reports and memory: ${REPORTS_DIR ?? 'off (JARVIS_REPORTS=0)'}`)
+if (NOTION) {
+  console.log(`[jarvis] reports are copied to Notion under page ${NOTION.parent}`)
+} else if (process.env.JARVIS_NOTION_TOKEN || process.env.JARVIS_NOTION_PARENT) {
+  console.warn('[jarvis] Notion copy off: set both JARVIS_NOTION_TOKEN and a valid JARVIS_NOTION_PARENT link')
+}
 console.log(
   `[jarvis] writes ${ALLOW_WRITES ? 'ENABLED' : 'disabled'}` +
     (ALLOW_WRITES ? '' : ' — set JARVIS_ALLOW_WRITES=1 to permit shell/file/device actions'),
@@ -1304,10 +1313,15 @@ wss.on('connection', (socket) => {
             if (turn && REPORTS_DIR && isTask(turn)) {
               turn.outside = readOutside
               try {
-                writeReport(REPORTS_DIR, turn, {
+                const { markdown } = writeReport(REPORTS_DIR, turn, {
                   outcome: msg.subtype === 'success' ? 'done' : msg.subtype,
                   answer: msg.result ?? '',
                 })
+                if (NOTION) {
+                  mirrorToNotion(markdown, NOTION)
+                    .then((url) => console.log(`[jarvis] report copied to Notion: ${url}`))
+                    .catch((err) => console.error(`[jarvis] Notion copy failed: ${err.message}`))
+                }
               } catch (err) {
                 console.error(`[jarvis] could not write the task report: ${err}`)
               }
