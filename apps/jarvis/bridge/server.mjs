@@ -21,6 +21,7 @@ import { displayServer } from './panels.mjs'
 import { uiServer } from './ui.mjs'
 import { chromeAvailable, chromeServer } from './chrome.mjs'
 import { visionServer } from './vision.mjs'
+import { bringsOutsideContent, taintMarker } from './taint.mjs'
 import { timingSafeEqual } from 'node:crypto'
 import { homedir, tmpdir } from 'node:os'
 import { readFileSync, realpathSync } from 'node:fs'
@@ -185,10 +186,11 @@ function configuredServers() {
  * Ctrl+Alt+Esc stops everything, and every action lands in its audit log.
  * Start it with JARVIS_WINWRIGHT_EXE only; nothing here loosens any of that.
  */
-function winwrightServer() {
+function winwrightServer(taintFile) {
   const exe = process.env.JARVIS_WINWRIGHT_EXE
   if (!exe) return {}
-  return { winwright: { type: 'stdio', command: exe, args: ['mcp'] } }
+  const args = taintFile ? ['mcp', '--taint-file', taintFile] : ['mcp']
+  return { winwright: { type: 'stdio', command: exe, args } }
 }
 
 const MCP_SERVERS = { ...configuredServers(), ...winwrightServer() }
@@ -1277,6 +1279,9 @@ wss.on('connection', (socket) => {
     if (!failed) sendTurn({ type: 'tool', name })
   }
 
+  // This conversation's taint marker (null without Winwright); see taintMarker.
+  const taint = taintMarker()
+
   const session = query({
     prompt: userMessages(),
     options: {
@@ -1286,6 +1291,8 @@ wss.on('connection', (socket) => {
       // connection rather than once.
       mcpServers: {
         ...MCP_SERVERS,
+        // Winwright again, now told where this conversation's taint marker is.
+        ...winwrightServer(taint?.file),
         jarvis: displayServer(
           (panel) => send({ type: 'panel', panel }),
           (blade) => send({ type: 'blade', blade }),
@@ -1339,6 +1346,38 @@ wss.on('connection', (socket) => {
       // would sit silent until the entire answer was written. Partial events
       // are what let speech start on the first finished sentence.
       includePartialMessages: true,
+      // The taint marker goes down before any tool that brings in outside
+      // content runs. A hook rather than canUseTool, because hooks see every
+      // call, including ones the CLI settles without asking (see below). If
+      // the marker cannot be written the tool is refused: better no web page
+      // than one that could steer the desktop unnoticed.
+      hooks: {
+        PreToolUse: [
+          {
+            hooks: [
+              async (input) => {
+                if (!taint || !bringsOutsideContent(input.tool_name)) return {}
+                try {
+                  taint.mark()
+                  return {}
+                } catch (err) {
+                  console.error(`[jarvis] cannot mark the conversation tainted: ${err}`)
+                  return {
+                    hookSpecificOutput: {
+                      hookEventName: 'PreToolUse',
+                      permissionDecision: 'deny',
+                      permissionDecisionReason:
+                        'Blocked: this tool reads outside content, and the' +
+                        ' desktop safety marker could not be set. Tell the' +
+                        ' user this lookup is unavailable right now.',
+                    },
+                  }
+                }
+              },
+            ],
+          },
+        ],
+      },
       // Signature is (toolName, input, options) and it must return a
       // PermissionResult object. Returning a bare boolean silently denies
       // everything, with the tool name arriving undefined.
@@ -1547,5 +1586,7 @@ wss.on('connection', (socket) => {
     closed = true
     deliver?.(null)
     session.close?.()
+    // The conversation is over; its Winwright goes with it.
+    taint?.clear()
   })
 })
