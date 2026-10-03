@@ -19,6 +19,8 @@ use crate::wic::Wic;
 use crate::window;
 
 pub struct Deadline {
+    /// When the operation started, so a timeout reports the real time spent.
+    pub started: Instant,
     pub at: Instant,
     pub cancel: CancellationToken,
 }
@@ -32,7 +34,7 @@ impl Deadline {
         if Instant::now() >= self.at {
             return Err(WinwrightError::Timeout {
                 operation: operation.to_owned(),
-                elapsed_ms: 0,
+                elapsed_ms: u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX),
             });
         }
         Ok(())
@@ -212,5 +214,24 @@ impl Worker {
         canvas.ok_or_else(|| WinwrightError::CaptureFailed {
             reason: "no monitor produced pixels for the region".into(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_expired_deadline_reports_the_real_elapsed_time() {
+        let started = Instant::now() - std::time::Duration::from_millis(250);
+        let deadline = Deadline {
+            started,
+            at: Instant::now(),
+            cancel: CancellationToken::new(),
+        };
+        let Err(WinwrightError::Timeout { elapsed_ms, .. }) = deadline.check("capture") else {
+            panic!("an expired deadline must time out");
+        };
+        assert!(elapsed_ms >= 250, "elapsed_ms={elapsed_ms}");
     }
 }

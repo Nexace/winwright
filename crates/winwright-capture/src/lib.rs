@@ -74,6 +74,7 @@ impl WgcCapture {
         let (reply, rx) = oneshot::channel();
         let command = make(
             Deadline {
+                started: ctx.started,
                 at: ctx.deadline,
                 cancel: ctx.cancel.clone(),
             },

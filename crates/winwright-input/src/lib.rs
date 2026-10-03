@@ -247,7 +247,11 @@ impl<P: Platform> Engine<P> {
             turn = self.turn.lock() => turn,
             () = ctx.cancel.cancelled() => return Err(WinwrightError::Cancelled),
             () = tokio::time::sleep(ctx.remaining()) => {
-                return Err(WinwrightError::Timeout { operation: op.to_owned(), elapsed_ms: 0 });
+                return Err(WinwrightError::Timeout {
+                    operation: op.to_owned(),
+                    elapsed_ms: u64::try_from(ctx.started.elapsed().as_millis())
+                        .unwrap_or(u64::MAX),
+                });
             }
         };
         ctx.check(op)?;
@@ -541,6 +545,26 @@ mod tests {
 
     fn button_ups(events: &[RawInput]) -> usize {
         events.iter().filter(|e| **e == LEFT_UP).count()
+    }
+
+    #[tokio::test]
+    async fn waiting_for_a_turn_times_out_with_the_real_elapsed_time() {
+        let engine = engine();
+        let _busy = engine.turn.lock().await;
+        let err = engine
+            .click(
+                pt(1, 1),
+                MouseButton::Left,
+                1,
+                &ctx(Duration::from_millis(60)),
+            )
+            .await
+            .unwrap_err();
+        let WinwrightError::Timeout { elapsed_ms, .. } = err else {
+            panic!("{err:?}");
+        };
+        assert!(elapsed_ms >= 50, "elapsed_ms={elapsed_ms}");
+        assert!(events(&engine).is_empty());
     }
 
     #[tokio::test]
