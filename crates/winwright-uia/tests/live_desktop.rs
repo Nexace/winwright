@@ -47,6 +47,10 @@ async fn desktop_root_lists_top_level_windows() {
         tree.root.children.iter().all(|c| c.children.is_empty()),
         "depth is bounded"
     );
+    assert!(
+        tree.truncated,
+        "windows at the depth limit have children, so the tree says it was cut"
+    );
     let slots: Vec<_> = std::iter::once(tree.root.key)
         .chain(tree.root.children.iter().map(|c| c.key))
         .collect();

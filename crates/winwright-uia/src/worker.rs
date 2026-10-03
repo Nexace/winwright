@@ -487,7 +487,6 @@ impl Worker {
             walk.truncated = true;
             return Ok(node);
         }
-        let child_is_leaf_level = depth + 2 >= walk.request.max_depth;
         for i in 0..len.min(walk.request.max_children) {
             if walk.should_stop()? {
                 break;
@@ -503,7 +502,9 @@ impl Worker {
             if !child_props.runtime_id.is_empty() && walk.seen.contains(&child_props.runtime_id) {
                 continue;
             }
-            let child = if child_is_leaf_level || skip_children(child_props.role) {
+            // Children at the depth limit are cached too: only their child count tells the
+            // walk whether the limit cut anything off (reported as `truncated`).
+            let child = if skip_children(child_props.role) {
                 child
             } else {
                 // SAFETY: one cross-process call caching the child's own children.
