@@ -634,6 +634,17 @@ fn context_menu(hwnd: HWND) {
 }
 
 unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    // A panic must not unwind into user32 (that aborts the process).
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        handle(hwnd, msg, wparam, lparam)
+    }))
+    .unwrap_or_else(|_| {
+        tracing::error!("details panel procedure panicked");
+        LRESULT(0)
+    })
+}
+
+fn handle(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     let line = with_panel(|p| p.fonts.px(40)).unwrap_or(40);
     match msg {
         WM_PAINT => {

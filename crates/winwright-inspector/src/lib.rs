@@ -18,7 +18,9 @@ use std::ffi::c_void;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use windows::Win32::Foundation::{HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{
+    GlobalFree, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
+};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateSolidBrush,
     DRAW_TEXT_FORMAT, DT_END_ELLIPSIS, DT_LEFT, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DeleteDC,
@@ -45,7 +47,7 @@ use windows::Win32::UI::Controls::{
 use windows::Win32::UI::HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetFocus, GetKeyState, ReleaseCapture, SetCapture, SetFocus, TME_LEAVE, TRACKMOUSEEVENT,
-    TrackMouseEvent, VK_CONTROL, VK_ESCAPE, VK_F5,
+    TrackMouseEvent, VK_CONTROL, VK_ESCAPE, VK_F5, VK_MENU,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CB_ADDSTRING, CB_GETCURSEL, CB_RESETCONTENT, CB_SETCURSEL, CB_SETITEMHEIGHT, CBS_DROPDOWNLIST,
@@ -375,18 +377,12 @@ fn message_loop(main: HWND) {
     unsafe {
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
             if msg.message == WM_KEYDOWN {
-                let ctrl = GetKeyState(VK_CONTROL.0 as i32) < 0;
-                let key = msg.wParam.0 as u16;
-                let command = match (ctrl, key) {
-                    (true, k) if k == u16::from(b'F') => Some(ID_FIND),
-                    (false, k) if k == VK_F5.0 => Some(ID_REFRESH),
-                    (true, k) if k == u16::from(b'C') => {
-                        let tree = with_ui(|ui| ui.c.tree);
-                        (tree == Some(GetFocus())).then_some(ID_COPY)
-                    }
-                    (false, k) if k == VK_ESCAPE.0 => Some(ID_CANCEL_PICK),
-                    _ => None,
-                };
+                // AltGr is Ctrl+Alt: it types characters, it is not a shortcut.
+                let ctrl =
+                    GetKeyState(VK_CONTROL.0 as i32) < 0 && GetKeyState(VK_MENU.0 as i32) >= 0;
+                let tree_focused = with_ui(|ui| ui.c.tree) == Some(GetFocus());
+                let picking = with_app(|app| app.countdown > 0) == Some(true);
+                let command = shortcut(ctrl, msg.wParam.0 as u16, tree_focused, picking);
                 if let Some(id) = command {
                     let _ = PostMessageW(Some(main), WM_COMMAND, WPARAM(id as usize), LPARAM(0));
                     continue;
@@ -398,6 +394,28 @@ fn message_loop(main: HWND) {
             }
         }
     }
+}
+
+/// The Inspector's own command for a key press, if any. Esc is taken only while picking,
+/// so it still closes the window list and reaches the other controls.
+fn shortcut(ctrl: bool, key: u16, tree_focused: bool, picking: bool) -> Option<i32> {
+    match (ctrl, key) {
+        (true, k) if k == u16::from(b'F') => Some(ID_FIND),
+        (false, k) if k == VK_F5.0 => Some(ID_REFRESH),
+        (true, k) if k == u16::from(b'C') && tree_focused => Some(ID_COPY),
+        (false, k) if k == VK_ESCAPE.0 && picking => Some(ID_CANCEL_PICK),
+        _ => None,
+    }
+}
+
+/// Width shared by the two panes: the client width minus the outer padding and the gap.
+fn panes_width(client_w: i32, pad: i32, gap: i32, min: i32) -> i32 {
+    (client_w - pad * 2 - gap).max(min)
+}
+
+/// The split that puts the splitter's center under `x` (the inverse of `layout`).
+fn split_at(x: i32, panes: i32, pad: i32, gap: i32) -> f32 {
+    ((x - pad - gap / 2) as f32 / panes.max(1) as f32).clamp(0.25, 0.72)
 }
 
 fn create_children(
@@ -642,7 +660,7 @@ fn layout() {
     let gap = px(GAP);
     let top = toolbar;
     let bottom = (h - status_h).max(top + px(40));
-    let avail = (w - pad * 2 - gap).max(px(200));
+    let avail = panes_width(w, pad, gap, px(200));
     let left_w = (avail as f32 * split) as i32;
     let left = rect(pad, top, left_w, bottom - top);
     let right = rect(pad + left_w + gap, top, avail - left_w, bottom - top);
@@ -1052,14 +1070,15 @@ impl Ui {
     fn draw_combo(&self, d: &DRAWITEMSTRUCT) {
         let p = &self.palette;
         let f = &*self.fonts;
-        let Some(row) = self.combo_rows.get(d.itemID as usize) else {
-            return;
-        };
         let r = d.rcItem;
         let in_field = d.itemState.0 & ODS_COMBOBOXEDIT.0 != 0;
         let highlighted = d.itemState.0 & ODS_SELECTED.0 != 0 && !in_field;
         let bg = if highlighted { p.selection } else { p.surface };
         theme::fill(d.hDC, r, bg);
+        // itemID is -1 for an empty list or no selection: the field is just background.
+        let Some(row) = self.combo_rows.get(d.itemID as usize) else {
+            return;
+        };
         let icon = self.px(16);
         let x = r.left + self.px(8);
         let iy = r.top + (r.bottom - r.top - icon) / 2;
@@ -1289,6 +1308,7 @@ impl App {
             Err(e) => {
                 self.nodes.clear();
                 self.loaded = Some(window.hwnd);
+                self.selected_window = Some(window.title.clone());
                 self.fill_tree("");
                 set_status(Tone::Bad, &format!("Cannot read {}: {e}", window.title));
             }
@@ -1319,6 +1339,11 @@ impl App {
         }
         self.items.clear();
         self.handles.clear();
+        // Indices now name other elements: a debounced selection from the old tree must not
+        // show (and highlight) whatever takes its place.
+        self.pending_select = None;
+        // SAFETY: stops this window's debounce timer.
+        let _ = unsafe { KillTimer(Some(self.main), TIMER_SELECT) };
         let mut rows = Vec::new();
         for node in &shown {
             self.insert(node, TVI_ROOT, 0, !needle.is_empty(), &mut rows);
@@ -1531,11 +1556,21 @@ impl App {
         };
         // Reveal the picked element in its window's tree.
         self.refresh_window_list();
-        if let Some(index) = self.windows.iter().position(|w| w.hwnd == root) {
+        let listed = self.windows.iter().position(|w| w.hwnd == root);
+        // The reloaded list has no selection: show the picked window, or else keep showing
+        // the one whose tree is loaded.
+        let shown = listed.or_else(|| {
+            self.windows
+                .iter()
+                .position(|w| Some(w.hwnd) == self.loaded)
+        });
+        if let Some(index) = shown {
             // SAFETY: combo message on our own child.
             unsafe {
                 SendMessageW(self.c.combo, CB_SETCURSEL, Some(WPARAM(index)), None);
             }
+        }
+        if listed.is_some() {
             self.load_tree();
         }
         let reference = d.element.reference.clone();
@@ -1554,7 +1589,19 @@ impl App {
                 SendMessageW(self.c.tree, TVM_ENSUREVISIBLE, None, Some(LPARAM(handle.0)));
             }
         }
-        self.apply_details(Ok(d));
+        if listed.is_some() {
+            self.apply_details(Ok(d));
+        } else {
+            // Not a listed window (a popup or tool window): the locator names the window the
+            // element is in, not the one whose tree is still shown.
+            let title = window_text(HWND(root as usize as *mut c_void));
+            let shown = std::mem::replace(
+                &mut self.selected_window,
+                (!title.is_empty()).then_some(title),
+            );
+            self.apply_details(Ok(d));
+            self.selected_window = shown;
+        }
         set_status(Tone::Good, "Picked the element under the cursor.");
     }
 
@@ -1588,29 +1635,11 @@ impl App {
                     .map(|d| text::details(d, self.locator.as_deref().unwrap_or_default())),
                 "Properties",
             ),
-            ID_FIND => {
-                // SAFETY: focuses our own edit control and selects its text.
-                unsafe {
-                    let _ = SetFocus(Some(self.c.filter));
-                    SendMessageW(
-                        self.c.filter,
-                        windows::Win32::UI::Controls::EM_SETSEL,
-                        Some(WPARAM(0)),
-                        Some(LPARAM(-1)),
-                    );
-                }
-            }
             ID_FILTER if code == EN_CHANGE => {
                 // SAFETY: (re)starts a debounce timer on our own window.
                 unsafe {
                     SetTimer(Some(self.main), TIMER_FILTER, 200, None);
                 }
-            }
-            ID_FILTER if code == EN_SETFOCUS || code == EN_KILLFOCUS => {
-                let focused = code == EN_SETFOCUS;
-                with_ui(|ui| ui.filter_focused = focused);
-                // SAFETY: repaints our own window.
-                let _ = unsafe { InvalidateRect(Some(self.main), None, false) };
             }
             _ => {}
         }
@@ -1651,17 +1680,51 @@ fn set_clipboard(owner: HWND, text: &str) -> WinwrightResult<()> {
                 GlobalAlloc(GMEM_MOVEABLE, bytes).map_err(|e| platform("GlobalAlloc", &e))?;
             let target = GlobalLock(memory);
             if target.is_null() {
+                let _ = GlobalFree(Some(memory));
                 return Err(WinwrightError::invalid("cannot lock clipboard memory"));
             }
             std::ptr::copy_nonoverlapping(data.as_ptr() as *const u8, target as *mut u8, bytes);
             let _ = GlobalUnlock(memory);
-            SetClipboardData(13, Some(HANDLE(memory.0)))
-                .map_err(|e| platform("SetClipboardData", &e))?;
+            if let Err(e) = SetClipboardData(13, Some(HANDLE(memory.0))) {
+                // The clipboard did not take the memory, so it is still ours to free.
+                let _ = GlobalFree(Some(memory));
+                return Err(platform("SetClipboardData", &e));
+            }
             Ok(())
         })();
         let _ = CloseClipboard();
         result
     }
+}
+
+/// Commands that need only the UI. They run without the app: focusing the filter sends
+/// EN_SETFOCUS at once, which an app-borrowing handler would drop.
+fn ui_command(main: HWND, id: i32, code: u32) -> bool {
+    match id {
+        ID_FIND => {
+            let Some(filter) = with_ui(|ui| ui.c.filter) else {
+                return true;
+            };
+            // SAFETY: focuses our own edit control and selects its text.
+            unsafe {
+                let _ = SetFocus(Some(filter));
+                SendMessageW(
+                    filter,
+                    windows::Win32::UI::Controls::EM_SETSEL,
+                    Some(WPARAM(0)),
+                    Some(LPARAM(-1)),
+                );
+            }
+        }
+        ID_FILTER if code == EN_SETFOCUS || code == EN_KILLFOCUS => {
+            let focused = code == EN_SETFOCUS;
+            with_ui(|ui| ui.filter_focused = focused);
+            // SAFETY: repaints our own window.
+            let _ = unsafe { InvalidateRect(Some(main), None, false) };
+        }
+        _ => return false,
+    }
+    true
 }
 
 fn mouse_point(lparam: LPARAM) -> (i32, i32) {
@@ -1674,10 +1737,9 @@ fn mouse_point(lparam: LPARAM) -> (i32, i32) {
 fn on_mouse_move(hwnd: HWND, x: i32, y: i32) {
     let changed = with_ui(|ui| {
         if ui.dragging {
-            let r = ui.rects;
-            let pad = ui.px(PAD);
-            let avail = (r.right.right - pad - pad - ui.px(GAP)).max(1);
-            ui.split = ((x - pad) as f32 / avail as f32).clamp(0.25, 0.72);
+            let (pad, gap) = (ui.px(PAD), ui.px(GAP));
+            let panes = panes_width(ui.rects.status.right, pad, gap, ui.px(200));
+            ui.split = split_at(x, panes, pad, gap);
             return (true, true, false);
         }
         let hot = contains(&ui.rects.splitter, x, y);
@@ -1752,14 +1814,17 @@ fn on_notify(lparam: LPARAM) -> Option<LRESULT> {
 }
 
 fn on_dpi_changed(hwnd: HWND, dpi: u32, suggested: RECT) {
-    with_ui(|ui| {
+    let old_icons = with_ui(|ui| {
         ui.fonts = Rc::new(Fonts::new(dpi));
-        for icon in ui.own_icons.drain(..) {
-            // SAFETY: replaced below; the window stops using the old ones.
-            let _ = unsafe { DestroyIcon(icon) };
-        }
-    });
+        std::mem::take(&mut ui.own_icons)
+    })
+    .unwrap_or_default();
+    // New icons first: the window must never hold a destroyed one.
     let icons = set_window_icons(hwnd, dpi);
+    for icon in old_icons {
+        // SAFETY: our own icons, no longer set on the window.
+        let _ = unsafe { DestroyIcon(icon) };
+    }
     with_ui(|ui| ui.own_icons = icons);
     apply_fonts();
     // SAFETY: moves our own window to the rect Windows suggests for the new DPI.
@@ -1803,7 +1868,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             WM_COMMAND => {
                 let id = (wparam.0 & 0xFFFF) as i32;
                 let code = ((wparam.0 >> 16) & 0xFFFF) as u32;
-                with_app(|app| app.command(id, code));
+                if !ui_command(hwnd, id, code) {
+                    with_app(|app| app.command(id, code));
+                }
                 Some(LRESULT(0))
             }
             WM_NOTIFY => on_notify(lparam),
@@ -1905,7 +1972,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 Some(LRESULT(0))
             }
             WM_CAPTURECHANGED => {
-                with_ui(|ui| ui.dragging = false);
+                // Capture lost mid-drag (Alt+Tab, a popup): stop and repaint the grip.
+                if with_ui(|ui| std::mem::replace(&mut ui.dragging, false)) == Some(true) {
+                    // SAFETY: repaints our own window.
+                    let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+                }
                 Some(LRESULT(0))
             }
             WM_DPICHANGED => {
@@ -1945,6 +2016,56 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         Err(_) => {
             tracing::error!("inspector window procedure panicked");
             LRESULT(0)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn esc_is_the_inspectors_only_while_picking() {
+        let esc = VK_ESCAPE.0;
+        assert_eq!(shortcut(false, esc, false, true), Some(ID_CANCEL_PICK));
+        assert_eq!(
+            shortcut(false, esc, false, false),
+            None,
+            "Esc must still close the window list"
+        );
+        assert_eq!(shortcut(true, u16::from(b'F'), false, false), Some(ID_FIND));
+        assert_eq!(shortcut(false, VK_F5.0, false, false), Some(ID_REFRESH));
+        assert_eq!(shortcut(true, u16::from(b'C'), true, false), Some(ID_COPY));
+        assert_eq!(
+            shortcut(true, u16::from(b'C'), false, false),
+            None,
+            "Ctrl+C copies text elsewhere"
+        );
+        assert_eq!(shortcut(false, u16::from(b'F'), false, false), None);
+    }
+
+    #[test]
+    fn dragging_keeps_the_splitter_under_the_cursor() {
+        for dpi in [96, 120, 144, 192] {
+            let px = |v| theme::scale(v, dpi);
+            let (pad, gap) = (px(PAD), px(GAP));
+            for client_w in [px(760), px(1240), px(2400)] {
+                let panes = panes_width(client_w, pad, gap, px(200));
+                for x in [
+                    client_w * 3 / 10,
+                    client_w / 2,
+                    client_w * 6 / 10,
+                    client_w * 7 / 10,
+                ] {
+                    // As `layout` places it.
+                    let left_w = (panes as f32 * split_at(x, panes, pad, gap)) as i32;
+                    let center = pad + left_w + gap / 2;
+                    assert!(
+                        (center - x).abs() <= 1,
+                        "dpi {dpi}, width {client_w}: cursor {x}, splitter {center}"
+                    );
+                }
+            }
         }
     }
 }
