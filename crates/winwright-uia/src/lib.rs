@@ -66,10 +66,14 @@ impl UiaBackend {
         })
     }
 
+    /// `mutating`: once the command reached the worker, a deadline cannot prove it did not run,
+    /// so waiting for its reply ends in `ACTION_OUTCOME_UNKNOWN` rather than `TIMEOUT`. A
+    /// command that never left the queue is a plain timeout.
     async fn call<T>(
         &self,
         ctx: &OperationContext,
         operation: &'static str,
+        mutating: bool,
         make: impl FnOnce(Deadline, oneshot::Sender<WinwrightResult<T>>) -> Command,
     ) -> WinwrightResult<T> {
         ctx.check(operation)?;
@@ -97,24 +101,18 @@ impl UiaBackend {
         tokio::select! {
             result = rx => result.map_err(|_| unavailable())?,
             () = ctx.cancel.cancelled() => Err(WinwrightError::Cancelled),
-            () = &mut deadline_sleep => Err(timeout()),
+            () = &mut deadline_sleep => Err(if mutating {
+                WinwrightError::ActionOutcomeUnknown {
+                    operation: operation.to_owned(),
+                    reason: format!(
+                        "no reply after {} ms; the action may have run",
+                        started.elapsed().as_millis()
+                    ),
+                }
+            } else {
+                timeout()
+            }),
         }
-    }
-}
-
-/// Once a mutating command reached the worker, a timeout cannot prove it did not run.
-fn outcome_unknown_on_timeout<T>(
-    operation: &str,
-    result: WinwrightResult<T>,
-) -> WinwrightResult<T> {
-    match result {
-        Err(WinwrightError::Timeout { elapsed_ms, .. }) if elapsed_ms > 0 => {
-            Err(WinwrightError::ActionOutcomeUnknown {
-                operation: operation.to_owned(),
-                reason: format!("no reply after {elapsed_ms} ms; the action may have run"),
-            })
-        }
-        other => other,
     }
 }
 
@@ -140,13 +138,15 @@ impl UiAutomationBackend for UiaBackend {
         request: UiTreeRequest,
         ctx: &'a OperationContext,
     ) -> BackendFuture<'a, UiTree> {
-        Box::pin(self.call(ctx, "capture_tree", move |deadline, reply| {
-            Command::CaptureTree {
-                request,
-                deadline,
-                reply,
-            }
-        }))
+        Box::pin(
+            self.call(ctx, "capture_tree", false, move |deadline, reply| {
+                Command::CaptureTree {
+                    request,
+                    deadline,
+                    reply,
+                }
+            }),
+        )
     }
 
     fn inspect<'a>(
@@ -154,13 +154,13 @@ impl UiAutomationBackend for UiaBackend {
         target: InspectTarget,
         ctx: &'a OperationContext,
     ) -> BackendFuture<'a, UiInspection> {
-        Box::pin(
-            self.call(ctx, "inspect", move |deadline, reply| Command::Inspect {
+        Box::pin(self.call(ctx, "inspect", false, move |deadline, reply| {
+            Command::Inspect {
                 target,
                 deadline,
                 reply,
-            }),
-        )
+            }
+        }))
     }
 
     fn release<'a>(&'a self, keys: Vec<ElementKey>) -> BackendFuture<'a, ()> {
@@ -180,10 +180,12 @@ impl UiAutomationBackend for UiaBackend {
         key: ElementKey,
         ctx: &'a OperationContext,
     ) -> BackendFuture<'a, UiProps> {
-        Box::pin(self.call(ctx, "refresh", move |_, reply| Command::Refresh {
-            key,
-            reply,
-        }))
+        Box::pin(
+            self.call(ctx, "refresh", false, move |_, reply| Command::Refresh {
+                key,
+                reply,
+            }),
+        )
     }
 
     fn execute_pattern<'a>(
@@ -196,19 +198,82 @@ impl UiAutomationBackend for UiaBackend {
             action,
             UiPatternAction::GetText { .. } | UiPatternAction::ClickablePoint
         );
-        Box::pin(async move {
-            let result = self
-                .call(ctx, "execute_pattern", move |_, reply| Command::Execute {
-                    key,
-                    action,
-                    reply,
-                })
-                .await;
-            if mutating {
-                outcome_unknown_on_timeout("execute_pattern", result)
-            } else {
-                result
-            }
-        })
+        Box::pin(
+            self.call(ctx, "execute_pattern", mutating, move |_, reply| {
+                Command::Execute { key, action, reply }
+            }),
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use tokio_util::sync::CancellationToken;
+    use winwright_contracts::ErrorCode;
+    use winwright_contracts::ids::SessionId;
+
+    use super::*;
+
+    /// A backend whose "worker" is the test itself: commands queue up and are never answered.
+    fn stalled(queue: usize) -> (UiaBackend, mpsc::Receiver<Command>) {
+        let (tx, rx) = mpsc::channel(queue);
+        let (_events_tx, events) = tokio::sync::watch::channel(0);
+        let backend = UiaBackend {
+            tx,
+            epoch: 1,
+            events,
+            listeners: Arc::new(AtomicUsize::new(0)),
+        };
+        (backend, rx)
+    }
+
+    fn ctx(timeout_ms: u64) -> OperationContext {
+        OperationContext::new(
+            SessionId::parse("uia-tests").unwrap(),
+            Duration::from_millis(timeout_ms),
+            CancellationToken::new(),
+        )
+    }
+
+    const KEY: ElementKey = ElementKey {
+        worker_epoch: 1,
+        slot: 1,
+    };
+
+    #[tokio::test]
+    async fn dispatched_action_without_reply_is_outcome_unknown() {
+        let (uia, mut rx) = stalled(4);
+        let err = uia
+            .execute_pattern(KEY, UiPatternAction::Invoke, &ctx(40))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), ErrorCode::ActionOutcomeUnknown, "{err}");
+        assert!(matches!(rx.try_recv(), Ok(Command::Execute { .. })));
+    }
+
+    #[tokio::test]
+    async fn action_that_never_reached_the_worker_is_a_plain_timeout() {
+        let (uia, _rx) = stalled(1);
+        // The queue is full, so the command below is never handed to the worker.
+        uia.tx.try_send(Command::SyncEvents).unwrap();
+        let err = uia
+            .execute_pattern(KEY, UiPatternAction::Invoke, &ctx(40))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), ErrorCode::Timeout, "{err}");
+    }
+
+    #[tokio::test]
+    async fn reads_without_reply_stay_timeouts() {
+        let (uia, _rx) = stalled(4);
+        let err = uia.refresh(KEY, &ctx(40)).await.unwrap_err();
+        assert_eq!(err.code(), ErrorCode::Timeout, "{err}");
+        let err = uia
+            .execute_pattern(KEY, UiPatternAction::ClickablePoint, &ctx(40))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), ErrorCode::Timeout, "{err}");
     }
 }

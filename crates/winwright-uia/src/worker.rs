@@ -81,20 +81,107 @@ impl EventState {
     }
 
     fn reconcile(&mut self, automation: &IUIAutomation, root: &IUIAutomationElement) {
+        self.reconcile_with(
+            |tx| crate::events::subscribe(automation, root, tx),
+            || crate::events::unsubscribe(automation),
+        );
+    }
+
+    /// Attaches or detaches to match the listener count. A partial subscription (some
+    /// handlers failed to register) still counts as attached, so what did register is removed
+    /// when the last listener leaves and is never registered twice meanwhile.
+    fn reconcile_with(
+        &mut self,
+        subscribe: impl FnOnce(Arc<tokio::sync::watch::Sender<u64>>) -> bool,
+        unsubscribe: impl FnOnce(),
+    ) {
         let want = self.listeners.load(Ordering::Acquire) > 0;
         if want && !self.subscribed {
-            self.subscribed = crate::events::subscribe(automation, root, Arc::clone(&self.tx));
-            tracing::debug!(subscribed = self.subscribed, "UIA events attached");
+            let complete = subscribe(Arc::clone(&self.tx));
+            self.subscribed = true;
+            tracing::debug!(complete, "UIA events attached");
         } else if !want && self.subscribed {
-            crate::events::unsubscribe(automation);
+            unsubscribe();
             self.subscribed = false;
             tracing::debug!("UIA events detached");
         }
     }
 }
 
-struct Worker {
+/// Live elements by slot. Slot numbers only grow within an epoch, so a stale key can never
+/// alias a newer element.
+struct Slots<T> {
     epoch: u64,
+    next: u64,
+    live: BTreeMap<u64, T>,
+}
+
+impl<T> Slots<T> {
+    fn new(epoch: u64) -> Self {
+        Self {
+            epoch,
+            next: 0,
+            live: BTreeMap::new(),
+        }
+    }
+
+    fn store(&mut self, value: T) -> ElementKey {
+        self.next += 1;
+        self.live.insert(self.next, value);
+        while self.live.len() > MAX_SLOTS {
+            self.live.pop_first();
+        }
+        ElementKey {
+            worker_epoch: self.epoch,
+            slot: self.next,
+        }
+    }
+
+    fn get(&self, key: ElementKey) -> WinwrightResult<&T> {
+        if key.worker_epoch != self.epoch {
+            return Err(WinwrightError::ElementStale {
+                reference: format!("slot {}", key.slot),
+                reason: "the automation worker restarted".into(),
+            });
+        }
+        self.live
+            .get(&key.slot)
+            .ok_or_else(|| WinwrightError::ElementStale {
+                reference: format!("slot {}", key.slot),
+                reason: "the element handle was released".into(),
+            })
+    }
+
+    /// Updates a slot that `get` just returned.
+    fn replace(&mut self, key: ElementKey, value: T) {
+        if key.worker_epoch == self.epoch && key.slot <= self.next {
+            self.live.insert(key.slot, value);
+        }
+    }
+
+    fn release(&mut self, keys: &[ElementKey]) {
+        for key in keys.iter().filter(|k| k.worker_epoch == self.epoch) {
+            self.live.remove(&key.slot);
+        }
+    }
+
+    /// Every slot stored after this call is numbered above the returned mark.
+    fn mark(&self) -> u64 {
+        self.next
+    }
+
+    /// Releases every slot stored since `mark`, e.g. by a walk that failed half-way and whose
+    /// keys therefore never reach a caller.
+    fn release_since(&mut self, mark: u64) {
+        drop(self.live.split_off(&(mark + 1)));
+    }
+
+    fn len(&self) -> usize {
+        self.live.len()
+    }
+}
+
+struct Worker {
     automation: IUIAutomation,
     /// Element + its control-view children, for walking.
     cache_children: IUIAutomationCacheRequest,
@@ -102,8 +189,7 @@ struct Worker {
     cache_element: IUIAutomationCacheRequest,
     walker: IUIAutomationTreeWalker,
     root: IUIAutomationElement,
-    next_slot: u64,
-    slots: BTreeMap<u64, IUIAutomationElement>,
+    slots: Slots<IUIAutomationElement>,
 }
 
 pub fn run(
@@ -186,6 +272,18 @@ fn is_gone(err: &windows::core::Error) -> bool {
     )
 }
 
+/// Error for re-caching a stored element: `ELEMENT_STALE` when it went away.
+fn rebuild_error(key: ElementKey, err: &windows::core::Error) -> WinwrightError {
+    if is_gone(err) {
+        WinwrightError::ElementStale {
+            reference: format!("slot {}", key.slot),
+            reason: "the element no longer exists".into(),
+        }
+    } else {
+        platform("BuildUpdatedCache", err)
+    }
+}
+
 struct Walk<'a> {
     request: &'a UiTreeRequest,
     deadline: &'a Deadline,
@@ -238,49 +336,26 @@ impl Worker {
                 .GetRootElement()
                 .map_err(|e| platform("GetRootElement", &e))?;
             Ok(Self {
-                epoch,
                 automation,
                 cache_children,
                 cache_element,
                 walker,
                 root,
-                next_slot: 0,
-                slots: BTreeMap::new(),
+                slots: Slots::new(epoch),
             })
         }
     }
 
     fn store(&mut self, el: IUIAutomationElement) -> ElementKey {
-        self.next_slot += 1;
-        self.slots.insert(self.next_slot, el);
-        while self.slots.len() > MAX_SLOTS {
-            self.slots.pop_first();
-        }
-        ElementKey {
-            worker_epoch: self.epoch,
-            slot: self.next_slot,
-        }
+        self.slots.store(el)
     }
 
     fn slot(&self, key: ElementKey) -> WinwrightResult<&IUIAutomationElement> {
-        if key.worker_epoch != self.epoch {
-            return Err(WinwrightError::ElementStale {
-                reference: format!("slot {}", key.slot),
-                reason: "the automation worker restarted".into(),
-            });
-        }
-        self.slots
-            .get(&key.slot)
-            .ok_or_else(|| WinwrightError::ElementStale {
-                reference: format!("slot {}", key.slot),
-                reason: "the element handle was released".into(),
-            })
+        self.slots.get(key)
     }
 
     fn release(&mut self, keys: &[ElementKey]) {
-        for key in keys.iter().filter(|k| k.worker_epoch == self.epoch) {
-            self.slots.remove(&key.slot);
-        }
+        self.slots.release(keys);
     }
 
     /// Fresh properties for a stored element; the slot keeps the updated element.
@@ -291,7 +366,7 @@ impl Worker {
             .map_err(|e| patterns::action_error("refresh", &format!("slot {}", key.slot), &e))?;
         let mut props = read_props(&fresh);
         read_value(&fresh, &mut props);
-        self.slots.insert(key.slot, fresh.clone());
+        self.slots.replace(key, fresh.clone());
         Ok((fresh, props))
     }
 
@@ -315,7 +390,7 @@ impl Worker {
                 .map(|updated| {
                     let mut p = read_props(&updated);
                     read_value(&updated, &mut p);
-                    self.slots.insert(key.slot, updated);
+                    self.slots.replace(key, updated);
                     p
                 }),
         };
@@ -348,16 +423,7 @@ impl Worker {
                 TreeRoot::Element(key) => self
                     .slot(key)?
                     .BuildUpdatedCache(&self.cache_children)
-                    .map_err(|e| {
-                    if is_gone(&e) {
-                        WinwrightError::ElementStale {
-                            reference: format!("slot {}", key.slot),
-                            reason: "the element no longer exists".into(),
-                        }
-                    } else {
-                        platform("BuildUpdatedCache", &e)
-                    }
-                })?,
+                    .map_err(|e| rebuild_error(key, &e))?,
                 TreeRoot::Desktop => self
                     .automation
                     .GetRootElementBuildCache(&self.cache_children)
@@ -371,7 +437,11 @@ impl Worker {
             truncated: false,
             seen: HashSet::new(),
         };
-        let root = self.walk(root, 0, &mut walk)?;
+        let mark = self.slots.mark();
+        let root = self.walk(root, 0, &mut walk).inspect_err(|_| {
+            // A cancelled or failed walk drops its partial tree: free the slots it stored.
+            self.slots.release_since(mark);
+        })?;
         Ok(UiTree {
             root,
             node_count: walk.count,
@@ -478,7 +548,7 @@ impl Worker {
                 InspectTarget::Element(key) => self
                     .slot(key)?
                     .BuildUpdatedCache(&self.cache_element)
-                    .map_err(|e| platform("BuildUpdatedCache", &e))?,
+                    .map_err(|e| rebuild_error(key, &e))?,
             }
         };
         let mut props = read_props(&el);
@@ -512,5 +582,80 @@ impl Worker {
             props,
             ancestors,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use winwright_contracts::ErrorCode;
+
+    use super::*;
+
+    #[test]
+    fn slots_are_epoch_qualified_and_never_reused() {
+        let mut slots = Slots::new(7);
+        let a = slots.store("a");
+        let b = slots.store("b");
+        assert_eq!(*slots.get(a).unwrap(), "a");
+        slots.release(&[a]);
+        assert_eq!(slots.get(a).unwrap_err().code(), ErrorCode::ElementStale);
+        let c = slots.store("c");
+        assert!(c.slot > b.slot, "released numbers are not handed out again");
+        let foreign = ElementKey {
+            worker_epoch: 6,
+            slot: b.slot,
+        };
+        assert_eq!(
+            slots.get(foreign).unwrap_err().code(),
+            ErrorCode::ElementStale
+        );
+        slots.release(&[foreign]);
+        assert_eq!(
+            *slots.get(b).unwrap(),
+            "b",
+            "a stale epoch releases nothing"
+        );
+        slots.replace(b, "b2");
+        assert_eq!(*slots.get(b).unwrap(), "b2");
+    }
+
+    #[test]
+    fn a_failed_walk_releases_exactly_the_slots_it_stored() {
+        let mut slots = Slots::new(1);
+        let kept = slots.store("snapshot from an earlier walk");
+        let mark = slots.mark();
+        let partial: Vec<ElementKey> = (0..5).map(|_| slots.store("partial")).collect();
+        slots.release_since(mark);
+        assert_eq!(slots.len(), 1);
+        assert!(slots.get(kept).is_ok());
+        assert!(partial.iter().all(|k| slots.get(*k).is_err()));
+        assert!(slots.store("next").slot > partial[4].slot);
+    }
+
+    #[test]
+    fn partial_event_subscription_is_detached_and_never_duplicated() {
+        let listeners = Arc::new(AtomicUsize::new(1));
+        let (tx, _rx) = tokio::sync::watch::channel(0);
+        let mut events = EventState::new(Arc::new(tx), Arc::clone(&listeners));
+        let (subscribed, unsubscribed) = (Cell::new(0), Cell::new(0));
+        let reconcile = |events: &mut EventState| {
+            events.reconcile_with(
+                |_| {
+                    subscribed.set(subscribed.get() + 1);
+                    false // e.g. the focus handler failed but window handlers registered
+                },
+                || unsubscribed.set(unsubscribed.get() + 1),
+            );
+        };
+        reconcile(&mut events);
+        reconcile(&mut events);
+        assert_eq!(subscribed.get(), 1, "handlers are registered once per wait");
+        listeners.store(0, Ordering::Release);
+        reconcile(&mut events);
+        assert_eq!(unsubscribed.get(), 1, "what did register is removed");
+        reconcile(&mut events);
+        assert_eq!((subscribed.get(), unsubscribed.get()), (1, 1));
     }
 }
