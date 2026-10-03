@@ -2359,6 +2359,21 @@ impl winwright_contracts::system::ProcessService for FakeProcesses {
         *self.exec_budget.lock().unwrap() = Some(ctx.remaining());
         Box::pin(async { Err(WinwrightError::invalid("fake exec")) })
     }
+    fn resolve_launch(
+        &self,
+        request: &winwright_contracts::system::LaunchRequest,
+    ) -> WinwrightResult<String> {
+        Ok(match request.app.as_str() {
+            "helper" => r"C:\Python\python.exe".into(),
+            other => format!(r"C:\Windows\{other}.exe"),
+        })
+    }
+    fn resolve_program(
+        &self,
+        request: &winwright_contracts::system::ExecRequest,
+    ) -> WinwrightResult<String> {
+        Ok(format!(r"C:\Tools\{}.exe", request.program))
+    }
 }
 
 #[tokio::test]
@@ -2411,8 +2426,20 @@ async fn other_winwright_processes_are_never_automated() {
         },
         SnapshotTarget::Window(dialog()),
     );
-    let err = engine.execute(&session, click(yes)).await.unwrap_err();
+    let err = engine
+        .execute(&session, click(yes.clone()))
+        .await
+        .unwrap_err();
     assert_eq!(err.code().as_str(), "ACTION_BLOCKED", "{err}");
+    let err = engine
+        .highlight(&session, highlight_request(yes))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.code().as_str(),
+        "ACTION_BLOCKED",
+        "no labels on its buttons: {err}"
+    );
     let err = engine
         .window_action(&session, WindowAction::Close { window: dialog() })
         .await
@@ -2420,4 +2447,125 @@ async fn other_winwright_processes_are_never_automated() {
     assert_eq!(err.code().as_str(), "ACTION_BLOCKED", "{err}");
     assert!(fake.s().executed.is_empty(), "the dialog was not answered");
     assert_eq!(fake.s().windows.len(), 2, "the dialog was not closed");
+}
+
+fn highlight_request(target: ElementTarget) -> winwright_contracts::overlay::HighlightRequest {
+    winwright_contracts::overlay::HighlightRequest {
+        target,
+        style: Default::default(),
+        label: Some("Click here".into()),
+        step: None,
+        color: None,
+        duration_ms: None,
+    }
+}
+
+/// Holds every prompt open until released, then declines.
+#[derive(Default)]
+struct GateConfirmer {
+    open: std::sync::atomic::AtomicUsize,
+    release: tokio::sync::Notify,
+}
+
+impl winwright_contracts::security::Confirmer for GateConfirmer {
+    fn confirm<'a>(
+        &'a self,
+        _: winwright_contracts::security::ConfirmationPrompt,
+    ) -> BackendFuture<'a, bool> {
+        self.open.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Box::pin(async move {
+            self.release.notified().await;
+            Ok(false)
+        })
+    }
+}
+
+#[tokio::test]
+async fn nothing_is_drawn_while_a_confirmation_is_open() {
+    let fake = Fake::new();
+    let gate = Arc::new(GateConfirmer::default());
+    let engine = Arc::new(engine(&fake).with_confirmer(gate.clone()));
+    let session = engine.session(&sid(), "test").unwrap();
+    let pending = tokio::spawn({
+        let (engine, session) = (Arc::clone(&engine), Arc::clone(&session));
+        async move {
+            engine
+                .execute(&session, click(by("Button", "Submit")))
+                .await
+        }
+    });
+    while gate.open.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let err = engine
+        .highlight(&session, highlight_request(by("Button", "Target")))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code().as_str(), "ACTION_BLOCKED", "{err}");
+    gate.release.notify_one();
+    let declined = pending.await.unwrap().unwrap_err();
+    assert_eq!(declined.code().as_str(), "ACTION_BLOCKED");
+    // Once answered, highlighting passes the guard (and only lacks an overlay backend here).
+    let err = engine
+        .highlight(&session, highlight_request(by("Button", "Target")))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code().as_str(), "BACKEND_UNAVAILABLE", "{err}");
+}
+
+#[tokio::test]
+async fn prompts_show_the_resolved_program_and_every_argument() {
+    use winwright_contracts::system::LaunchRequest;
+    let fake = Fake::new();
+    let mut config = Config::default();
+    config.security.allow_shell = true;
+    let answers = confirmer(false);
+    let engine = Engine::new(config, fake.clone(), fake.clone())
+        .with_processes(Arc::new(FakeProcesses::default()))
+        .with_confirmer(answers.clone());
+    let session = engine.session(&sid(), "test").unwrap();
+    let request = serde_json::from_str(r#"{"program":"tool","args":["-c","a b"]}"#).unwrap();
+    let _ = engine.exec(&session, request).await;
+    let prompt = answers.prompts.lock().unwrap().pop().unwrap();
+    assert_eq!(
+        prompt.summary,
+        r#"Run C:\Tools\tool.exe with arguments "-c" "a b""#
+    );
+    // A name that resolves to an interpreter is gated as one.
+    let launch = |app: &str| LaunchRequest {
+        app: app.into(),
+        args: vec!["x".repeat(700)],
+        working_dir: None,
+    };
+    let _ = engine.launch_app(&session, launch("helper")).await;
+    let prompt = answers.prompts.lock().unwrap().pop().unwrap();
+    assert!(
+        prompt
+            .summary
+            .starts_with(r#"Launch C:\Python\python.exe with arguments "xxx"#),
+        "{}",
+        prompt.summary
+    );
+    assert!(
+        prompt.summary.ends_with("\u{2026} (102 more characters)"),
+        "{}",
+        prompt.summary
+    );
+    let ordinary = Engine::new(Config::default(), fake.clone(), fake.clone())
+        .with_processes(Arc::new(FakeProcesses::default()));
+    let session = ordinary.session(&sid(), "test").unwrap();
+    let err = ordinary
+        .launch_app(&session, launch("helper"))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code().as_str(), "ACTION_BLOCKED", "shell is off: {err}");
+    let err = ordinary
+        .launch_app(&session, launch("notepad"))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.code().as_str(),
+        "INVALID_REQUEST",
+        "allowed through: {err}"
+    );
 }

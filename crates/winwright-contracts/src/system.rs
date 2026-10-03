@@ -184,6 +184,17 @@ pub trait ProcessService: Send + Sync {
         request: ExecRequest,
         ctx: &'a OperationContext,
     ) -> BackendFuture<'a, ExecResult>;
+
+    /// What `launch` would start, without starting it: the resolved program path, or the URI,
+    /// folder or file the shell opens. Fails as `launch` would.
+    fn resolve_launch(&self, request: &LaunchRequest) -> WinwrightResult<String> {
+        Ok(request.app.clone())
+    }
+
+    /// The program `exec` would run, without running it. Fails as `exec` would.
+    fn resolve_program(&self, request: &ExecRequest) -> WinwrightResult<String> {
+        Ok(request.program.clone())
+    }
 }
 
 pub trait FileService: Send + Sync {

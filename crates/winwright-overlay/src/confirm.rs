@@ -110,23 +110,41 @@ struct Content {
     seconds: u64,
 }
 
+/// Text from apps and the model (window titles, arguments) shown as it really is: control
+/// characters (a line break could fake a new line of the prompt) and invisible format
+/// characters (a right-to-left override reverses what follows) become visible escapes.
+fn printable(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            let invisible = matches!(c,
+                '\u{00AD}' | '\u{061C}' | '\u{180E}' | '\u{200B}'..='\u{200F}'
+                | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{206F}' | '\u{FEFF}');
+            if c.is_control() || invisible {
+                format!("\\u{{{:04X}}}", c as u32)
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
+}
+
 impl Content {
     fn of(prompt: &ConfirmationPrompt) -> Self {
         let mut context = Vec::new();
         if let Some(t) = &prompt.target {
             if let Some(window) = &t.window {
-                context.push(format!("Window: {window}"));
+                context.push(format!("Window: {}", printable(window)));
             }
             if let Some(process) = &t.process {
-                context.push(format!("App: {process}"));
+                context.push(format!("App: {}", printable(process)));
             }
         }
         Self {
             title: "Allow this action?".into(),
             subtitle: "An AI assistant using Winwright is asking for your approval.".into(),
-            summary: prompt.summary.clone(),
+            summary: printable(&prompt.summary),
             context: context.join("  \u{00B7}  "),
-            reason: format!("Why you are asked: {}", prompt.reason),
+            reason: format!("Why you are asked: {}", printable(&prompt.reason)),
             hint: "Deny is the default. Press Ctrl+Alt+Esc at any time to stop Winwright.".into(),
             seconds: prompt.timeout_ms.max(1_000) / 1000,
         }
@@ -1106,6 +1124,25 @@ mod tests {
         assert!(text.contains("action may send"));
         assert!(text.contains("Denied automatically in 60 s"));
         assert!(text.contains("Deny is the default"));
+    }
+
+    #[test]
+    fn hidden_characters_cannot_rewrite_the_prompt() {
+        let mut p = prompt();
+        p.summary = "Run cmd.exe with arguments \"/c x\"\n\nThis is a safe read-only check".into();
+        p.target.as_mut().unwrap().window = Some("Inbox \u{202E}exe.cod".into());
+        let c = Content::of(&p);
+        assert!(!c.summary.contains('\n'), "{}", c.summary);
+        assert!(
+            c.summary.contains("\\u{000A}\\u{000A}This is"),
+            "{}",
+            c.summary
+        );
+        assert!(
+            c.context.contains("Inbox \\u{202E}exe.cod"),
+            "{}",
+            c.context
+        );
     }
 
     #[test]

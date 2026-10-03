@@ -75,6 +75,15 @@ pub(crate) struct Plan {
 }
 
 impl Plan {
+    /// What will be started, in full, for the person approving it: the program path, or the
+    /// URI, folder or file the shell opens.
+    pub(crate) fn target_text(&self) -> String {
+        match &self.target {
+            Target::Process(path) => path.display().to_string(),
+            Target::Shell(target) => target.to_string_lossy().into_owned(),
+        }
+    }
+
     pub(crate) fn kind(&self) -> &'static str {
         match self.target {
             Target::Shell(_) => "shell",
@@ -287,7 +296,7 @@ fn check_extension(name: &str) -> WinwrightResult<()> {
 }
 
 /// On a share (`\\server\share`, `\\?\UNC\…`, a device path) or a mapped network drive.
-fn on_network(path: &Path) -> bool {
+pub(crate) fn on_network(path: &Path) -> bool {
     use std::path::{Component, Prefix};
     let Some(Component::Prefix(prefix)) = path.components().next() else {
         return false;
@@ -302,7 +311,7 @@ fn on_network(path: &Path) -> bool {
     }
 }
 
-fn remote_executable(path: &Path) -> WinwrightError {
+pub(crate) fn remote_executable(path: &Path) -> WinwrightError {
     WinwrightError::ActionBlocked {
         reason: format!(
             "{} is on a network share or drive; Winwright only starts programs from local disks",
@@ -377,7 +386,7 @@ pub(crate) fn requests_elevation(app: &str, args: &[String]) -> bool {
 
 /// System32, the Windows directory, then absolute `PATH` entries. The current directory is
 /// deliberately not searched (binary planting).
-fn search_executable(name: &str) -> Option<PathBuf> {
+pub(crate) fn search_executable(name: &str) -> Option<PathBuf> {
     let file = if Path::new(name).extension().is_some() {
         name.to_owned()
     } else {

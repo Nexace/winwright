@@ -2,7 +2,7 @@
 //! concurrently and capped per stream, time is bounded, and the whole process tree lives in a
 //! kill-on-close job so nothing outlives the call.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -23,7 +23,7 @@ use winwright_contracts::system::{ExecRequest, ExecResult};
 use winwright_contracts::{WinwrightError, WinwrightResult};
 
 use crate::handle::OwnedHandle;
-use crate::launch::extension_of;
+use crate::launch::{extension_of, on_network, remote_executable, search_executable};
 use crate::{io_platform, reject_nul};
 
 pub(crate) const MAX_TIMEOUT_MS: u64 = 600_000;
@@ -41,16 +41,44 @@ enum Ending {
     Cancelled,
 }
 
+/// The program `exec` runs: a path as given (made absolute against `workingDir`), else the
+/// first `name.exe` in System32, the Windows folder, or `PATH`. Resolved here, not by the
+/// process API, so what a confirmation shows is exactly what runs (that API would also try
+/// the folder of winwright.exe first).
+pub(crate) fn resolve_program(request: &ExecRequest) -> WinwrightResult<PathBuf> {
+    validate(request)?;
+    let program = request.program.trim();
+    let path = if program.contains(['\\', '/', ':']) {
+        let path = Path::new(program);
+        let path = match &request.working_dir {
+            Some(dir) if path.is_relative() => dir.join(path),
+            _ => path.to_path_buf(),
+        };
+        std::path::absolute(&path).unwrap_or(path)
+    } else {
+        search_executable(program).ok_or_else(|| {
+            WinwrightError::invalid(format!(
+                "program {program} was not found in System32, the Windows folder, or PATH; \
+                 pass its full path"
+            ))
+        })?
+    };
+    if on_network(&path) {
+        return Err(remote_executable(&path));
+    }
+    Ok(path)
+}
+
 pub(crate) async fn exec(
     request: ExecRequest,
     ctx: &OperationContext,
 ) -> WinwrightResult<ExecResult> {
-    validate(&request)?;
+    let image = resolve_program(&request)?;
     ctx.check("exec")?;
     let program = program_label(&request.program);
     tracing::info!(program = %program, args = request.args.len(), "exec");
 
-    let mut command = Command::new(&request.program);
+    let mut command = Command::new(&image);
     command
         .args(&request.args)
         .stdin(Stdio::null())

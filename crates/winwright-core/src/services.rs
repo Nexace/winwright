@@ -64,6 +64,41 @@ fn describe_file_op(op: &FileOperation) -> String {
 }
 const DEFAULT_OVERLAY_COLOR: u32 = 0x00E0_4A2A;
 
+/// Prompts show at most this many characters of arguments.
+const MAX_PROMPT_ARGS: usize = 600;
+
+/// ` with arguments "a" "b c"`, every argument, for a confirmation prompt (a very long list is
+/// cut, saying how much is hidden).
+fn with_args(args: &[String]) -> String {
+    if args.is_empty() {
+        return String::new();
+    }
+    let all = args
+        .iter()
+        .map(|a| format!("\"{a}\""))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let total = all.chars().count();
+    if total <= MAX_PROMPT_ARGS {
+        return format!(" with arguments {all}");
+    }
+    let shown: String = all.chars().take(MAX_PROMPT_ARGS).collect();
+    format!(
+        " with arguments {shown}\u{2026} ({} more characters)",
+        total - MAX_PROMPT_ARGS
+    )
+}
+
+/// The stricter of the capabilities two spellings of a program need.
+fn stricter(a: Capability, b: Capability) -> Capability {
+    let rank = |c: Capability| match c {
+        Capability::PowerShell => 2,
+        Capability::Shell => 1,
+        _ => 0,
+    };
+    if rank(b) > rank(a) { b } else { a }
+}
+
 fn unavailable(backend: &str) -> WinwrightError {
     WinwrightError::BackendUnavailable {
         backend: backend.into(),
@@ -148,12 +183,17 @@ impl Engine {
         if request.duration_ms == Some(0) {
             return Err(WinwrightError::invalid("durationMs must be positive"));
         }
+        self.ensure_no_confirmation_open()?;
+        let ctx = session.operation(self.timeout())?;
+        let resolved = self.resolve_target(session, &request.target, &ctx).await?;
+        // A label drawn on Winwright's own dialog could steer the user's answer.
+        self.guard_self(resolved.props.process_id, &resolved.label())?;
+        // Again, right before drawing: a confirmation may have opened while resolving.
+        self.ensure_no_confirmation_open()?;
         let overlay = self
             .overlay
             .as_deref()
             .ok_or_else(|| unavailable("overlay"))?;
-        let ctx = session.operation(self.timeout())?;
-        let resolved = self.resolve_target(session, &request.target, &ctx).await?;
         let rect = resolved
             .props
             .bounds
@@ -192,18 +232,26 @@ impl Engine {
         request: LaunchRequest,
     ) -> WinwrightResult<LaunchResult> {
         let started = Instant::now();
+        // The prompt names what would really start, and policy judges that too: a bare name
+        // can resolve (App Paths) to another program.
+        let resolved = match self.processes.as_deref() {
+            Some(p) => p.resolve_launch(&request),
+            None => Ok(request.app.clone()),
+        };
+        let shown = resolved.as_deref().unwrap_or(&request.app);
         // Launching an interpreter with arguments is shell execution and is gated like it.
         let action = proposed(
             "app_launch",
-            program_capability(&request.app),
+            stricter(program_capability(&request.app), program_capability(shown)),
             ActionRisk::Normal,
             Some(request.app.clone()),
         );
         let target = action.target.clone();
-        let summary = format!("Launch {}", request.app);
+        let summary = format!("Launch {shown}{}", with_args(&request.args));
         let mut lease = None;
         let mut confirmed = false;
         let result = async {
+            resolved?;
             confirmed = self.permit(session, action, summary, &mut lease).await?;
             let processes = self
                 .processes
@@ -303,8 +351,16 @@ impl Engine {
         request: ExecRequest,
     ) -> WinwrightResult<ExecResult> {
         let started = Instant::now();
+        let resolved = match self.processes.as_deref() {
+            Some(p) => p.resolve_program(&request),
+            None => Ok(request.program.clone()),
+        };
+        let shown = resolved.as_deref().unwrap_or(&request.program);
         // PowerShell stays behind its own switch even when the shell is enabled.
-        let capability = match program_capability(&request.program) {
+        let capability = match stricter(
+            program_capability(&request.program),
+            program_capability(shown),
+        ) {
             Capability::PowerShell => Capability::PowerShell,
             _ => Capability::Shell,
         };
@@ -315,14 +371,11 @@ impl Engine {
             Some(request.program.clone()),
         );
         let target = action.target.clone();
-        let summary = format!(
-            "Run {} with {} argument(s)",
-            request.program,
-            request.args.len()
-        );
+        let summary = format!("Run {shown}{}", with_args(&request.args));
         let mut lease = None;
         let mut confirmed = false;
         let result = async {
+            resolved?;
             confirmed = self.permit(session, action, summary, &mut lease).await?;
             let processes = self
                 .processes

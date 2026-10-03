@@ -63,6 +63,14 @@ impl ProcessService for SystemProcesses {
     ) -> BackendFuture<'a, ExecResult> {
         Box::pin(exec::exec(request, ctx))
     }
+
+    fn resolve_launch(&self, request: &LaunchRequest) -> WinwrightResult<String> {
+        launch::plan(request).map(|plan| plan.target_text())
+    }
+
+    fn resolve_program(&self, request: &ExecRequest) -> WinwrightResult<String> {
+        exec::resolve_program(request).map(|path| path.display().to_string())
+    }
 }
 
 fn worker_failed(operation: &str, err: &tokio::task::JoinError) -> WinwrightError {

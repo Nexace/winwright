@@ -2,6 +2,7 @@
 //! waits live in sibling modules as further `impl Engine` blocks.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use winwright_contracts::action::ActionMethod;
@@ -87,6 +88,24 @@ pub struct Engine {
     pub(crate) audit: Option<Arc<AuditLog>>,
     pub(crate) sessions: SessionRegistry,
     pub(crate) lease: ActionLease,
+    /// Confirmation dialogs open right now.
+    pub(crate) confirming: AtomicUsize,
+}
+
+/// Counts one open confirmation dialog for as long as it lives.
+struct Confirming<'a>(&'a AtomicUsize);
+
+impl<'a> Confirming<'a> {
+    fn open(count: &'a AtomicUsize) -> Self {
+        count.fetch_add(1, Ordering::SeqCst);
+        Self(count)
+    }
+}
+
+impl Drop for Confirming<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 impl Engine {
@@ -109,6 +128,7 @@ impl Engine {
             audit: None,
             sessions: SessionRegistry::default(),
             lease: ActionLease::default(),
+            confirming: AtomicUsize::new(0),
         }
     }
 
@@ -234,12 +254,18 @@ impl Engine {
                         * 1000,
                 };
                 let cancel = session.operation(Duration::from_secs(600))?.cancel;
+                // Nothing may draw over the dialog or label it while the user decides.
+                let _open = Confirming::open(&self.confirming);
+                if let Some(overlay) = self.overlay.as_deref() {
+                    let _ = overlay.clear(None);
+                }
                 let approved = tokio::select! {
                     answer = confirmer.confirm(prompt) => answer?,
                     () = cancel.cancelled() => return Err(WinwrightError::Cancelled),
                 };
                 if approved {
-                    tracing::info!(%summary, "user approved");
+                    // The summary can hold arguments (tokens, paths): never logged.
+                    tracing::info!(tool = %action.tool, "user approved");
                     Ok(true)
                 } else {
                     Err(WinwrightError::ActionBlocked {
@@ -248,6 +274,19 @@ impl Engine {
                 }
             }
         }
+    }
+
+    /// Overlays are refused while a confirmation dialog is open: one could cover it, or label
+    /// its buttons to steer the answer.
+    pub(crate) fn ensure_no_confirmation_open(&self) -> WinwrightResult<()> {
+        if self.confirming.load(Ordering::SeqCst) > 0 {
+            return Err(WinwrightError::ActionBlocked {
+                reason: "a confirmation is waiting for the user; overlays are off until it is \
+                         answered"
+                    .into(),
+            });
+        }
+        Ok(())
     }
 
     /// Refuses to touch Winwright's own windows (its confirmation dialogs above all), including
