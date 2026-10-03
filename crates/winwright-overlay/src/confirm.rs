@@ -2,8 +2,9 @@
 //! person at the keyboard can answer.
 //!
 //! - "Deny" is the default and focused button: Enter, Esc, Alt+F4 and closing all deny.
-//! - "Allow once" stays disabled for a moment after the dialog appears, so a click or key
-//!   meant for another window cannot approve an action. From the keyboard it also counts only
+//! - "Allow once" stays disabled until a moment after the dialog becomes the active window
+//!   (again after each time it loses activation), so a click or key meant for another window,
+//!   or the click that brings the dialog to the front, cannot approve an action. From the keyboard it also counts only
 //!   after a pause, so typing that runs into the dialog (Tab, then Space) cannot approve.
 //! - Only a real keyboard, mouse, pen or touch screen can press "Allow once". A BM_CLICK or
 //!   WM_COMMAND from another program, UI Automation's Invoke, and SendInput (Winwright's own
@@ -269,6 +270,8 @@ struct Dialog {
     content: Content,
     deadline: Instant,
     armed: bool,
+    /// When the dialog last really became the active window (`None` while it is not).
+    active_since: Option<Instant>,
     answer: Option<bool>,
     link: Arc<Link>,
     focus: HWND,
@@ -341,6 +344,30 @@ impl Origin {
             Ok(()) if source.originId == IMO_HARDWARE => Self::Hardware,
             _ => Self::Injected,
         }
+    }
+}
+
+/// What an arm-timer message may do. Any program can send WM_ACTIVATE or post WM_TIMER, so
+/// arming checks the facts: the dialog really is in front and has been since `ARM_DELAY`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Arming {
+    Arm,
+    /// Too early (a forged timer): check again in this many milliseconds.
+    Wait(u32),
+    /// Not the active window: the next activation starts the delay again.
+    Not,
+}
+
+fn arming(active_since: Option<Instant>, foreground: bool, now: Instant) -> Arming {
+    match active_since {
+        Some(since) if foreground => {
+            let waited = now.saturating_duration_since(since);
+            match ARM_DELAY.checked_sub(waited) {
+                None | Some(Duration::ZERO) => Arming::Arm,
+                Some(left) => Arming::Wait(left.as_millis() as u32 + 1),
+            }
+        }
+        _ => Arming::Not,
     }
 }
 
@@ -773,6 +800,7 @@ fn run_dialog(
             content,
             deadline: Instant::now() + timeout,
             armed: false,
+            active_since: None,
             answer: None,
             link: Arc::clone(link),
             focus: deny,
@@ -831,8 +859,10 @@ fn run_dialog(
         if let Some(deny) = with_dialog(|d| d.deny) {
             let _ = SetFocus(Some(deny));
         }
+        // "Allow once" arms ARM_DELAY after the dialog becomes active (WM_ACTIVATE), not after
+        // it appears: a dialog Windows would not bring to the front must not sit armed under
+        // the cursor, where the click that activates it would also approve.
         SetTimer(Some(hwnd), TIMER_TICK, 250, None);
-        SetTimer(Some(hwnd), TIMER_ARM, ARM_DELAY_MS, None);
         KEYS.with(|k| {
             k.set(Keys {
                 last_press: Some(Instant::now()),
@@ -1009,16 +1039,27 @@ unsafe extern "system" fn dialog_proc(
                         }
                     }
                     TIMER_ARM => {
-                        // SAFETY: stops this window's one-shot timer; enables our own button.
-                        unsafe {
+                        // SAFETY: stops this window's one-shot timer; reads the foreground.
+                        let foreground = unsafe {
                             let _ = KillTimer(Some(hwnd), TIMER_ARM);
-                        }
-                        if let Some(allow) = with_dialog(|d| {
-                            d.armed = true;
-                            d.allow
-                        }) {
-                            // SAFETY: our own child window.
-                            let _ = unsafe { EnableWindow(allow, true) };
+                            GetForegroundWindow() == hwnd
+                        };
+                        let since = with_dialog(|d| d.active_since).flatten();
+                        match arming(since, foreground, Instant::now()) {
+                            Arming::Arm => {
+                                if let Some(allow) = with_dialog(|d| {
+                                    d.armed = true;
+                                    d.allow
+                                }) {
+                                    // SAFETY: our own child window.
+                                    let _ = unsafe { EnableWindow(allow, true) };
+                                }
+                            }
+                            Arming::Wait(ms) => {
+                                // SAFETY: restarts this window's own timer.
+                                unsafe { SetTimer(Some(hwnd), TIMER_ARM, ms, None) };
+                            }
+                            Arming::Not => {}
                         }
                     }
                     _ => {}
@@ -1026,18 +1067,45 @@ unsafe extern "system" fn dialog_proc(
                 Some(LRESULT(0))
             }
             WM_ACTIVATE => {
-                // Keep keyboard focus on the dialog's buttons across activation changes.
+                // Keep keyboard focus on the dialog's buttons across activation changes, and
+                // disarm "Allow once" whenever the dialog is not the active window: it arms
+                // again ARM_DELAY after each activation, so the click that brings the dialog
+                // back cannot also approve.
                 if (wparam.0 & 0xFFFF) as u32 == WA_INACTIVE {
                     // SAFETY: reads this thread's focus window.
                     let focused = unsafe { GetFocus() };
-                    with_dialog(|d| {
+                    let allow = with_dialog(|d| {
                         if focused == d.deny || focused == d.allow {
                             d.focus = focused;
                         }
+                        d.armed = false;
+                        d.active_since = None;
+                        d.allow
                     });
-                } else if let Some(focus) = with_dialog(|d| d.focus) {
-                    // SAFETY: focuses our own child window.
-                    let _ = unsafe { SetFocus(Some(focus)) };
+                    // SAFETY: this window's own timer and child window.
+                    unsafe {
+                        let _ = KillTimer(Some(hwnd), TIMER_ARM);
+                        if let Some(allow) = allow {
+                            let _ = EnableWindow(allow, false);
+                        }
+                    }
+                } else {
+                    // Every activation (a forged one too) starts the delay over; the timer
+                    // arms only if the dialog really is in front by then.
+                    let parts = with_dialog(|d| {
+                        d.armed = false;
+                        d.active_since = Some(Instant::now());
+                        (d.allow, d.deny)
+                    });
+                    // SAFETY: our own child windows; (re)starts this window's own timer.
+                    unsafe {
+                        if let Some((allow, deny)) = parts {
+                            let _ = EnableWindow(allow, false);
+                            // A disabled "Allow once" cannot take focus.
+                            let _ = SetFocus(Some(deny));
+                        }
+                        SetTimer(Some(hwnd), TIMER_ARM, ARM_DELAY_MS, None);
+                    }
                 }
                 Some(LRESULT(0))
             }
@@ -1256,6 +1324,25 @@ mod tests {
             !allow_counts(true, BN_CLICKED, false, idle, hw),
             "not from the button"
         );
+    }
+
+    #[test]
+    fn forged_activation_and_timer_messages_cannot_arm_early() {
+        let t0 = Instant::now();
+        let ms = |n| t0 + Duration::from_millis(n);
+        assert_eq!(arming(Some(t0), true, ms(800)), Arming::Arm);
+        assert_eq!(arming(Some(t0), true, ms(5_000)), Arming::Arm);
+        assert_eq!(
+            arming(Some(t0), true, ms(100)),
+            Arming::Wait(701),
+            "a posted WM_TIMER cannot skip the delay"
+        );
+        assert_eq!(
+            arming(Some(t0), false, ms(900)),
+            Arming::Not,
+            "a sent WM_ACTIVATE does not bring the dialog to the front"
+        );
+        assert_eq!(arming(None, true, ms(900)), Arming::Not, "never activated");
     }
 
     #[test]
