@@ -1,6 +1,7 @@
 //! Trusted local confirmation dialog (spec §66): a native Winwright window that only the
 //! person at the keyboard can answer.
 //!
+//! - The dialog brings itself to the front when it opens, so one click on "Allow once" works.
 //! - "Deny" is the default and focused button: Enter, Esc, Alt+F4 and closing all deny.
 //! - "Allow once" stays disabled until a moment after the dialog becomes the active window
 //!   (again after each time it loses activation), so a click or key meant for another window,
@@ -44,17 +45,19 @@ use windows::Win32::UI::WindowsAndMessaging::{
     FLASHWINFO, FlashWindowEx, GetCursorPos, GetForegroundWindow, GetMessageW, HICON, HMENU,
     ICON_BIG, ICON_SMALL, IDCANCEL, IsDialogMessageW, KillTimer, MSG, PostMessageW,
     PostQuitMessage, SM_CXICON, SM_CXSMICON, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOZORDER,
-    SendMessageW, SetForegroundWindow, SetTimer, SetWindowPos, SetWindowTextW, ShowWindow,
-    TranslateMessage, WA_INACTIVE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_CLOSE,
-    WM_COMMAND, WM_DESTROY, WM_DPICHANGED, WM_DRAWITEM, WM_ERASEBKGND, WM_KEYDOWN, WM_KEYFIRST,
-    WM_KEYLAST, WM_MOUSEFIRST, WM_MOUSELAST, WM_NOTIFY, WM_PAINT, WM_SETFONT, WM_SETICON,
-    WM_SYSKEYDOWN, WM_TIMER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_EX_APPWINDOW, WS_EX_TOPMOST,
-    WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    SendMessageW, SetTimer, SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage,
+    WA_INACTIVE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_CLOSE, WM_COMMAND, WM_DESTROY,
+    WM_DPICHANGED, WM_DRAWITEM, WM_ERASEBKGND, WM_KEYDOWN, WM_KEYFIRST, WM_KEYLAST, WM_MOUSEFIRST,
+    WM_MOUSELAST, WM_NOTIFY, WM_PAINT, WM_SETFONT, WM_SETICON, WM_SYSKEYDOWN, WM_TIMER, WS_CAPTION,
+    WS_CHILD, WS_CLIPCHILDREN, WS_EX_APPWINDOW, WS_EX_TOPMOST, WS_OVERLAPPED, WS_SYSMENU,
+    WS_TABSTOP, WS_VISIBLE,
 };
 use windows::core::{HSTRING, PCWSTR, w};
 use winwright_contracts::WinwrightResult;
-use winwright_contracts::backend::BackendFuture;
+use winwright_contracts::backend::{BackendFuture, WindowBackend};
 use winwright_contracts::security::{ConfirmationPrompt, Confirmer};
+
+use winwright_win32::Win32Windows;
 
 use crate::platform;
 use crate::theme::{self, ButtonKind, ButtonState, Fonts, Palette, glyph};
@@ -94,7 +97,7 @@ pub fn dialog_text(prompt: &ConfirmationPrompt) -> String {
         "\n{}\n{}\n{}",
         c.reason,
         c.hint,
-        c.countdown(c.seconds)
+        c.countdown(c.seconds, true)
     ));
     text
 }
@@ -151,8 +154,13 @@ impl Content {
         }
     }
 
-    fn countdown(&self, left: u64) -> String {
-        format!("Denied automatically in {left} s")
+    /// While the dialog is not the active window "Allow once" is off, so say how to turn it on.
+    fn countdown(&self, left: u64, active: bool) -> String {
+        if active {
+            format!("Denied automatically in {left} s")
+        } else {
+            format!("Click here first · {left} s left")
+        }
     }
 }
 
@@ -434,7 +442,7 @@ impl Dialog {
             Look::Context => c.context.clone(),
             Look::Reason => c.reason.clone(),
             Look::Hint => c.hint.clone(),
-            Look::Countdown => c.countdown(self.seconds_left()),
+            Look::Countdown => c.countdown(self.seconds_left(), self.active_since.is_some()),
         }
     }
 
@@ -846,7 +854,11 @@ fn run_dialog(
             let _ = EnableWindow(d.allow, false);
         });
         let _ = ShowWindow(hwnd, SW_SHOWNORMAL);
-        let _ = SetForegroundWindow(hwnd);
+        // Winwright runs in the background, where Windows refuses a plain SetForegroundWindow:
+        // the dialog would sit inactive with "Allow once" off, and the click that activates it
+        // would do nothing. Window focusing borrows the foreground thread's input instead;
+        // "Allow once" still arms only ARM_DELAY after the dialog is active.
+        let _ = WindowBackend::focus_window(&Win32Windows, hwnd.0 as usize as u64);
         if GetForegroundWindow() != hwnd {
             let _ = FlashWindowEx(&FLASHWINFO {
                 cbSize: size_of::<FLASHWINFO>() as u32,

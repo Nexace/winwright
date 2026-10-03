@@ -314,6 +314,8 @@ impl Engine {
                 if let Some(overlay) = self.overlay.as_deref() {
                     let _ = overlay.clear(None);
                 }
+                let timeout = Duration::from_millis(prompt.timeout_ms);
+                let asked = Instant::now();
                 let approved = tokio::select! {
                     answer = confirmer.confirm(prompt) => answer?,
                     () = cancel.cancelled() => return Err(WinwrightError::Cancelled),
@@ -322,6 +324,10 @@ impl Engine {
                     // The summary can hold arguments (tokens, paths): never logged.
                     tracing::info!(tool = %action.tool, "user approved");
                     Ok(true)
+                } else if asked.elapsed() + Duration::from_millis(500) >= timeout {
+                    Err(WinwrightError::ActionBlocked {
+                        reason: format!("nobody answered the confirmation in time: {summary}"),
+                    })
                 } else {
                     Err(WinwrightError::ActionBlocked {
                         reason: format!("the user declined: {summary}"),

@@ -8,6 +8,7 @@ publish.workspace = true
 
 [dependencies]
 winwright-contracts.workspace = true
+winwright-win32.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 windows = { workspace = true, features = [
@@ -26,7 +27,6 @@ windows = { workspace = true, features = [
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }
-winwright-win32.workspace = true
 
 [lints]
 workspace = true
