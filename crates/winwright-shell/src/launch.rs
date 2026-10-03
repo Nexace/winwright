@@ -42,9 +42,12 @@ const SCRIPT_EXTENSIONS: &[&str] = &[
     "appx",
     "appxbundle",
     "bat",
+    "chm",
     "cmd",
     "cpl",
+    "diagcab",
     "hta",
+    "jar",
     "js",
     "jse",
     "msi",
@@ -53,12 +56,19 @@ const SCRIPT_EXTENSIONS: &[&str] = &[
     "msp",
     "pif",
     "ps1",
+    "psc1",
     "psm1",
+    "py",
+    "pyw",
+    "pyz",
+    "pyzw",
     "reg",
     "scr",
     "settingcontent-ms",
+    "vb",
     "vbe",
     "vbs",
+    "ws",
     "wsf",
     "wsh",
 ];
@@ -67,8 +77,12 @@ const SCRIPT_EXTENSIONS: &[&str] = &[
 /// `file:` is refused so paths always go through the file classification above.
 const BLOCKED_SCHEMES: &[&str] = &[
     "file",
+    "hcp",
+    "its",
     "javascript",
+    "mk",
     "ms-appinstaller",
+    "ms-its",
     "ms-msdt",
     "ms-officecmd",
     "search",
@@ -677,6 +691,30 @@ mod tests {
             ErrorCode::ActionBlocked
         );
         assert!(!requests_elevation("notepad", &["runascii.txt".to_owned()]));
+    }
+
+    #[test]
+    fn script_hosts_reached_by_file_association_are_blocked() {
+        for name in [
+            "tool.py",
+            "tool.PYW",
+            "app.jar",
+            "help.chm",
+            "fix.diagcab",
+            "x.vb",
+            "x.ws",
+        ] {
+            let err = classify(name, None).unwrap_err();
+            assert_eq!(err.code(), ErrorCode::ActionBlocked, "{name}: {err}");
+        }
+        for uri in [
+            "mk:@MSITStore:C:\\x.chm::/a.htm",
+            "ms-its:x.chm::/a.htm",
+            "hcp://x",
+        ] {
+            let err = classify(uri, None).unwrap_err();
+            assert_eq!(err.code(), ErrorCode::ActionBlocked, "{uri}: {err}");
+        }
     }
 
     #[test]
