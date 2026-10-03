@@ -1,7 +1,7 @@
 # Winwright State
 
-**Updated:** 2026-10-03
-**Current phase:** CHECKPOINT. Tree green; security audit H1-L5, the leftover bugs, the taint rule, and Phase 7 (live) are done (327fa5f..f4f47bb). Next: JARVIS end to end (needs the user).
+**Updated:** 2026-10-04
+**Current phase:** CHECKPOINT. Tree green; security audit, taint rule, Phase 7 (live), and our own assistant page (old JARVIS face deleted) are done. Next: the user tries the page in Brave (voice + taint dialog).
 **Toolchain:** Rust 1.98.1 MSVC (pinned), windows-rs 0.62.2, tokio 1.53, schemars 1.2, regex 1.13, rmcp 3.5
 
 ## Done
@@ -51,8 +51,8 @@
   (shows the confirm dialog twice, ~5 s; do not click it). `... manual_` asks a person to click Allow.
 
 ## Next (in order; plan in .gsd/INTEGRATION.md "Decisions and changes from the plan review")
-1. JARVIS end to end (includes a live check of the taint rule: read a web page, then a desktop
-   change must prompt), then ElevenLabs (user sets ELEVENLABS_API_KEY as a user env var).
+1. Assistant end to end in Brave with the user: voice round trip, then the taint check (read a
+   web page, then a desktop change must prompt). ElevenLabs key is already set.
 2. Reports + Notion memory (cloud, user's choice), last.
 Dropped: Phase 1b, Phase 9, Phase 12, local speech models (Whisper/Kokoro), Jev.
 
@@ -86,9 +86,10 @@ Dropped: Phase 1b, Phase 9, Phase 12, local speech models (Whisper/Kokoro), Jev.
 - Protecting the exe folder (M3) means file operations are refused in the folder winwright.exe
   runs from (e.g. Downloads if run from there): install it in its own folder.
 
-## JARVIS integration (2026-10-01)
-- `apps/jarvis` = vendored github.com/adewaskar/jarvis (MIT). Bridge patched to add a `winwright` MCP server when `JARVIS_WINWRIGHT_EXE` is set and to pass its tools through `decideTool` (Winwright enforces its own gates). `winwright assistant` launches it; it refuses until `npm install` is run in `apps/jarvis` (not auto-run: large download).
-- Not yet run live (needs `npm install`, Chrome, and the user's Claude Code login). Next: run it once with the user.
+## Assistant (apps/jarvis; updated 2026-10-04)
+- Started as vendored github.com/adewaskar/jarvis (MIT); only its Node bridge is kept. Our own chat page (`winwright-ui/`, plain HTML/CSS/JS) is served by the bridge at http://localhost:8787/; the JARVIS React/Three.js face is deleted. `winwright assistant` runs `node bridge/server.mjs` (one process); it refuses until `npm install` was run in `apps/jarvis`.
+- Live so far: typed turns work (desktop_windows + a card; a WebSocket turn from a script); push-to-talk reached `/stt` in Brave. Not yet confirmed by the user in Brave: voice round trip and the taint dialog ("weather in Pune", then "Open Notepad").
+- ElevenLabs key is set as the user env var ELEVENLABS_API_KEY (sk_, 51 chars; the first try had angle brackets and the wrong value).
 
 ## CHECKPOINT 2026-10-03 (resume here)
 State of the tree: `cargo fmt --check`, `cargo clippy --workspace --all-targets -D warnings`, `cargo test --workspace` all pass (2026-10-03, after the audit fixes); live `live_fixture` 7/7, `mcp_stdio` 2/2, `live_confirm` 2/2 and `live_desktop` 3/3 after the fixes. `scripts/check.ps1` runs the same (`-Live` adds live tests).
@@ -110,9 +111,9 @@ Security audit items, all DONE 2026-10-03 (origin = github.com/Nexace/winwright,
 - L2 755ad51 audit reads/screenshots/file reads; L4 d74cf6e 128 KB text cap in MCP.
 - Bugs: c38315e real elapsed in capture/input timeouts; 6414e1f overlay disabled -> ACTION_BLOCKED; 4d40fd0 config value ranges + loopback-only httpHost; e40dadf depth-limit truncation reported.
 
-Nothing is running (JARVIS and Winwright stopped). Final cleanup still owed: `cargo clean` (~11 GB), apps/jarvis/node_modules if unused.
+Final cleanup still owed: `cargo clean` (~11 GB).
 
 ## Footprint (2026-10-01)
-- JARVIS: dropped unused Picovoice wake-word deps; the 208 MB `onnxruntime-node` is no longer installed (override stub in apps/jarvis/stubs, `onnxruntime-common` pinned for the web build); node_modules 1.1 GB -> 814 MB (253 MB of it is the Claude Agent SDK binary, required). 3D scene: low-power GPU, pixel ratio capped at 1.5. Bridge idles ~99 MB.
+- Assistant (2026-10-04): the JARVIS face is deleted; node_modules 814 MB -> ~310 MB (the Claude Agent SDK binary is most of it, required). One Node process (the bridge serves the page); no Vite, no 3D.
 - Winwright: idles ~23 MB / 11 threads (debug). Release profile now opt-level "s" + thin LTO + 1 codegen unit + stripped (not panic=abort: window procs use catch_unwind). Release build not made yet (storage); do it only when needed.
-- Cleanup at the end: `cargo clean` (~11 GB), `apps/jarvis/node_modules` if unused.
+- Cleanup at the end: `cargo clean` (~11 GB).

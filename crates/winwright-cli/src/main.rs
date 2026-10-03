@@ -811,7 +811,7 @@ fn jarvis_dir() -> Option<std::path::PathBuf> {
     let exe = std::env::current_exe().ok()?;
     exe.ancestors()
         .map(|a| a.join("apps").join("jarvis"))
-        .find(|d| d.join("scripts").join("start.mjs").is_file())
+        .find(|d| d.join("bridge").join("server.mjs").is_file())
 }
 
 /// A per-run secret for the bridge's local push-to-talk endpoint (OS-seeded hashing, 128 bits).
@@ -895,14 +895,12 @@ fn run_assistant() -> Result<(), WinwrightError> {
         dir.display()
     );
     println!("Open http://localhost:{port}/ in your browser, then type, or press {chord} to talk.");
-    // Only the bridge: it serves Winwright's own page (WINWRIGHT_FACE), so there is no
-    // dev server and none of the JARVIS 3D interface.
+    // One process: the bridge also serves the page, so there is no dev server.
     let status = std::process::Command::new("node")
         .arg("bridge/server.mjs")
         .current_dir(&dir)
         .env("JARVIS_WINWRIGHT_EXE", exe)
         .env("JARVIS_PTT_TOKEN", &token)
-        .env("WINWRIGHT_FACE", "1")
         .status()
         .map_err(|e| {
             unavailable(format!(

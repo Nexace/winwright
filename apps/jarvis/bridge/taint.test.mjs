@@ -24,8 +24,6 @@ test('web, Notion, sub-agents and unknown servers bring outside content', () => 
   for (const name of [
     'mcp__winwright__desktop_snapshot',
     'mcp__jarvis__display',
-    'mcp__jarvis_ui__ui_theme',
-    'mcp__jarvis_eyes__look',
     'Read',
     'Grep',
     'TodoWrite',

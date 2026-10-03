@@ -1,16 +1,13 @@
 /**
- * Winwright's own face for this bridge (see .gsd/INTEGRATION.md in the
- * Winwright repo, "Own assistant UI"). With WINWRIGHT_FACE=1 the bridge serves
- * a plain chat page itself, in place of the JARVIS HUD: no dev server, no 3D.
- * This module holds that page's system prompt and its static file serving.
- * Without the flag nothing here is used.
+ * Winwright's page (see .gsd/INTEGRATION.md in the Winwright repo, "Own
+ * assistant UI"): the bridge serves a plain chat page itself, with no dev
+ * server and no build step. This module holds the assistant's system prompt
+ * and the page's static file serving.
  */
 
 import { readFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-
-export const FACE = process.env.WINWRIGHT_FACE === '1'
 
 const APP = join(dirname(fileURLToPath(import.meta.url)), '..')
 

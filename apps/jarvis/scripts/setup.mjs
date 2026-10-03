@@ -99,18 +99,16 @@ const elSource = findElevenLabsKey();
 if (elSource) {
   line(tick, `Premium voice available — ElevenLabs key found via ${elSource}.`);
 } else {
-  line(info, 'No ElevenLabs key found — JARVIS will use browser speech (that is completely fine).');
-  line(info, '  Optional: add ELEVENLABS_API_KEY for a better voice and Scribe transcription. The free tier is enough for a demo.');
+  line(info, 'No ElevenLabs key found: type to the assistant (voice needs the key).');
+  line(info, '  Optional: set ELEVENLABS_API_KEY for voice in and out. The free tier is enough.');
 }
 
 // --- How to run ----------------------------------------------------------
 console.log('');
-console.log('To run JARVIS, open two terminals:');
-console.log('  1)  npm run bridge      # the brain (Claude Code, headless)');
-console.log('  2)  npm run dev         # the face (open http://localhost:5173 in Chrome)');
+console.log('To run the assistant, from the Winwright checkout:');
+console.log('  winwright assistant     # then open http://localhost:8787/');
 console.log('');
-console.log('Then click INITIALISE and say "Hey Jarvis".');
-console.log('To let JARVIS take real actions (phone, browser, sending), run `npm run bridge:writes` instead of `npm run bridge`.');
+console.log('Type, or press Ctrl+Space and talk.');
 console.log('');
 
 process.exit(0);

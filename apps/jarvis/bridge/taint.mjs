@@ -9,14 +9,14 @@
  * %LOCALAPPDATA%\winwright, a folder Winwright's own file tools refuse to touch.
  *
  * Trusted (no taint): Winwright itself (its desktop reads are the user's own
- * screen), this HUD and its controls, the camera, and local file reads.
+ * screen), the cards on Winwright's page, and local file reads.
  */
 
 import { randomUUID } from 'node:crypto'
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
-const TRUSTED_SERVERS = new Set(['winwright', 'jarvis', 'jarvis_ui', 'jarvis_eyes'])
+const TRUSTED_SERVERS = new Set(['winwright', 'jarvis'])
 const UNTRUSTED_BUILTINS = new Set([
   'WebFetch', 'WebSearch', 'Task', 'Agent',
   'ReadMcpResource', 'ReadMcpResourceTool',

@@ -89,3 +89,5 @@ The user does not like the JARVIS face (React + Three.js HUD). Replace it with o
 - Light and dark themes follow the system; usable at phone width; keyboard reachable; reduced motion respected.
 
 **Plan.** (1) Bridge: `bridge/winwright-face.mjs` (prompt, static serving, CSP) and the flagged wiring in `server.mjs`. (2) Page: `winwright-ui/index.html`, `style.css`, `app.js`. (3) Launcher change and checks: node tests for the face module, a typed end-to-end turn in a browser, then voice with the user.
+
+**Update 2026-10-04: old face deleted.** At the user's request the JARVIS face is gone (src/, Vite, Three.js, MediaPipe, audio, scripts/start.mjs, stubs/, bridge/ui.mjs, bridge/vision.mjs), so the page is no longer behind a flag: the bridge always serves it, always uses `WINWRIGHT_PROMPT`, and accepts only its own origin (the Vite dev-port allowance is removed). `winwright assistant` finds `apps/jarvis` by `bridge/server.mjs`. Dependencies: the Agent SDK, dompurify, ws, zod (+ oxlint); node_modules went from ~814 MB to ~310 MB (the SDK binary is most of it). Details in `apps/jarvis/WINWRIGHT-EDITS.md`.

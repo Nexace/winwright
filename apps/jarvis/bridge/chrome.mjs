@@ -496,9 +496,8 @@ function forward(name, { needsTab = true } = {}) {
 // ---------------------------------------------------------------------------
 // Schemas
 //
-// Loose in the same way ui.mjs is loose, and for the same reason: a turn that
-// fails because a coordinate arrived as a string is a turn the user watched
-// break. Anything the extension will tolerate, we pass along.
+// Loose on purpose: a turn that fails because a coordinate arrived as a string
+// is a turn the user watched break. Anything the extension will tolerate, we pass along.
 // ---------------------------------------------------------------------------
 
 /**
