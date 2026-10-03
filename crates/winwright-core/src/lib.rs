@@ -18,3 +18,11 @@ mod wait;
 mod engine_tests;
 
 pub use engine::{Engine, InspectRequest};
+
+/// Per-test scratch folder under the workspace `target` directory.
+#[cfg(test)]
+pub(crate) fn scratch_dir(name: &str) -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/test-scratch")
+        .join(format!("{name}-{}", std::process::id()))
+}

@@ -1,7 +1,7 @@
 //! Local audit log (spec §27): one JSON line per state-changing call, never typed text or
 //! field values. Size-capped with a single rotated backup so it cannot grow unbounded.
 
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
@@ -42,7 +42,10 @@ pub fn now_ms() -> u64 {
 pub struct AuditLog {
     path: PathBuf,
     max_bytes: u64,
-    file: Mutex<Option<File>>,
+    /// Serializes this process's writes. The file is opened per event, never held open,
+    /// because other Winwright processes (a second MCP server, CLI calls) append to it and
+    /// rotate it too; a held handle would keep writing into the rotated backup.
+    lock: Mutex<()>,
 }
 
 impl AuditLog {
@@ -57,7 +60,7 @@ impl AuditLog {
         Self {
             path,
             max_bytes: max_bytes.max(4 * 1024),
-            file: Mutex::new(None),
+            lock: Mutex::new(()),
         }
     }
 
@@ -75,31 +78,28 @@ impl AuditLog {
             return;
         };
         line.push('\n');
-        let mut slot = self.file.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Err(err) = self.write(&mut slot, line.as_bytes()) {
+        let _guard = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Err(err) = self.write(line.as_bytes()) {
             tracing::warn!(%err, path = %self.path.display(), "audit write failed");
-            *slot = None;
         }
     }
 
-    fn write(&self, slot: &mut Option<File>, bytes: &[u8]) -> std::io::Result<()> {
+    fn write(&self, bytes: &[u8]) -> std::io::Result<()> {
         let size = std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0);
         if size + bytes.len() as u64 > self.max_bytes && size > 0 {
-            *slot = None;
-            std::fs::rename(&self.path, Self::backup(&self.path))?;
-        }
-        if slot.is_none() {
-            if let Some(dir) = self.path.parent() {
-                std::fs::create_dir_all(dir)?;
+            match std::fs::rename(&self.path, Self::backup(&self.path)) {
+                // Another process rotated it first.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                other => other?,
             }
-            *slot = Some(
-                OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&self.path)?,
-            );
         }
-        let file = slot.as_mut().expect("opened above");
+        if let Some(dir) = self.path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)?;
         file.write_all(bytes)?;
         file.flush()
     }
@@ -150,7 +150,7 @@ mod tests {
 
     #[test]
     fn writes_rotates_tails_and_clears() {
-        let dir = std::env::temp_dir().join(format!("winwright-audit-{}", std::process::id()));
+        let dir = crate::scratch_dir("audit");
         let path = dir.join("audit.jsonl");
         let log = AuditLog::new(path.clone(), 4 * 1024);
         for i in 0..200 {
@@ -172,6 +172,35 @@ mod tests {
         assert!(!tail[0].contains("text"), "no free text is ever recorded");
         AuditLog::clear(&path).unwrap();
         assert!(!path.exists() && !AuditLog::backup(&path).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn writers_sharing_one_log_rotate_together() {
+        let dir = crate::scratch_dir("audit-shared");
+        let path = dir.join("audit.jsonl");
+        let cap = 4 * 1024;
+        // An MCP server and a CLI call (or two MCP servers) append to the same file.
+        let writers = [
+            AuditLog::new(path.clone(), cap),
+            AuditLog::new(path.clone(), cap),
+        ];
+        for i in 0..400u64 {
+            writers[(i % 2) as usize].record(&AuditEvent {
+                duration_ms: i,
+                ..event("desktop_click")
+            });
+        }
+        for p in [path.clone(), AuditLog::backup(&path)] {
+            let size = std::fs::metadata(&p).unwrap().len();
+            assert!(size <= cap, "{} stays under the cap: {size}", p.display());
+        }
+        let tail = AuditLog::tail(&path, 2).unwrap();
+        assert!(
+            tail[0].contains("\"durationMs\":398") && tail[1].contains("\"durationMs\":399"),
+            "both writers' latest events are kept: {tail:?}"
+        );
+        drop(writers);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

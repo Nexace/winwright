@@ -46,7 +46,7 @@ mod tests {
 
     #[test]
     fn explicit_file_is_parsed() {
-        let dir = std::env::temp_dir().join(format!("winwright-cfg-{}", std::process::id()));
+        let dir = crate::scratch_dir("cfg");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.json");
         std::fs::write(&path, r#"{"automation":{"referenceTtlSeconds":5}}"#).unwrap();

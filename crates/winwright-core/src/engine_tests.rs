@@ -36,6 +36,7 @@ struct El {
     offscreen: bool,
     focused: bool,
     password: bool,
+    pid: u32,
     children: Vec<i32>,
 }
 
@@ -60,6 +61,7 @@ fn el(role: ControlRole, name: &str, id: &str, patterns: &[UiPattern]) -> El {
         offscreen: false,
         focused: false,
         password: false,
+        pid: 1,
         children: Vec::new(),
     }
 }
@@ -69,6 +71,8 @@ const DIALOG: u64 = 20;
 const TARGET: i32 = 12;
 const STATUS: i32 = 16;
 const COMBO: i32 = 7;
+/// Another Winwright process (a CLI call next to the MCP server).
+const OTHER_WINWRIGHT: u32 = 77;
 
 struct State {
     els: BTreeMap<i32, El>,
@@ -81,6 +85,12 @@ struct State {
     executed: Vec<String>,
     captured_roots: Vec<TreeRoot>,
     privileged: bool,
+    /// Pattern calls cannot re-read the element (`props_after` is `None`).
+    blind: bool,
+    /// Toggle calls are accepted but the state does not change (yet).
+    inert_toggle: bool,
+    /// `props_after` shows the state from before the call (the provider updates a moment later).
+    stale_readback: bool,
 }
 
 struct Fake {
@@ -159,6 +169,9 @@ impl Fake {
                 executed: Vec::new(),
                 captured_roots: Vec::new(),
                 privileged: false,
+                blind: false,
+                inert_toggle: false,
+                stale_readback: false,
             }),
             hang: false,
         })
@@ -179,7 +192,7 @@ impl State {
             automation_id: e.automation_id.clone(),
             class_name: "Fake".into(),
             framework_id: "Win32".into(),
-            process_id: 1,
+            process_id: e.pid,
             runtime_id: vec![42, rid],
             bounds: Some(PhysicalRect::new(rid * 20, 0, rid * 20 + 16, 16)),
             enabled: e.enabled,
@@ -284,8 +297,12 @@ impl WindowBackend for Fake {
             y: 5,
         })
     }
-    fn process_name(&self, _pid: u32) -> String {
-        "fixture.exe".into()
+    fn process_name(&self, pid: u32) -> String {
+        if pid == OTHER_WINWRIGHT {
+            "winwright.exe".into()
+        } else {
+            "fixture.exe".into()
+        }
     }
     fn focus_window(&self, hwnd: u64) -> WinwrightResult<()> {
         for w in &mut self.s().windows {
@@ -425,7 +442,8 @@ impl UiAutomationBackend for Fake {
         Box::pin(async move {
             let mut s = self.s();
             let rid = s.rid(key)?;
-            let label = s.props(rid).label();
+            let before = s.props(rid);
+            let label = before.label();
             s.executed.push(format!("{action:?} {label} #{rid}"));
             let unsupported = |p: &str| WinwrightError::UnsupportedPattern {
                 element: label.clone(),
@@ -434,7 +452,7 @@ impl UiAutomationBackend for Fake {
             let mut out = UiActionOutcome::default();
             match &action {
                 UiPatternAction::Invoke => match s.els[&rid].name.as_str() {
-                    "Open Dialog" => {
+                    "Open Dialog" | "More colors..." => {
                         for w in &mut s.windows {
                             w.foreground = false;
                         }
@@ -455,6 +473,7 @@ impl UiAutomationBackend for Fake {
                     "Submit" => s.els.get_mut(&STATUS).unwrap().name = "Submitted".into(),
                     _ => {}
                 },
+                UiPatternAction::Toggle if s.inert_toggle => {}
                 UiPatternAction::Toggle => {
                     let e = s.els.get_mut(&rid).unwrap();
                     e.toggle = Some(match e.toggle {
@@ -467,7 +486,12 @@ impl UiAutomationBackend for Fake {
                     if !e.patterns.contains(&UiPattern::Value) || e.read_only {
                         return Err(unsupported("Value.SetValue"));
                     }
-                    e.value = Some(v.clone());
+                    // An editable combo only accepts its own items.
+                    let items = e.children.clone();
+                    if rid == COMBO && !items.iter().any(|c| s.els[c].name == *v) {
+                        return Err(unsupported("Value.SetValue (not an item)"));
+                    }
+                    s.els.get_mut(&rid).unwrap().value = Some(v.clone());
                 }
                 UiPatternAction::Expand | UiPatternAction::Collapse => {
                     let expanded = matches!(action, UiPatternAction::Expand);
@@ -525,7 +549,13 @@ impl UiAutomationBackend for Fake {
                 }
                 UiPatternAction::Scroll { .. } => return Err(unsupported("Scroll")),
             }
-            out.props_after = s.els.contains_key(&rid).then(|| s.props(rid));
+            out.props_after = if s.blind {
+                None
+            } else if s.stale_readback {
+                Some(before)
+            } else {
+                s.els.contains_key(&rid).then(|| s.props(rid))
+            };
             Ok(out)
         })
     }
@@ -1060,6 +1090,29 @@ async fn disabled_and_elevated_targets_are_refused() {
 }
 
 #[tokio::test]
+async fn keys_without_a_target_are_refused_for_an_elevated_foreground() {
+    let fake = Fake::new();
+    fake.s().privileged = true;
+    let input = Arc::new(FakeInput::default());
+    let engine = engine(&fake).with_input(input.clone());
+    let session = engine.session(&sid(), "test").unwrap();
+    for action in [
+        DesktopAction::Press {
+            target: None,
+            keys: vec![Key::Ctrl, Key::Char('s')],
+        },
+        DesktopAction::TypeText {
+            target: None,
+            text: "hello".into(),
+        },
+    ] {
+        let err = engine.execute(&session, action).await.unwrap_err();
+        assert_eq!(err.code().as_str(), "UIPI_BLOCKED");
+    }
+    assert!(input.log.lock().unwrap().is_empty(), "nothing was sent");
+}
+
+#[tokio::test]
 async fn physical_paths_need_an_input_backend() {
     let fake = Fake::new();
     let bare = engine(&fake);
@@ -1566,7 +1619,7 @@ async fn winwright_never_automates_its_own_windows() {
 #[tokio::test]
 async fn audit_log_records_outcomes_without_text() {
     let fake = Fake::new();
-    let dir = std::env::temp_dir().join(format!("winwright-engine-audit-{}", std::process::id()));
+    let dir = crate::scratch_dir("engine-audit");
     let path = dir.join("audit.jsonl");
     let engine =
         engine(&fake)
@@ -1613,4 +1666,580 @@ async fn audit_log_records_outcomes_without_text() {
         "typed text never reaches the log"
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------- regressions
+
+#[tokio::test]
+async fn emergency_stop_refuses_session_less_calls_until_rearmed() {
+    let fake = Fake::new();
+    let engine = engine(&fake);
+    engine.emergency_stop();
+    let main = WindowSelector {
+        hwnd: Some(MAIN),
+        ..Default::default()
+    };
+    for (what, err) in [
+        (
+            "list_windows",
+            engine.list_windows().map(|_| ()).unwrap_err(),
+        ),
+        (
+            "active_window",
+            engine.active_window().map(|_| ()).unwrap_err(),
+        ),
+        (
+            "find_window",
+            engine.find_window(&main).map(|_| ()).unwrap_err(),
+        ),
+        (
+            "process_list",
+            engine.process_list().map(|_| ()).unwrap_err(),
+        ),
+        ("clear_overlays", engine.clear_overlays(None).unwrap_err()),
+    ] {
+        assert_eq!(err.code().as_str(), "CANCELLED", "{what}");
+    }
+    engine.rearm();
+    assert_eq!(engine.list_windows().unwrap().len(), 1);
+    assert_eq!(engine.find_window(&main).unwrap().hwnd, MAIN);
+}
+
+#[tokio::test]
+async fn toggle_is_never_repeated_without_a_fresh_reading() {
+    let fake = Fake::new();
+    {
+        let mut s = fake.s();
+        s.blind = true;
+        s.inert_toggle = true;
+    }
+    let engine = engine(&fake);
+    let session = engine.session(&sid(), "test").unwrap();
+    let r = engine
+        .execute(
+            &session,
+            DesktopAction::Check {
+                target: by("CheckBox", "Enable feature"),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(!r.verified, "{r:?}");
+    let toggles = fake
+        .s()
+        .executed
+        .iter()
+        .filter(|e| e.starts_with("Toggle"))
+        .count();
+    assert_eq!(toggles, 1, "a toggle that may still land is not repeated");
+}
+
+#[tokio::test]
+async fn fill_waits_for_a_late_value_instead_of_retyping_it() {
+    let fake = Fake::new();
+    fake.s().els.get_mut(&3).unwrap().value = Some("notes.txt".into());
+    fake.s().stale_readback = true;
+    let input = Arc::new(FakeInput::default());
+    let engine = engine(&fake).with_input(input.clone());
+    let session = engine.session(&sid(), "test").unwrap();
+    let r = engine
+        .execute(
+            &session,
+            DesktopAction::Fill {
+                target: by("Edit", "Name:"),
+                text: ".bak".into(),
+                clear: false,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.method, ActionMethod::ValuePattern, "{r:?}");
+    assert!(r.verified);
+    assert!(input.log.lock().unwrap().is_empty(), "nothing was retyped");
+    assert_eq!(fake.s().els[&3].value.as_deref(), Some("notes.txt.bak"));
+}
+
+#[tokio::test]
+async fn keyboard_typing_is_not_verified_by_focus_or_old_text() {
+    let fake = Fake::new();
+    {
+        let mut s = fake.s();
+        let name = s.els.get_mut(&3).unwrap();
+        name.read_only = true;
+        name.value = Some("banana".into());
+    }
+    let input = Arc::new(FakeInput::default());
+    let engine = engine(&fake)
+        .with_input(input.clone())
+        .with_confirmer(confirmer(true));
+    let session = engine.session(&sid(), "test").unwrap();
+    // The fake keyboard changes nothing: "banana" already ends with and contains "na".
+    let fill = engine
+        .execute(
+            &session,
+            DesktopAction::Fill {
+                target: by("Edit", "Name:"),
+                text: "na".into(),
+                clear: false,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(fill.method, ActionMethod::PhysicalKeyboard);
+    assert!(!fill.verified, "{fill:?}");
+    fake.s().els.get_mut(&3).unwrap().focused = false;
+    let typed = engine
+        .execute(
+            &session,
+            DesktopAction::TypeText {
+                target: Some(by("Edit", "Name:")),
+                text: "an".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(!typed.verified, "{typed:?}");
+    // A password cannot be read back; focusing it is no evidence the text arrived.
+    let secret = engine
+        .execute(
+            &session,
+            DesktopAction::Fill {
+                target: by("Edit", "Password:"),
+                text: "hunter2".into(),
+                clear: false,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(secret.method, ActionMethod::PhysicalKeyboard);
+    assert!(!secret.verified, "{secret:?}");
+}
+
+#[tokio::test]
+async fn enter_on_a_focused_send_style_button_needs_confirmation() {
+    let fake = Fake::new();
+    let input = Arc::new(FakeInput::default());
+    let engine = engine(&fake).with_input(input.clone());
+    let session = engine.session(&sid(), "test").unwrap();
+    engine
+        .execute(
+            &session,
+            DesktopAction::Focus {
+                target: by("Button", "Submit"),
+            },
+        )
+        .await
+        .unwrap();
+    let err = engine
+        .execute(
+            &session,
+            DesktopAction::Press {
+                target: None,
+                keys: vec![Key::Enter],
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.code().as_str(), "CONFIRMATION_REQUIRED");
+    assert!(
+        err.to_string()
+            .contains("Press Enter in Button \"Submit\" (focused)"),
+        "the prompt names what Enter would activate: {err}"
+    );
+    assert!(input.log.lock().unwrap().is_empty(), "Enter was not sent");
+}
+
+#[tokio::test]
+async fn combo_select_is_judged_by_its_value_not_side_effects() {
+    let fake = Fake::new();
+    {
+        let mut s = fake.s();
+        let mut item = el(
+            ControlRole::ListItem,
+            "More colors...",
+            "",
+            &[UiPattern::Invoke],
+        );
+        item.offscreen = true;
+        s.els.insert(40, item);
+        s.els.get_mut(&COMBO).unwrap().children.push(40);
+    }
+    let engine = engine(&fake);
+    let session = engine.session(&sid(), "test").unwrap();
+    let r = engine
+        .execute(
+            &session,
+            DesktopAction::Select {
+                target: by("ComboBox", "Color:"),
+                option: Some("More colors...".into()),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.method, ActionMethod::InvokePattern);
+    assert_eq!(r.opened_windows.len(), 1, "{r:?}");
+    assert!(!r.verified, "the combo still shows no color: {r:?}");
+    assert!(
+        r.warnings.iter().any(|w| w.contains("still shows")),
+        "{r:?}"
+    );
+}
+
+#[tokio::test]
+async fn failed_combo_select_closes_the_list_it_opened() {
+    let fake = Fake::new();
+    fake.s().els.get_mut(&COMBO).unwrap().read_only = false;
+    let engine = engine(&fake);
+    let session = engine.session(&sid(), "test").unwrap();
+    let err = engine
+        .execute(
+            &session,
+            DesktopAction::Select {
+                target: by("ComboBox", "Color:"),
+                option: Some("Purple".into()),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.code().as_str(), "UNSUPPORTED_PATTERN");
+    assert_eq!(fake.s().els[&COMBO].expand, Some(ExpandState::Collapsed));
+    // An empty option would match every item by "contains".
+    let err = engine
+        .execute(
+            &session,
+            DesktopAction::Select {
+                target: by("ComboBox", "Color:"),
+                option: Some(" ".into()),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.code().as_str(), "INVALID_REQUEST");
+}
+
+#[tokio::test]
+async fn window_geometry_is_validated() {
+    let fake = Fake::new();
+    let engine = engine(&fake);
+    let session = engine.session(&sid(), "test").unwrap();
+    let window = || WindowSelector {
+        hwnd: Some(MAIN),
+        ..Default::default()
+    };
+    for action in [
+        WindowAction::Move {
+            window: window(),
+            x: i32::MAX,
+            y: 0,
+        },
+        WindowAction::Resize {
+            window: window(),
+            width: -5,
+            height: 100,
+        },
+        WindowAction::SetBounds {
+            window: window(),
+            bounds: PhysicalRect::new(100, 100, 50, 300),
+        },
+    ] {
+        let err = engine.window_action(&session, action).await.unwrap_err();
+        assert_eq!(err.code().as_str(), "INVALID_REQUEST", "{err}");
+    }
+    assert_eq!(
+        fake.s().windows[0].bounds,
+        PhysicalRect::new(0, 0, 800, 600),
+        "nothing moved"
+    );
+    let r = engine
+        .window_action(
+            &session,
+            WindowAction::Move {
+                window: window(),
+                x: -1920,
+                y: 40,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(r.verified);
+}
+
+#[tokio::test]
+async fn waits_honor_nth() {
+    let fake = Fake::new();
+    let engine = engine(&fake);
+    let session = engine.session(&sid(), "test").unwrap();
+    let second = engine
+        .wait_for(
+            &session,
+            wait(serde_json::json!({"state": "visible", "locator": {"role": "Button", "name": "Save", "nth": 1}})),
+        )
+        .await
+        .unwrap();
+    assert_eq!(second.element.unwrap().automation_id, "s2");
+    let err = engine
+        .wait_for(
+            &session,
+            wait(serde_json::json!({"state": "exists", "locator": {"role": "Button", "name": "Save", "nth": 2}, "timeoutMs": 150})),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.code().as_str(), "TIMEOUT", "there is no third Save");
+    engine
+        .wait_for(
+            &session,
+            wait(serde_json::json!({"state": "missing", "locator": {"role": "Button", "name": "Save", "nth": 2}, "timeoutMs": 150})),
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn launching_a_shell_is_gated_like_shell_execute() {
+    use winwright_contracts::system::{ExecRequest, LaunchRequest};
+    let fake = Fake::new();
+    let engine = engine(&fake);
+    let session = engine.session(&sid(), "test").unwrap();
+    for app in [
+        "cmd.exe",
+        "CMD",
+        r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+        "pwsh",
+        "mshta.exe",
+    ] {
+        let launch: LaunchRequest =
+            serde_json::from_value(serde_json::json!({"app": app, "args": ["/c", "x"]})).unwrap();
+        let err = engine.launch_app(&session, launch).await.unwrap_err();
+        assert_eq!(err.code().as_str(), "ACTION_BLOCKED", "{app}");
+    }
+    let notepad: LaunchRequest = serde_json::from_str(r#"{"app":"notepad.exe"}"#).unwrap();
+    assert_eq!(
+        engine
+            .launch_app(&session, notepad)
+            .await
+            .unwrap_err()
+            .code()
+            .as_str(),
+        "BACKEND_UNAVAILABLE",
+        "ordinary apps pass the policy"
+    );
+
+    // Enabling the shell does not enable PowerShell.
+    let mut config = Config::default();
+    config.security.allow_shell = true;
+    let engine = Engine::new(config, fake.clone(), fake.clone());
+    let session = engine.session(&sid(), "test").unwrap();
+    let ps: ExecRequest =
+        serde_json::from_str(r#"{"program":"powershell.exe","args":["-c","x"]}"#).unwrap();
+    assert_eq!(
+        engine.exec(&session, ps).await.unwrap_err().code().as_str(),
+        "ACTION_BLOCKED"
+    );
+    let cmd: ExecRequest = serde_json::from_str(r#"{"program":"cmd.exe","args":["/c"]}"#).unwrap();
+    assert_eq!(
+        engine
+            .exec(&session, cmd)
+            .await
+            .unwrap_err()
+            .code()
+            .as_str(),
+        "CONFIRMATION_REQUIRED"
+    );
+}
+
+#[tokio::test]
+async fn selecting_a_risky_option_needs_confirmation() {
+    let fake = Fake::new();
+    {
+        let mut s = fake.s();
+        let mut menu = el(ControlRole::Menu, "Actions", "", &[]);
+        menu.children = vec![42];
+        s.els.insert(41, menu);
+        s.els.insert(
+            42,
+            el(
+                ControlRole::MenuItem,
+                "Delete account",
+                "",
+                &[UiPattern::Invoke],
+            ),
+        );
+        s.els.get_mut(&1).unwrap().children.push(41);
+    }
+    let engine = engine(&fake);
+    let session = engine.session(&sid(), "test").unwrap();
+    let err = engine
+        .execute(
+            &session,
+            DesktopAction::Select {
+                target: by("Menu", "Actions"),
+                option: Some("Delete account".into()),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.code().as_str(), "CONFIRMATION_REQUIRED");
+    assert!(fake.s().executed.is_empty(), "nothing was invoked");
+}
+
+#[tokio::test]
+async fn delete_key_outside_text_needs_confirmation() {
+    let fake = Fake::new();
+    let input = Arc::new(FakeInput::default());
+    let engine = engine(&fake).with_input(input.clone());
+    let session = engine.session(&sid(), "test").unwrap();
+    let press = |target: Option<ElementTarget>| DesktopAction::Press {
+        target,
+        keys: vec![Key::Shift, Key::Delete],
+    };
+    for target in [Some(by("Button", "Target")), None] {
+        let err = engine.execute(&session, press(target)).await.unwrap_err();
+        assert_eq!(err.code().as_str(), "CONFIRMATION_REQUIRED");
+    }
+    assert!(input.log.lock().unwrap().is_empty());
+    engine
+        .execute(&session, press(Some(by("Edit", "Name:"))))
+        .await
+        .unwrap();
+    assert_eq!(*input.log.lock().unwrap(), ["press Shift+Delete"]);
+}
+
+#[tokio::test]
+async fn wait_rejects_a_bad_value_pattern_up_front() {
+    let fake = Fake::new();
+    let engine = engine(&fake);
+    let session = engine.session(&sid(), "test").unwrap();
+    let err = engine
+        .wait_for(
+            &session,
+            wait(serde_json::json!({"state": "value", "locator": {"role": "Edit", "name": "Name:"}, "value": "(", "match": "regex", "timeoutMs": 150})),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.code().as_str(), "INVALID_REQUEST", "{err}");
+}
+
+#[tokio::test]
+async fn scrolling_a_target_into_view_does_not_verify_a_physical_click() {
+    let fake = Fake::new();
+    {
+        let mut s = fake.s();
+        let target = s.els.get_mut(&TARGET).unwrap();
+        target.offscreen = true;
+        target.patterns.push(UiPattern::ScrollItem);
+    }
+    let input = Arc::new(FakeInput::default());
+    let engine = engine(&fake).with_input(input.clone());
+    let session = engine.session(&sid(), "test").unwrap();
+    let r = engine
+        .execute(
+            &session,
+            DesktopAction::Click {
+                target: ElementTarget::by_locator(
+                    ElementLocator {
+                        role: Some("Button".into()),
+                        name: Some("Target".into()),
+                        visible_only: false,
+                        ..Default::default()
+                    },
+                    SnapshotTarget::Active,
+                ),
+                button: MouseButton::Right,
+                click_count: 1,
+                force_physical: false,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.method, ActionMethod::PhysicalClick);
+    assert_eq!(input.log.lock().unwrap().len(), 1, "the click was sent");
+    assert!(!r.verified, "the click itself changed nothing: {r:?}");
+}
+
+/// Records the time budget each `exec` call was given.
+#[derive(Default)]
+struct FakeProcesses {
+    exec_budget: Mutex<Option<Duration>>,
+}
+
+impl winwright_contracts::system::ProcessService for FakeProcesses {
+    fn launch<'a>(
+        &'a self,
+        _: winwright_contracts::system::LaunchRequest,
+        _: &'a OperationContext,
+    ) -> BackendFuture<'a, winwright_contracts::system::LaunchResult> {
+        Box::pin(async { Err(WinwrightError::invalid("not used")) })
+    }
+    fn list(&self) -> WinwrightResult<Vec<winwright_contracts::system::ProcessInfo>> {
+        Ok(Vec::new())
+    }
+    fn exec<'a>(
+        &'a self,
+        _: winwright_contracts::system::ExecRequest,
+        ctx: &'a OperationContext,
+    ) -> BackendFuture<'a, winwright_contracts::system::ExecResult> {
+        *self.exec_budget.lock().unwrap() = Some(ctx.remaining());
+        Box::pin(async { Err(WinwrightError::invalid("fake exec")) })
+    }
+}
+
+#[tokio::test]
+async fn exec_gets_the_time_it_asked_for() {
+    let fake = Fake::new();
+    let mut config = Config::default();
+    config.security.allow_shell = true;
+    let processes = Arc::new(FakeProcesses::default());
+    let engine = Engine::new(config, fake.clone(), fake.clone())
+        .with_processes(processes.clone())
+        .with_confirmer(confirmer(true));
+    let session = engine.session(&sid(), "test").unwrap();
+    let request = serde_json::from_str(r#"{"program":"tool.exe","timeoutMs":60000}"#).unwrap();
+    let _ = engine.exec(&session, request).await;
+    let budget = processes.exec_budget.lock().unwrap().unwrap();
+    assert!(
+        budget >= Duration::from_secs(59),
+        "a 60 s run is not cut at the 10 s default: {budget:?}"
+    );
+}
+
+#[tokio::test]
+async fn other_winwright_processes_are_never_automated() {
+    let fake = Fake::new();
+    {
+        let mut s = fake.s();
+        let mut dialog = el(ControlRole::Dialog, "Winwright: confirm action", "", &[]);
+        dialog.pid = OTHER_WINWRIGHT;
+        dialog.children = vec![51];
+        s.els.insert(50, dialog);
+        let mut yes = el(ControlRole::Button, "Yes", "", &[UiPattern::Invoke]);
+        yes.pid = OTHER_WINWRIGHT;
+        s.els.insert(51, yes);
+        s.roots.insert(98, 50);
+        let mut w = window(98, "Winwright: confirm action", "winwright.exe", false);
+        w.process_id = OTHER_WINWRIGHT;
+        s.windows.push(w);
+    }
+    let engine = engine(&fake);
+    let session = engine.session(&sid(), "test").unwrap();
+    let dialog = || WindowSelector {
+        hwnd: Some(98),
+        ..Default::default()
+    };
+    let yes = ElementTarget::by_locator(
+        ElementLocator {
+            role: Some("Button".into()),
+            name: Some("Yes".into()),
+            ..Default::default()
+        },
+        SnapshotTarget::Window(dialog()),
+    );
+    let err = engine.execute(&session, click(yes)).await.unwrap_err();
+    assert_eq!(err.code().as_str(), "ACTION_BLOCKED", "{err}");
+    let err = engine
+        .window_action(&session, WindowAction::Close { window: dialog() })
+        .await
+        .unwrap_err();
+    assert_eq!(err.code().as_str(), "ACTION_BLOCKED", "{err}");
+    assert!(fake.s().executed.is_empty(), "the dialog was not answered");
+    assert_eq!(fake.s().windows.len(), 2, "the dialog was not closed");
 }

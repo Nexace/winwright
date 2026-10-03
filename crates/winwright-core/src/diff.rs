@@ -10,13 +10,33 @@ pub struct Line {
     pub text: String,
 }
 
-/// Extracts `(ref, line)` pairs from compact snapshot text.
+/// `text` with the contents of its JSON-quoted names and values blanked out (byte offsets
+/// kept), so quoted text such as `"Wiki [edit]"` or `"Stay focused"` is never read as markup.
+fn unquoted(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let (mut quoted, mut escaped) = (false, false);
+    for c in text.chars() {
+        let closes = quoted && !escaped && c == '"';
+        if quoted && !closes {
+            escaped = !escaped && c == '\\';
+            out.extend(std::iter::repeat_n(' ', c.len_utf8()));
+        } else {
+            quoted = c == '"' && !closes;
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Extracts `(ref, line)` pairs from compact snapshot text. The ref is the first ` [eN]`
+/// outside quotes; folded cells after it are quoted too.
 pub fn lines(tree: &str) -> Vec<Line> {
     tree.lines()
         .filter_map(|raw| {
             let text = raw.trim_start();
-            let open = text.rfind(" [e")?;
-            let close = text[open..].find(']')? + open;
+            let bare = unquoted(text);
+            let open = bare.find(" [e")?;
+            let close = bare[open..].find(']')? + open;
             Some(Line {
                 reference: text[open + 2..close].to_owned(),
                 text: text.to_owned(),
@@ -26,13 +46,20 @@ pub fn lines(tree: &str) -> Vec<Line> {
 }
 
 fn without_ref(text: &str, reference: &str) -> String {
-    text.replacen(&format!(" [{reference}]"), "", 1)
+    let token = format!(" [{reference}]");
+    match unquoted(text).find(&token) {
+        Some(at) => format!("{}{}", &text[..at], &text[at + token.len()..]),
+        None => text.to_owned(),
+    }
 }
 
+/// The `focused` flag, never the word inside a quoted name.
 fn is_focused(text: &str, reference: &str) -> bool {
-    without_ref(text, reference)
-        .split_whitespace()
-        .any(|w| w == "focused")
+    let bare = unquoted(text);
+    let head = bare
+        .find(&format!(" [{reference}]"))
+        .map_or(bare.as_str(), |at| &bare[..at]);
+    head.split_whitespace().any(|w| w == "focused")
 }
 
 /// Renders the difference. Order: additions and changes in new document order, then removals,
@@ -116,6 +143,30 @@ mod tests {
              + EDIT \"File name:\" value=\"\" focused [e10]\n\
              - BUTTON \"Old\" [e4]\n\
              focus -> EDIT \"File name:\" value=\"\" focused [e10]\n"
+        );
+    }
+
+    #[test]
+    fn quoted_text_is_never_taken_for_a_ref_or_a_flag() {
+        let ls = lines("LISTITEM \"a [e9]\" [e3] Title=\"Wiki [edit]\"\n");
+        assert_eq!(ls[0].reference, "e3");
+        let old = lines("BUTTON \"Stay focused today\" [e1]\nEDIT \"x\" focused [e2]\n");
+        let new =
+            lines("BUTTON \"Stay focused today\" [e1]\nEDIT \"x\" [e2]\nEDIT \"y\" focused [e3]\n");
+        let (text, _) = render("s_1", "s_2", &old, &new);
+        assert!(
+            text.contains("focus -> EDIT \"y\" focused [e3]\n"),
+            "{text}"
+        );
+        let (text, _) = render(
+            "s_1",
+            "s_2",
+            &lines("BUTTON \"Go [e1]\" [e1]\n"),
+            &lines("BUTTON \"Go [e1]\" disabled [e1]\n"),
+        );
+        assert!(
+            text.contains("~ BUTTON \"Go [e1]\" -> BUTTON \"Go [e1]\" disabled [e1]"),
+            "{text}"
         );
     }
 

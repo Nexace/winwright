@@ -86,6 +86,10 @@ impl Engine {
         request: WaitRequest,
     ) -> WinwrightResult<WaitResult> {
         request.validate().map_err(WinwrightError::invalid)?;
+        // A bad pattern is the caller's mistake, not a state that never arrives.
+        if let Some(value) = &request.value {
+            Matcher::new(value, request.value_match, false)?;
+        }
         self.observe("desktop_wait_for")?;
         let timeout = request
             .timeout_ms
@@ -245,7 +249,11 @@ impl Engine {
             .capture_scope(session, &scope, search_limits(!locator.visible_only), ctx)
             .await?;
         let roots: Vec<&UiNode> = captured.trees.iter().map(|(t, _)| &t.root).collect();
-        let matches = find_matches(&compiled, &roots);
+        let mut matches = find_matches(&compiled, &roots);
+        // `nth` narrows every state to that one match (document order), presence states too.
+        if let Some(n) = compiled.nth {
+            matches = matches.into_iter().nth(n).into_iter().collect();
+        }
         let describe = || compiled.description.clone();
         // Decide which match (if any) satisfies the state, or why it is still pending.
         let decision: Result<Option<usize>, String> = match req.state {
@@ -276,7 +284,7 @@ impl Engine {
                     Ok(None)
                 }
             }
-            _ => match resolve_one(&matches, compiled.nth) {
+            _ => match resolve_one(&matches, None) {
                 Resolution::One(i) => element_state(req, &matches[i].node.props).map(|()| Some(i)),
                 Resolution::NotFound => Err(format!("no element matches {}", describe())),
                 Resolution::Ambiguous(ix) => {

@@ -1,6 +1,7 @@
 use std::fmt;
 
 use winwright_contracts::backend::UiProps;
+use winwright_contracts::element::{ControlRole, UiPattern};
 
 pub const REDACTED: &str = "[REDACTED]";
 
@@ -9,6 +10,8 @@ pub const REDACTED: &str = "[REDACTED]";
 const SENSITIVE_HINTS: &[&str] = &[
     "password",
     "passwd",
+    "pwd",
+    "passphrase",
     "passcode",
     "pin code",
     "secret",
@@ -28,9 +31,18 @@ pub fn is_sensitive(props: &UiProps) -> bool {
     }
     let lower_name = props.name.to_lowercase();
     let lower_id = props.automation_id.to_lowercase();
-    SENSITIVE_HINTS
+    if SENSITIVE_HINTS
         .iter()
         .any(|hint| lower_name.contains(hint) || lower_id.contains(hint))
+    {
+        return true;
+    }
+    // A bare "PIN" (Windows Hello, banking) is a secret on an input; on a button it is a verb.
+    let input = props.role == ControlRole::Edit || props.has_pattern(UiPattern::Value);
+    input
+        && lower_name
+            .split(|c: char| !c.is_alphanumeric())
+            .any(|w| w == "pin")
 }
 
 /// The value the model may see for an element.
@@ -107,6 +119,22 @@ mod tests {
         let plain = edit("File name", false, Some("report.docx"));
         assert!(!is_sensitive(&plain));
         assert_eq!(redacted_value(&plain).as_deref(), Some("report.docx"));
+    }
+
+    #[test]
+    fn pins_and_abbreviated_passwords_are_sensitive() {
+        assert!(is_sensitive(&edit("PIN", false, Some("1234"))));
+        assert!(is_sensitive(&edit("Passphrase", false, None)));
+        let mut by_id = edit("Code", false, Some("x"));
+        by_id.automation_id = "txtPwd".into();
+        assert!(is_sensitive(&by_id));
+        let pin_to_start = UiProps {
+            role: ControlRole::Button,
+            name: "Pin to Start".into(),
+            ..Default::default()
+        };
+        assert!(!is_sensitive(&pin_to_start), "a verb, not a field");
+        assert!(!is_sensitive(&edit("Shipping address", false, None)));
     }
 
     #[test]

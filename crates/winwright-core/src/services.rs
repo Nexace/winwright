@@ -10,13 +10,16 @@ use winwright_contracts::system::{
     ExecRequest, ExecResult, FileOperation, FileResult, LaunchRequest, LaunchResult, ProcessInfo,
 };
 use winwright_contracts::{WinwrightError, WinwrightResult};
+use winwright_security::program_capability;
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::engine::Engine;
 use crate::session::Session;
 
 const DEFAULT_HIGHLIGHT_MS: u64 = 8_000;
+/// Longest run `exec` accepts (the process backend enforces the same limit).
+const MAX_EXEC_TIMEOUT_MS: u64 = 600_000;
 
 /// Dialog/audit description of a file operation. Paths are shown; contents never are.
 fn describe_file_op(op: &FileOperation) -> String {
@@ -175,6 +178,7 @@ impl Engine {
     }
 
     pub fn clear_overlays(&self, id: Option<OverlayId>) -> WinwrightResult<()> {
+        self.ensure_running()?;
         match self.overlay.as_deref() {
             Some(o) => o.clear(id),
             None => Ok(()),
@@ -188,9 +192,10 @@ impl Engine {
         request: LaunchRequest,
     ) -> WinwrightResult<LaunchResult> {
         let started = Instant::now();
+        // Launching an interpreter with arguments is shell execution and is gated like it.
         let action = proposed(
             "app_launch",
-            Capability::ProcessLaunch,
+            program_capability(&request.app),
             ActionRisk::Normal,
             Some(request.app.clone()),
         );
@@ -296,9 +301,14 @@ impl Engine {
         request: ExecRequest,
     ) -> WinwrightResult<ExecResult> {
         let started = Instant::now();
+        // PowerShell stays behind its own switch even when the shell is enabled.
+        let capability = match program_capability(&request.program) {
+            Capability::PowerShell => Capability::PowerShell,
+            _ => Capability::Shell,
+        };
         let action = proposed(
             "shell_execute",
-            Capability::Shell,
+            capability,
             ActionRisk::Sensitive,
             Some(request.program.clone()),
         );
@@ -316,7 +326,10 @@ impl Engine {
                 .processes
                 .as_deref()
                 .ok_or_else(|| unavailable("process"))?;
-            let ctx = session.operation(self.timeout())?;
+            // The run gets the time it asked for (the backend validates the range), not the
+            // engine's default.
+            let wanted = Duration::from_millis(request.timeout_ms.min(MAX_EXEC_TIMEOUT_MS));
+            let ctx = session.operation(wanted.max(self.timeout()))?;
             processes.exec(request, &ctx).await
         }
         .await;

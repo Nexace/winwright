@@ -169,6 +169,8 @@ pub struct Compressor<'r> {
     /// Ref of the first emitted root, used as the active window ref.
     pub first_root_ref: Option<String>,
     window: Option<u64>,
+    /// Children the raw capture visits per node; providers reporting more were cut short.
+    raw_child_cap: u32,
 }
 
 impl<'r> Compressor<'r> {
@@ -185,7 +187,14 @@ impl<'r> Compressor<'r> {
             replaced: Vec::new(),
             first_root_ref: None,
             window: None,
+            raw_child_cap: u32::MAX,
         }
+    }
+
+    /// The per-node child limit the trees were captured with.
+    pub fn with_raw_child_cap(mut self, cap: u32) -> Self {
+        self.raw_child_cap = cap;
+        self
     }
 
     /// `window` is the top-level window the tree belongs to (the scope for re-resolution).
@@ -248,6 +257,8 @@ impl<'r> Compressor<'r> {
         };
 
         if decision == Decision::Flatten {
+            self.truncated |=
+                !is_list_like(node.props.role) && node.children_total > self.raw_child_cap;
             for child in &node.children {
                 self.select(child, false, own_name, fingerprint, budget, out);
             }
@@ -267,8 +278,10 @@ impl<'r> Compressor<'r> {
         let mut cells = Vec::new();
         let mut children = Vec::new();
         let mut list_truncated = false;
+        let mut folded = 0u32;
         for child in &node.children {
             if fold_cells && is_cell(child) {
+                folded += 1;
                 let value = child.props.value.as_deref().unwrap_or_default();
                 if !value.is_empty() && value != node.props.name {
                     cells.push(CellValue {
@@ -289,10 +302,14 @@ impl<'r> Compressor<'r> {
             list_truncated = true;
         }
         let provider_total = node.children_total.max(node.children.len() as u32);
-        // Lists report their real size when not every item is shown (offscreen or uncaptured);
-        // other containers stay quiet about skipped offscreen children.
+        let list_like = is_list_like(node.props.role);
+        // Lists report their real size when not every item is shown (offscreen or uncaptured;
+        // cells folded into this line count as shown). Other containers stay quiet about
+        // skipped offscreen children, but children the capture never visited truncate them.
+        let uncaptured = !list_like && node.children_total > self.raw_child_cap;
+        self.truncated |= uncaptured;
         let backend_capped =
-            is_list_like(node.props.role) && node.children_total > children.len() as u32;
+            uncaptured || (list_like && node.children_total > children.len() as u32 + folded);
         let child_count = (list_truncated || backend_capped).then(|| {
             let shown = children.len() as u32;
             (provider_total.max(shown), shown)
@@ -648,6 +665,48 @@ mod tests {
             "WINDOW \"E\" [e1]\n  LIST \"Items\" [e2]\n    LISTITEM \"a.txt\" [e3] Date modified=\"9/30/2026\"\n"
         );
         assert_eq!(released.len(), 3, "folded cells hold no slots");
+    }
+
+    #[test]
+    fn folded_cells_are_not_reported_as_hidden_children() {
+        let mut b = B { next: 0 };
+        let mut cell = |name: &str, value: &str| {
+            let mut c = b.node(ControlRole::Edit, name, vec![]);
+            c.props.patterns = vec![UiPattern::Value, UiPattern::GridItem];
+            c.props.value = Some(value.into());
+            c
+        };
+        let cells = vec![cell("Name", "svchost"), cell("CPU", "1%")];
+        let row = b.node(ControlRole::TreeItem, "svchost", cells);
+        let processes = b.node(ControlRole::Tree, "Processes", vec![row]);
+        let t = tree(b.node(ControlRole::Window, "TM", vec![processes]));
+        let mut refs = RefTable::default();
+        let (text, _) = compress(&t, &SnapshotRequest::default(), &mut refs);
+        assert!(
+            text.contains("TREEITEM \"svchost\" [e3] CPU=\"1%\"\n"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn children_the_capture_never_visited_are_reported() {
+        let mut b = B { next: 0 };
+        let buttons: Vec<UiNode> = (0..50)
+            .map(|i| b.node(ControlRole::Button, &format!("b{i}"), vec![]))
+            .collect();
+        let mut form = b.node(ControlRole::Pane, "Form", buttons);
+        form.children_total = 80;
+        let t = tree(b.node(ControlRole::Window, "W", vec![form]));
+        let req = SnapshotRequest::default();
+        let mut refs = RefTable::default();
+        let mut c = Compressor::new(&req, 1, Instant::now()).with_raw_child_cap(50);
+        c.add_tree(&t, &mut refs, None);
+        assert!(c.truncated, "30 controls were never captured");
+        assert!(
+            c.text.contains("PANE \"Form\" [e2] children=80 showing=50"),
+            "{}",
+            c.text
+        );
     }
 
     #[test]

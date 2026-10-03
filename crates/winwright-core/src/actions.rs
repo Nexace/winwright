@@ -17,8 +17,17 @@ use winwright_contracts::input::{InputBackend, Key, MouseButton, validate_chord}
 use winwright_contracts::security::{ActionRisk, Capability, ProposedAction, TargetSummary};
 
 /// One-line description shown in confirmation dialogs (never includes typed text).
-fn describe(action: &DesktopAction, target: Option<&Resolved>) -> String {
-    let on = target.map_or_else(|| "the focused window".to_owned(), Resolved::label);
+/// `focused` names the element untargeted keys reach, when known.
+fn describe(
+    action: &DesktopAction,
+    target: Option<&Resolved>,
+    focused: Option<&UiProps>,
+) -> String {
+    let on = match (target, focused) {
+        (Some(r), _) => r.label(),
+        (None, Some(p)) => format!("{} (focused)", p.label()),
+        (None, None) => "the focused window".to_owned(),
+    };
     match action {
         DesktopAction::Click { click_count, .. } if *click_count > 1 => {
             format!("Double-click {on}")
@@ -73,6 +82,9 @@ struct Step {
     /// The exact state the target must reach; re-checked briefly because some providers
     /// (Win32 radio buttons, list boxes) update a moment after the call returns.
     expect: Option<Expect>,
+    /// The target as this step left it just before its input (e.g. after focusing it), so the
+    /// step's own preparation is never mistaken for an effect of the action.
+    baseline: Option<UiProps>,
 }
 
 impl Step {
@@ -84,6 +96,7 @@ impl Step {
             text: None,
             warnings: Vec::new(),
             expect: None,
+            baseline: None,
         }
     }
 }
@@ -95,7 +108,15 @@ enum Expect {
     ToggleChangedFrom(Option<ToggleState>),
     Expand(ExpandState),
     Visible,
+    /// What a combo box shows (trimmed, ASCII case-insensitive).
     Value(String),
+    /// The field's exact value after a keyboard fill.
+    ExactValue(String),
+    /// Typed text arrived: the value changed and now contains it.
+    Typed {
+        before: Option<String>,
+        text: String,
+    },
 }
 
 impl Expect {
@@ -112,6 +133,13 @@ impl Expect {
                 .value
                 .as_deref()
                 .is_some_and(|x| x.trim().eq_ignore_ascii_case(v)),
+            Self::ExactValue(v) => p.value.as_deref() == Some(v.as_str()),
+            Self::Typed { before, text } => {
+                p.value != *before
+                    && p.value
+                        .as_deref()
+                        .is_some_and(|v| v.contains(text.as_str()))
+            }
         }
     }
 }
@@ -180,6 +208,28 @@ fn ensure_enabled(r: &Resolved) -> WinwrightResult<()> {
     }
 }
 
+/// Text fields, where Delete edits text instead of deleting the item.
+fn is_text_input(p: &UiProps) -> bool {
+    matches!(p.role, ControlRole::Edit | ControlRole::Document)
+        || (p.has_pattern(UiPattern::Value) && p.value_read_only == Some(false))
+}
+
+/// Window edges beyond this are refused; real virtual desktops are far smaller.
+const MAX_WINDOW_COORD: i64 = 1 << 20;
+
+/// Validated window bounds from a position and size (model input: never overflow or invert).
+fn window_rect(left: i32, top: i32, width: i64, height: i64) -> WinwrightResult<PhysicalRect> {
+    let (l, t) = (i64::from(left), i64::from(top));
+    let (r, b) = (l + width, t + height);
+    if width <= 0 || height <= 0 || [l, t, r, b].iter().any(|v| v.abs() > MAX_WINDOW_COORD) {
+        return Err(WinwrightError::invalid(format!(
+            "window bounds at {left},{top} sized {width}x{height} are out of range"
+        )));
+    }
+    // In range of i32 by the check above.
+    Ok(PhysicalRect::new(left, top, r as i32, b as i32))
+}
+
 fn require(r: &Resolved, pattern: UiPattern) -> WinwrightResult<()> {
     if r.props.has_pattern(pattern) {
         Ok(())
@@ -212,20 +262,40 @@ impl Engine {
             .unwrap_or_default()
     }
 
-    fn proposed(&self, action: &DesktopAction, target: Option<&Resolved>) -> ProposedAction {
-        let summary = target.map(|r| TargetSummary {
-            process: Some(self.windows.process_name(r.props.process_id)).filter(|p| !p.is_empty()),
-            window: r
-                .window
-                .and_then(|w| self.windows.window(w).ok().flatten())
-                .map(|w| w.title),
-            role: Some(r.props.role.as_str().to_owned()),
-            name: Some(r.props.name.clone()).filter(|n| !n.is_empty()),
-        });
-        let activation = || {
-            target.map_or(ActionRisk::Normal, |r| {
-                classify_activation(&r.props.name, &r.props.automation_id)
+    /// `focused` is the element keys without a target would reach.
+    fn proposed(
+        &self,
+        action: &DesktopAction,
+        target: Option<&Resolved>,
+        focused: Option<&UiProps>,
+    ) -> ProposedAction {
+        let summary = target
+            .map(|r| TargetSummary {
+                process: Some(self.windows.process_name(r.props.process_id))
+                    .filter(|p| !p.is_empty()),
+                window: r
+                    .window
+                    .and_then(|w| self.windows.window(w).ok().flatten())
+                    .map(|w| w.title),
+                role: Some(r.props.role.as_str().to_owned()),
+                name: Some(r.props.name.clone()).filter(|n| !n.is_empty()),
             })
+            .or_else(|| {
+                focused.map(|p| TargetSummary {
+                    process: Some(self.windows.process_name(p.process_id))
+                        .filter(|p| !p.is_empty()),
+                    window: None,
+                    role: Some(p.role.as_str().to_owned()),
+                    name: Some(p.name.clone()).filter(|n| !n.is_empty()),
+                })
+            });
+        let activation = || {
+            target
+                .map(|r| &r.props)
+                .or(focused)
+                .map_or(ActionRisk::Normal, |p| {
+                    classify_activation(&p.name, &p.automation_id)
+                })
         };
         let sensitive_target = target.is_some_and(|r| is_sensitive(&r.props));
         let (capability, risk) = match action {
@@ -245,11 +315,17 @@ impl Engine {
                 (Capability::Interact, ActionRisk::Normal)
             }
             DesktopAction::Press { keys, .. } => {
+                // Delete outside a text field deletes the item itself (a file in Explorer).
+                let receiver = target.map(|r| &r.props).or(focused);
+                let deletes = keys.iter().any(|k| matches!(k, Key::Delete))
+                    && !receiver.is_some_and(is_text_input);
                 // Enter/Space on a focused control activates it.
                 let activates = keys.iter().any(|k| matches!(k, Key::Enter | Key::Space));
                 (
                     Capability::PhysicalInput,
-                    if activates {
+                    if deletes {
+                        ActionRisk::Destructive
+                    } else if activates {
                         activation()
                     } else {
                         ActionRisk::Normal
@@ -264,8 +340,16 @@ impl Engine {
                 },
                 activation(),
             ),
-            DesktopAction::Select { .. }
-            | DesktopAction::Check { .. }
+            // The option is what gets selected or invoked (a "Delete" menu item, a "Buy" choice).
+            DesktopAction::Select { option, .. } => (
+                Capability::Interact,
+                activation().max(
+                    option
+                        .as_deref()
+                        .map_or(ActionRisk::Normal, |o| classify_activation(o, "")),
+                ),
+            ),
+            DesktopAction::Check { .. }
             | DesktopAction::Uncheck { .. }
             | DesktopAction::Toggle { .. } => (Capability::Interact, activation()),
         };
@@ -309,9 +393,11 @@ impl Engine {
     }
 
     /// Polls for any observable effect: target state, target disappearance, window changes.
+    /// The target is compared with `baseline` when the step prepared it, else as resolved.
     async fn settle(
         &self,
         r: Option<&Resolved>,
+        baseline: Option<&UiProps>,
         before_windows: &WindowSet,
         ctx: &OperationContext,
     ) -> (bool, Option<UiProps>) {
@@ -325,7 +411,9 @@ impl Engine {
             }
             if let Some(r) = r {
                 match self.uia.refresh(r.key, ctx).await {
-                    Ok(now) if changed(&r.props, &now) => return (true, Some(now)),
+                    Ok(now) if changed(baseline.unwrap_or(&r.props), &now) => {
+                        return (true, Some(now));
+                    }
                     Ok(_) => {}
                     Err(WinwrightError::ElementStale { .. }) => return (true, None),
                     Err(_) => return (false, None),
@@ -395,13 +483,20 @@ impl Engine {
             )
         {
             // Keys go to the foreground window: never let them answer Winwright's own dialogs.
-            if let Some(fg) = self.windows.foreground_window()?
-                && (fg.process_id == std::process::id()
-                    || fg.process_name.eq_ignore_ascii_case("winwright.exe"))
-            {
-                return Err(WinwrightError::ActionBlocked {
-                    reason: "keyboard input to Winwright's own windows is blocked".into(),
-                });
+            if let Some(fg) = self.windows.foreground_window()? {
+                if fg.process_id == std::process::id()
+                    || fg.process_name.eq_ignore_ascii_case("winwright.exe")
+                {
+                    return Err(WinwrightError::ActionBlocked {
+                        reason: "keyboard input to Winwright's own windows is blocked".into(),
+                    });
+                }
+                // Windows silently drops input to a more privileged window.
+                if self.windows.is_more_privileged(fg.process_id) {
+                    return Err(WinwrightError::UipiBlocked {
+                        target: window_label(&fg.title, &fg.process_name),
+                    });
+                }
             }
         }
         let mutating = !matches!(action, DesktopAction::ReadText { .. });
@@ -410,9 +505,27 @@ impl Engine {
         } else {
             None
         };
-        let proposed = self.proposed(&action, resolved.as_ref());
+        // Enter/Space/Delete without a target act on whatever has focus: judge that element.
+        let focused = match &action {
+            DesktopAction::Press { keys, .. }
+                if resolved.is_none()
+                    && keys
+                        .iter()
+                        .any(|k| matches!(k, Key::Enter | Key::Space | Key::Delete)) =>
+            {
+                match self.uia.inspect(InspectTarget::Focused, &ctx).await {
+                    Ok(hit) => {
+                        self.release(vec![hit.key]).await;
+                        Some(hit.props)
+                    }
+                    Err(_) => None,
+                }
+            }
+            _ => None,
+        };
+        let proposed = self.proposed(&action, resolved.as_ref(), focused.as_ref());
         *audit_target = proposed.target.clone();
-        let summary = describe(&action, resolved.as_ref());
+        let summary = describe(&action, resolved.as_ref(), focused.as_ref());
         *confirmed = self.permit(session, proposed, summary, &mut lease).await?;
         // A confirmation may have taken a while: give the action its own full deadline.
         let ctx = if *confirmed {
@@ -512,17 +625,21 @@ impl Engine {
             warnings: std::mem::take(&mut step.warnings),
         };
         // Invoke and physical input can only be verified by side effects; every other method
-        // checked the control's own state and that answer stands.
-        let evidence_based = matches!(
-            step.method,
-            ActionMethod::InvokePattern
-                | ActionMethod::PhysicalClick
-                | ActionMethod::PhysicalKeyboard
-                | ActionMethod::PhysicalScroll
-        );
+        // checked the control's own state and that answer stands. So does a precise
+        // expectation (a combo's value, a typed field's text) whatever the method was.
+        let evidence_based = step.expect.is_none()
+            && matches!(
+                step.method,
+                ActionMethod::InvokePattern
+                    | ActionMethod::PhysicalClick
+                    | ActionMethod::PhysicalKeyboard
+                    | ActionMethod::PhysicalScroll
+            );
         if mutating {
             if evidence_based && !step.verified {
-                let (seen, after) = self.settle(r, &before_windows, &ctx).await;
+                let (seen, after) = self
+                    .settle(r, step.baseline.as_ref(), &before_windows, &ctx)
+                    .await;
                 result.verified = seen;
                 if after.is_some() {
                     step.after = after;
@@ -558,11 +675,12 @@ impl Engine {
         Ok(result)
     }
 
+    /// The point to click, plus the target's state just before the click (after any scrolling).
     async fn physical_point(
         &self,
         r: &Resolved,
         ctx: &OperationContext,
-    ) -> WinwrightResult<PhysicalPoint> {
+    ) -> WinwrightResult<(PhysicalPoint, UiProps)> {
         if r.props.offscreen && r.props.has_pattern(UiPattern::ScrollItem) {
             let _ = self.pattern(r, UiPatternAction::ScrollIntoView, ctx).await;
         }
@@ -598,7 +716,10 @@ impl Engine {
                 ),
             });
         }
-        Ok(point)
+        Ok((
+            point,
+            outcome.props_after.unwrap_or_else(|| r.props.clone()),
+        ))
     }
 
     async fn physical_click(
@@ -609,9 +730,11 @@ impl Engine {
         ctx: &OperationContext,
     ) -> WinwrightResult<Step> {
         let input = self.input()?;
-        let point = self.physical_point(r, ctx).await?;
+        let (point, before) = self.physical_point(r, ctx).await?;
         input.click(point, button, count, ctx).await?;
         let mut step = Step::new(ActionMethod::PhysicalClick);
+        // Scrolling the target into view is not an effect of the click.
+        step.baseline = Some(before);
         step.warnings
             .push("used physical input (no suitable UIA pattern)".into());
         Ok(step)
@@ -716,10 +839,16 @@ impl Engine {
                 step.after = out.props_after;
                 return Ok(step);
             }
-            let readback = out.props_after.as_ref().and_then(|a| a.value.clone());
-            if readback.as_deref() == Some(wanted.as_str()) {
+            let shows_wanted = |p: &UiProps| p.value.as_deref() == Some(wanted.as_str());
+            let landed = match &out.props_after {
+                Some(after) if shows_wanted(after) => Some(after.clone()),
+                // Some providers report the new value a moment later; retyping it before then
+                // would apply the text twice.
+                _ => self.poll_until(r, ctx, shows_wanted).await,
+            };
+            if let Some(after) = landed {
                 step.verified = true;
-                step.after = out.props_after;
+                step.after = Some(after);
                 return Ok(step);
             }
             // Read-back proves the semantic write did not take effect, so a physical retype
@@ -735,20 +864,21 @@ impl Engine {
         self.keyboard_fill(r, text, clear, ctx).await
     }
 
-    async fn focus_target(&self, r: &Resolved, ctx: &OperationContext) -> WinwrightResult<()> {
+    /// Focuses the target and returns its state with focus.
+    async fn focus_target(&self, r: &Resolved, ctx: &OperationContext) -> WinwrightResult<UiProps> {
         if let Some(w) = r.window
             && self.windows.foreground_window()?.map(|f| f.hwnd) != Some(w)
         {
             let _ = self.windows.focus_window(w);
         }
         let out = self.pattern(r, UiPatternAction::SetFocus, ctx).await?;
-        if out.props_after.as_ref().is_some_and(|a| a.focused) {
-            return Ok(());
+        if let Some(after) = out.props_after.filter(|a| a.focused) {
+            return Ok(after);
         }
         // Some providers take a moment to report focus.
         tokio::time::sleep(Duration::from_millis(50)).await;
         match self.uia.refresh(r.key, ctx).await {
-            Ok(p) if p.focused => Ok(()),
+            Ok(p) if p.focused => Ok(p),
             _ => Err(WinwrightError::WindowNotFocused { window: r.label() }),
         }
     }
@@ -761,7 +891,7 @@ impl Engine {
         ctx: &OperationContext,
     ) -> WinwrightResult<Step> {
         let input = self.input()?;
-        self.focus_target(r, ctx).await?;
+        let focused = self.focus_target(r, ctx).await?;
         if clear {
             input.press_keys(&[Key::Ctrl, Key::Char('a')], ctx).await?;
             input.press_keys(&[Key::Delete], ctx).await?;
@@ -769,17 +899,24 @@ impl Engine {
         input.type_text(text, ctx).await?;
         let mut step = Step::new(ActionMethod::PhysicalKeyboard);
         step.warnings.push("used physical keyboard input".into());
+        let wanted = if clear {
+            text.to_owned()
+        } else {
+            format!("{}{text}", focused.value.as_deref().unwrap_or_default())
+        };
+        step.baseline = Some(focused);
         if is_sensitive(&r.props) {
             step.warnings
                 .push("value not read back: sensitive field".into());
             return Ok(step);
         }
         if let Ok(after) = self.uia.refresh(r.key, ctx).await {
-            step.verified = match (&after.value, clear) {
-                (Some(v), true) => v == text,
-                (Some(v), false) => v.ends_with(text),
-                (None, _) => false,
-            };
+            // A readable value is the whole truth: the field must hold exactly the result.
+            if after.value.is_some() {
+                let expect = Expect::ExactValue(wanted);
+                step.verified = expect.met(&after);
+                step.expect = Some(expect);
+            }
             step.after = Some(after);
         }
         Ok(step)
@@ -797,17 +934,24 @@ impl Engine {
             )));
         }
         let input = self.input()?;
+        let mut step = Step::new(ActionMethod::PhysicalKeyboard);
         if let Some(r) = r {
             ensure_enabled(r)?;
-            self.focus_target(r, ctx).await?;
+            step.baseline = Some(self.focus_target(r, ctx).await?);
         }
         input.type_text(text, ctx).await?;
-        let mut step = Step::new(ActionMethod::PhysicalKeyboard);
         if let Some(r) = r
             && !is_sensitive(&r.props)
             && let Ok(after) = self.uia.refresh(r.key, ctx).await
         {
-            step.verified = after.value.as_deref().is_some_and(|v| v.contains(text));
+            if after.value.is_some() {
+                let expect = Expect::Typed {
+                    before: step.baseline.as_ref().and_then(|b| b.value.clone()),
+                    text: text.to_owned(),
+                };
+                step.verified = expect.met(&after);
+                step.expect = Some(expect);
+            }
             step.after = Some(after);
         }
         Ok(step)
@@ -815,10 +959,10 @@ impl Engine {
 
     async fn focus(&self, r: &Resolved, ctx: &OperationContext) -> WinwrightResult<Step> {
         ensure_enabled(r)?;
-        self.focus_target(r, ctx).await?;
+        let focused = self.focus_target(r, ctx).await?;
         let mut step = Step::new(ActionMethod::SetFocus);
         step.verified = true;
-        step.after = self.uia.refresh(r.key, ctx).await.ok();
+        step.after = Some(focused);
         Ok(step)
     }
 
@@ -881,7 +1025,8 @@ impl Engine {
                 None => out.props_after,
             };
             let now = after.as_ref().and_then(|a| a.toggle_state);
-            if target_state.is_none() || now == target_state || now == current {
+            // No reading at all is no reading: a toggle that lands late must not be undone.
+            if target_state.is_none() || now.is_none() || now == target_state || now == current {
                 break;
             }
             current = now;
@@ -1032,12 +1177,13 @@ impl Engine {
     ) -> WinwrightResult<Step> {
         validate_chord(keys).map_err(WinwrightError::invalid)?;
         let input = self.input()?;
+        let mut step = Step::new(ActionMethod::PhysicalKeyboard);
         if let Some(r) = r {
             ensure_enabled(r)?;
-            self.focus_target(r, ctx).await?;
+            step.baseline = Some(self.focus_target(r, ctx).await?);
         }
         input.press_keys(keys, ctx).await?;
-        Ok(Step::new(ActionMethod::PhysicalKeyboard))
+        Ok(step)
     }
 
     async fn read_text(
@@ -1090,6 +1236,10 @@ impl Engine {
             step.expect = Some(Expect::Selected);
             return Ok(step);
         };
+        if option.trim().is_empty() {
+            // An empty option would "contain"-match every item.
+            return Err(WinwrightError::invalid("option is empty"));
+        }
         let is_combo = r.props.role == ControlRole::ComboBox;
         let was_collapsed = r.props.has_pattern(UiPattern::ExpandCollapse)
             && r.props.expand_state == Some(ExpandState::Collapsed);
@@ -1106,9 +1256,44 @@ impl Engine {
             // Many combo boxes only materialize their items while open.
             let _ = self.pattern(r, UiPatternAction::Expand, ctx).await;
         }
-        // The text the container must show afterwards (combo boxes are verified by value).
-        let expected: String;
-        let mut step = match self.find_item(session, r, option, ctx).await {
+        let chosen = self.choose_option(session, r, option, is_combo, ctx).await;
+        // Success or not, a drop-down this action opened does not stay open.
+        self.collapse_if_opened(r, was_collapsed, ctx).await;
+        let (mut step, expected) = chosen?;
+        let shows_expected = |p: &UiProps| {
+            p.value
+                .as_deref()
+                .is_some_and(|v| v.trim().eq_ignore_ascii_case(&expected))
+        };
+        let now = self.uia.refresh(r.key, ctx).await?;
+        if is_combo {
+            step.verified = shows_expected(&now);
+            step.expect = Some(Expect::Value(expected.clone()));
+            if !step.verified {
+                step.warnings.push(format!(
+                    "the combo box still shows {:?}, not {expected:?}",
+                    now.value.as_deref().unwrap_or_default()
+                ));
+            }
+        } else if !step.verified {
+            step.verified = shows_expected(&now);
+        }
+        step.after = Some(now);
+        Ok(step)
+    }
+
+    /// Selects or invokes `option` (or writes it into an editable container) and commits a
+    /// classic drop-down whose list is still open. Returns the step and the text the container
+    /// must show afterwards (combo boxes are verified by value).
+    async fn choose_option(
+        &self,
+        session: &Session,
+        r: &Resolved,
+        option: &str,
+        is_combo: bool,
+        ctx: &OperationContext,
+    ) -> WinwrightResult<(Step, String)> {
+        let (mut step, expected) = match self.find_item(session, r, option, ctx).await {
             Ok(item) => {
                 if item.props.offscreen && item.props.has_pattern(UiPattern::ScrollItem) {
                     let _ = self
@@ -1121,54 +1306,37 @@ impl Engine {
                     (UiPatternAction::Invoke, ActionMethod::InvokePattern)
                 } else {
                     self.release(vec![item.key]).await;
-                    self.collapse_if_opened(r, was_collapsed, ctx).await;
                     return Err(WinwrightError::UnsupportedPattern {
                         element: item.label(),
                         pattern: "SelectionItem/Invoke".into(),
                     });
                 };
-                expected = item.props.name.trim().to_owned();
                 let out = self.pattern(&item, action, ctx).await;
                 self.release(vec![item.key]).await;
-                let out = match out {
-                    Ok(out) => out,
-                    Err(e) => {
-                        self.collapse_if_opened(r, was_collapsed, ctx).await;
-                        return Err(e);
-                    }
-                };
+                let out = out?;
                 let mut step = Step::new(method);
                 // For lists/tabs/trees the item's own state is the truth; a combo box is
-                // checked below by its value.
+                // checked by its value.
                 step.verified = !is_combo
                     && out
                         .props_after
                         .as_ref()
                         .is_some_and(|a| a.selected == Some(true));
-                step
+                (step, item.props.name.trim().to_owned())
             }
             Err(WinwrightError::ElementNotFound { .. })
                 if r.props.has_pattern(UiPattern::Value)
                     && r.props.value_read_only == Some(false) =>
             {
-                expected = option.trim().to_owned();
                 let out = self
                     .pattern(r, UiPatternAction::SetValue(option.to_owned()), ctx)
                     .await?;
                 let mut step = Step::new(ActionMethod::ValuePattern);
                 step.verified =
                     out.props_after.as_ref().and_then(|a| a.value.as_deref()) == Some(option);
-                step
+                (step, option.trim().to_owned())
             }
-            Err(e) => {
-                self.collapse_if_opened(r, was_collapsed, ctx).await;
-                return Err(e);
-            }
-        };
-        let shows_expected = |p: &UiProps| {
-            p.value
-                .as_deref()
-                .is_some_and(|v| v.trim().eq_ignore_ascii_case(&expected))
+            Err(e) => return Err(e),
         };
         if is_combo {
             let now = self.uia.refresh(r.key, ctx).await?;
@@ -1193,22 +1361,7 @@ impl Engine {
                 }
             }
         }
-        self.collapse_if_opened(r, was_collapsed, ctx).await;
-        let now = self.uia.refresh(r.key, ctx).await?;
-        if is_combo {
-            step.verified = shows_expected(&now);
-            step.expect = Some(Expect::Value(expected.clone()));
-            if !step.verified {
-                step.warnings.push(format!(
-                    "the combo box still shows {:?}, not {expected:?}",
-                    now.value.as_deref().unwrap_or_default()
-                ));
-            }
-        } else if !step.verified {
-            step.verified = shows_expected(&now);
-        }
-        step.after = Some(now);
-        Ok(step)
+        Ok((step, expected))
     }
 
     /// Closes a drop-down this action opened, if it is still open.
@@ -1356,6 +1509,29 @@ impl Engine {
         if self.windows.is_more_privileged(window.process_id) {
             return Err(WinwrightError::UipiBlocked { target: label });
         }
+        let size = |r: &PhysicalRect| {
+            (
+                i64::from(r.right) - i64::from(r.left),
+                i64::from(r.bottom) - i64::from(r.top),
+            )
+        };
+        let expected_bounds = match &action {
+            WindowAction::Move { x, y, .. } => {
+                let (w, h) = size(&window.bounds);
+                Some(window_rect(*x, *y, w, h)?)
+            }
+            WindowAction::Resize { width, height, .. } => Some(window_rect(
+                window.bounds.left,
+                window.bounds.top,
+                i64::from(*width),
+                i64::from(*height),
+            )?),
+            WindowAction::SetBounds { bounds, .. } => {
+                let (w, h) = size(bounds);
+                Some(window_rect(bounds.left, bounds.top, w, h)?)
+            }
+            _ => None,
+        };
         let mut lease = Some(self.lease.try_acquire(&session.id)?);
         let proposed = ProposedAction {
             tool: action.name().into(),
@@ -1383,22 +1559,6 @@ impl Engine {
             .await?;
         let hwnd = window.hwnd;
         let mut warnings = Vec::new();
-        let expected_bounds = match &action {
-            WindowAction::Move { x, y, .. } => Some(PhysicalRect::new(
-                *x,
-                *y,
-                x + window.bounds.width(),
-                y + window.bounds.height(),
-            )),
-            WindowAction::Resize { width, height, .. } => Some(PhysicalRect::new(
-                window.bounds.left,
-                window.bounds.top,
-                window.bounds.left + width,
-                window.bounds.top + height,
-            )),
-            WindowAction::SetBounds { bounds, .. } => Some(*bounds),
-            _ => None,
-        };
         match &action {
             WindowAction::Focus { .. } => self.windows.focus_window(hwnd)?,
             WindowAction::Move { .. }

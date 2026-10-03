@@ -172,7 +172,17 @@ impl Engine {
         Duration::from_secs(self.config.automation.reference_ttl_seconds)
     }
 
+    /// After an emergency stop every entry point refuses, read-only ones included, until the
+    /// user re-enables Winwright. Session-bound calls also fail through their cancelled session.
+    pub(crate) fn ensure_running(&self) -> WinwrightResult<()> {
+        if self.sessions.is_stopped() {
+            return Err(WinwrightError::Cancelled);
+        }
+        Ok(())
+    }
+
     pub(crate) fn authorize(&self, action: ProposedAction) -> WinwrightResult<()> {
+        self.ensure_running()?;
         let verdict = self.policy.evaluate(&action);
         match verdict.decision {
             PermissionDecision::Allow => Ok(()),
@@ -196,6 +206,7 @@ impl Engine {
         summary: String,
         lease: &mut Option<LeaseGuard>,
     ) -> WinwrightResult<bool> {
+        self.ensure_running()?;
         let verdict = self.policy.evaluate(&action);
         match verdict.decision {
             PermissionDecision::Allow => Ok(false),
@@ -239,9 +250,15 @@ impl Engine {
         }
     }
 
-    /// Refuses to touch Winwright's own windows (its confirmation dialogs above all).
+    /// Refuses to touch Winwright's own windows (its confirmation dialogs above all), including
+    /// those of other Winwright processes: a CLI call must not answer the MCP server's dialog.
     pub(crate) fn guard_self(&self, process_id: u32, what: &str) -> WinwrightResult<()> {
-        if process_id == std::process::id() {
+        if process_id == std::process::id()
+            || self
+                .windows
+                .process_name(process_id)
+                .eq_ignore_ascii_case("winwright.exe")
+        {
             return Err(WinwrightError::ActionBlocked {
                 reason: format!("{what} belongs to Winwright itself and cannot be automated"),
             });
@@ -305,6 +322,7 @@ impl Engine {
 
     /// Exactly one window must match; several matches are reported, never guessed between.
     pub fn find_window(&self, selector: &WindowSelector) -> WinwrightResult<WindowInfo> {
+        self.ensure_running()?;
         if selector.is_empty() {
             return Err(WinwrightError::invalid("window selector is empty"));
         }
@@ -507,7 +525,8 @@ impl Engine {
             let mut state = session.state();
             state.generation += 1;
             let generation = state.generation;
-            let mut compressor = Compressor::new(&request, generation, now);
+            let mut compressor =
+                Compressor::new(&request, generation, now).with_raw_child_cap(limits.max_children);
             for (tree, window) in &trees {
                 compressor.add_tree(tree, &mut state.refs, *window);
             }
@@ -553,7 +572,8 @@ impl Engine {
             ));
             if compressor.truncated {
                 warnings.push(
-                    "snapshot truncated: raise maxNodes/maxDepth or snapshot a subtree".into(),
+                    "snapshot truncated: raise maxNodes/maxDepth/maxListItems or snapshot a subtree"
+                        .into(),
                 );
             }
             let snapshot = DesktopSnapshot {
