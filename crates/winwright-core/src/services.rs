@@ -225,10 +225,16 @@ impl Engine {
         self.guard_self(resolved.props.process_id, &resolved.label())?;
         // Again, right before drawing: a confirmation may have opened while resolving.
         self.ensure_no_confirmation_open()?;
-        let overlay = self
-            .overlay
-            .as_deref()
-            .ok_or_else(|| unavailable("overlay"))?;
+        let overlay = self.overlay.as_deref().ok_or_else(|| {
+            // Turned off by the user is a decision, not a fault.
+            if self.config.overlay.enabled {
+                unavailable("overlay")
+            } else {
+                WinwrightError::ActionBlocked {
+                    reason: "overlays are disabled in config (overlay.enabled)".into(),
+                }
+            }
+        })?;
         let rect = resolved
             .props
             .bounds

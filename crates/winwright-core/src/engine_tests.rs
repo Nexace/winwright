@@ -2531,6 +2531,21 @@ async fn nothing_is_drawn_while_a_confirmation_is_open() {
 }
 
 #[tokio::test]
+async fn overlays_turned_off_in_config_are_blocked_not_unavailable() {
+    let fake = Fake::new();
+    let mut config = Config::default();
+    config.overlay.enabled = false;
+    let engine = Engine::new(config, fake.clone(), fake.clone());
+    let session = engine.session(&sid(), "test").unwrap();
+    let err = engine
+        .highlight(&session, highlight_request(by("Button", "Target")))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code().as_str(), "ACTION_BLOCKED", "{err}");
+    assert!(err.to_string().contains("overlay.enabled"), "{err}");
+}
+
+#[tokio::test]
 async fn prompts_show_the_resolved_program_and_every_argument() {
     use winwright_contracts::system::LaunchRequest;
     let fake = Fake::new();
