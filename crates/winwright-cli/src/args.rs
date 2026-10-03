@@ -97,7 +97,8 @@ pub enum Command {
     Audit(AuditArgs),
     /// Open the Inspector window: browse a window's UI tree, pick, highlight, copy locators.
     Inspector,
-    /// Start the JARVIS voice assistant (apps/jarvis) with Winwright as its desktop hands.
+    /// Start the chat and voice assistant (page at http://localhost:8787/) with Winwright as
+    /// its desktop hands.
     Assistant,
 }
 

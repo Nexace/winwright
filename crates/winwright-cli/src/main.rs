@@ -845,7 +845,8 @@ Connection: close
     );
 }
 
-/// Runs JARVIS (a Node app) until it exits. It talks to Winwright by launching
+/// Runs the assistant (the JARVIS bridge, a Node app, serving Winwright's own chat page)
+/// until it exits. It talks to Winwright by launching
 /// `winwright mcp`, so every Winwright safety gate (confirmations, default-deny shell,
 /// Ctrl+Alt+Esc, audit log) applies exactly as for any other MCP client.
 fn run_assistant() -> Result<(), WinwrightError> {
@@ -889,15 +890,19 @@ fn run_assistant() -> Result<(), WinwrightError> {
             "warning: hotkey {chord} unavailable ({err}); press Space in the JARVIS page instead."
         ),
     }
-    println!("Starting JARVIS from {} (Ctrl+C to stop).", dir.display());
     println!(
-        "Open the printed URL in your browser and click INITIALISE; then press {chord} to talk."
+        "Starting the assistant from {} (Ctrl+C to stop).",
+        dir.display()
     );
+    println!("Open http://localhost:{port}/ in your browser, then type, or press {chord} to talk.");
+    // Only the bridge: it serves Winwright's own page (WINWRIGHT_FACE), so there is no
+    // dev server and none of the JARVIS 3D interface.
     let status = std::process::Command::new("node")
-        .arg("scripts/start.mjs")
+        .arg("bridge/server.mjs")
         .current_dir(&dir)
         .env("JARVIS_WINWRIGHT_EXE", exe)
         .env("JARVIS_PTT_TOKEN", &token)
+        .env("WINWRIGHT_FACE", "1")
         .status()
         .map_err(|e| {
             unavailable(format!(
@@ -909,7 +914,7 @@ fn run_assistant() -> Result<(), WinwrightError> {
     if status.success() {
         Ok(())
     } else {
-        Err(unavailable(format!("JARVIS exited with {status}")))
+        Err(unavailable(format!("the assistant exited with {status}")))
     }
 }
 
