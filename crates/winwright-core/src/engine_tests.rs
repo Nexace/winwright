@@ -2105,6 +2105,96 @@ async fn delete_key_outside_text_needs_confirmation() {
 }
 
 #[tokio::test]
+async fn win_chords_and_send_shortcuts_need_confirmation() {
+    let fake = Fake::new();
+    let input = Arc::new(FakeInput::default());
+    let engine = engine(&fake).with_input(input.clone());
+    let session = engine.session(&sid(), "test").unwrap();
+    let press =
+        |target: Option<ElementTarget>, keys: Vec<Key>| DesktopAction::Press { target, keys };
+    for (target, keys) in [
+        (None, vec![Key::Win, Key::Char('r')]),
+        (None, vec![Key::Win]),
+        (Some(by("Edit", "Name:")), vec![Key::Ctrl, Key::Enter]),
+        (Some(by("Document", "Notes")), vec![Key::Alt, Key::Enter]),
+    ] {
+        let err = engine
+            .execute(&session, press(target, keys.clone()))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code().as_str(), "CONFIRMATION_REQUIRED", "{keys:?}");
+    }
+    assert!(input.log.lock().unwrap().is_empty(), "no key was sent");
+    // Plain Enter in an ordinary field, and Space in a text field, stay ordinary.
+    for keys in [vec![Key::Enter], vec![Key::Space]] {
+        engine
+            .execute(&session, press(Some(by("Edit", "Name:")), keys))
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn a_typed_line_break_is_enter_on_the_field() {
+    let fake = Fake::new();
+    {
+        let mut s = fake.s();
+        s.els.insert(
+            60,
+            el(ControlRole::Edit, "Type a message", "", &[UiPattern::Value]),
+        );
+        s.els.get_mut(&1).unwrap().children.push(60);
+    }
+    let input = Arc::new(FakeInput::default());
+    let engine = engine(&fake).with_input(input.clone());
+    let session = engine.session(&sid(), "test").unwrap();
+    let typing = |target: Option<ElementTarget>, text: &str| DesktopAction::TypeText {
+        target,
+        text: text.into(),
+    };
+    for (target, text) in [
+        // Enter in a message box sends the message.
+        (Some(by("Edit", "Type a message")), "hi\n"),
+        (Some(by("Edit", "Type a message")), "hi\r"),
+        // After a Tab, Enter reaches a control nobody judged.
+        (Some(by("Edit", "Name:")), "Ann\t\n"),
+    ] {
+        let err = engine
+            .execute(&session, typing(target, text))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code().as_str(), "CONFIRMATION_REQUIRED", "{text:?}");
+    }
+    assert!(input.log.lock().unwrap().is_empty(), "nothing was typed");
+    // Without a target, the focused element is judged.
+    engine
+        .execute(
+            &session,
+            DesktopAction::Focus {
+                target: by("Edit", "Type a message"),
+            },
+        )
+        .await
+        .unwrap();
+    let err = engine
+        .execute(&session, typing(None, "hi\n"))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code().as_str(), "CONFIRMATION_REQUIRED");
+    // Line breaks in a document, a Tab with no Enter after it, and plain text stay ordinary.
+    for (target, text) in [
+        (by("Document", "Notes"), "one\ntwo\n"),
+        (by("Edit", "Name:"), "\tAnn"),
+        (by("Edit", "Type a message"), "hi"),
+    ] {
+        engine
+            .execute(&session, typing(Some(target), text))
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
 async fn wait_rejects_a_bad_value_pattern_up_front() {
     let fake = Fake::new();
     let engine = engine(&fake);

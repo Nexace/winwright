@@ -94,6 +94,22 @@ pub fn classify_activation(name: &str, automation_id: &str) -> ActionRisk {
     }
 }
 
+/// Words naming a field people write messages in, where Enter usually sends.
+const COMPOSER: &[&str] = &["message", "messages", "reply", "comment", "chat", "compose"];
+
+/// Risk of pressing Enter in a text field with this name: Enter submits the field's form, and
+/// in a message box it sends the message.
+pub fn classify_submit(name: &str, automation_id: &str) -> ActionRisk {
+    let mut tokens = words(name);
+    tokens.extend(words(&split_camel(automation_id)));
+    let risk = classify_activation(name, automation_id);
+    if COMPOSER.iter().any(|p| contains_phrase(&tokens, p)) {
+        risk.max(ActionRisk::Sensitive)
+    } else {
+        risk
+    }
+}
+
 /// `btnSaveAs` -> `btn Save As`; an acronym ends before its last capital (`IDDelete` ->
 /// `ID Delete`).
 fn split_camel(id: &str) -> String {
@@ -282,6 +298,30 @@ mod tests {
                 "{program}"
             );
         }
+    }
+
+    #[test]
+    fn enter_in_a_message_box_sends() {
+        for (name, id) in [
+            ("Type a message", ""),
+            ("Reply", ""),
+            ("Add a comment", ""),
+            ("", "chatInput"),
+            ("", "composeBox"),
+        ] {
+            assert_eq!(
+                classify_submit(name, id),
+                ActionRisk::Sensitive,
+                "{name:?} {id:?}"
+            );
+        }
+        for name in ["Search", "Address and search bar", "Name:", "Text editor"] {
+            assert_eq!(classify_submit(name, ""), ActionRisk::Normal, "{name}");
+        }
+        assert_eq!(
+            classify_submit("Type DELETE to confirm", ""),
+            ActionRisk::Destructive
+        );
     }
 
     #[test]

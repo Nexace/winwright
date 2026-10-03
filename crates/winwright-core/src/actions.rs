@@ -60,7 +60,7 @@ fn describe(
     }
 }
 use winwright_contracts::{WinwrightError, WinwrightResult};
-use winwright_security::{classify_activation, is_sensitive, redacted_value};
+use winwright_security::{classify_activation, classify_submit, is_sensitive, redacted_value};
 
 use crate::engine::Engine;
 use crate::find::Resolved;
@@ -214,6 +214,28 @@ fn is_text_input(p: &UiProps) -> bool {
         || (p.has_pattern(UiPattern::Value) && p.value_read_only == Some(false))
 }
 
+/// Risk of Enter reaching `receiver`: it activates a control, and submits a text field (in a
+/// message box, that sends the message).
+fn enter_risk(receiver: Option<&UiProps>) -> ActionRisk {
+    receiver.map_or(ActionRisk::Normal, |p| {
+        if is_text_input(p) {
+            classify_submit(&p.name, &p.automation_id)
+        } else {
+            classify_activation(&p.name, &p.automation_id)
+        }
+    })
+}
+
+/// Typed `\n` and `\r` are Enter presses and `\t` is Tab (winwright-input), so typed text can
+/// submit the field it goes into or, after a Tab, whatever control has focus by then.
+fn typed_risk(text: &str, receiver: Option<&UiProps>) -> ActionRisk {
+    match text.rfind(['\n', '\r']) {
+        None => ActionRisk::Normal,
+        Some(last_enter) if text[..last_enter].contains('\t') => ActionRisk::Sensitive,
+        Some(_) => enter_risk(receiver),
+    }
+}
+
 /// Window edges beyond this are refused; real virtual desktops are far smaller.
 const MAX_WINDOW_COORD: i64 = 1 << 20;
 
@@ -298,6 +320,7 @@ impl Engine {
                 })
         };
         let sensitive_target = target.is_some_and(|r| is_sensitive(&r.props));
+        let receiver = target.map(|r| &r.props).or(focused);
         let (capability, risk) = match action {
             DesktopAction::ReadText { .. } if sensitive_target => {
                 (Capability::ReadSensitive, ActionRisk::Sensitive)
@@ -308,29 +331,38 @@ impl Engine {
             | DesktopAction::ScrollIntoView { .. }
             | DesktopAction::Expand { .. }
             | DesktopAction::Collapse { .. } => (Capability::Interact, ActionRisk::Normal),
-            DesktopAction::Fill { .. } | DesktopAction::TypeText { .. } if sensitive_target => {
-                (Capability::Interact, ActionRisk::Sensitive)
-            }
-            DesktopAction::Fill { .. } | DesktopAction::TypeText { .. } => {
-                (Capability::Interact, ActionRisk::Normal)
-            }
+            // Fill types too when the field has no settable value.
+            DesktopAction::Fill { text, .. } | DesktopAction::TypeText { text, .. } => (
+                Capability::Interact,
+                typed_risk(text, receiver).max(if sensitive_target {
+                    ActionRisk::Sensitive
+                } else {
+                    ActionRisk::Normal
+                }),
+            ),
             DesktopAction::Press { keys, .. } => {
-                // Delete outside a text field deletes the item itself (a file in Explorer).
-                let receiver = target.map(|r| &r.props).or(focused);
-                let deletes = keys.iter().any(|k| matches!(k, Key::Delete))
-                    && !receiver.is_some_and(is_text_input);
-                // Enter/Space on a focused control activates it.
-                let activates = keys.iter().any(|k| matches!(k, Key::Enter | Key::Space));
-                (
-                    Capability::PhysicalInput,
-                    if deletes {
-                        ActionRisk::Destructive
-                    } else if activates {
-                        activation()
+                let has = |key| keys.contains(&key);
+                let in_text = receiver.is_some_and(is_text_input);
+                // Win chords open Run, the Start search and system menus, which start anything;
+                // Ctrl+Enter and Alt+Enter send in most mail and chat apps, whatever has focus.
+                let mut risk =
+                    if has(Key::Win) || (has(Key::Enter) && (has(Key::Ctrl) || has(Key::Alt))) {
+                        ActionRisk::Sensitive
                     } else {
                         ActionRisk::Normal
-                    },
-                )
+                    };
+                if has(Key::Enter) {
+                    risk = risk.max(enter_risk(receiver));
+                }
+                // Space activates a focused control; in a text field it is just a space.
+                if has(Key::Space) && !in_text {
+                    risk = risk.max(activation());
+                }
+                // Delete outside a text field deletes the item itself (a file in Explorer).
+                if has(Key::Delete) && !in_text {
+                    risk = risk.max(ActionRisk::Destructive);
+                }
+                (Capability::PhysicalInput, risk)
             }
             DesktopAction::Click { force_physical, .. } => (
                 if *force_physical {
@@ -505,23 +537,25 @@ impl Engine {
         } else {
             None
         };
-        // Enter/Space/Delete without a target act on whatever has focus: judge that element.
-        let focused = match &action {
-            DesktopAction::Press { keys, .. }
-                if resolved.is_none()
-                    && keys
-                        .iter()
-                        .any(|k| matches!(k, Key::Enter | Key::Space | Key::Delete)) =>
-            {
-                match self.uia.inspect(InspectTarget::Focused, &ctx).await {
-                    Ok(hit) => {
-                        self.release(vec![hit.key]).await;
-                        Some(hit.props)
-                    }
-                    Err(_) => None,
+        // Enter/Space/Delete (or a typed line break) without a target act on whatever has
+        // focus: judge that element.
+        let acts_on_focus = match &action {
+            DesktopAction::Press { keys, .. } => keys
+                .iter()
+                .any(|k| matches!(k, Key::Enter | Key::Space | Key::Delete)),
+            DesktopAction::TypeText { text, .. } => text.contains(['\n', '\r']),
+            _ => false,
+        };
+        let focused = if resolved.is_none() && acts_on_focus {
+            match self.uia.inspect(InspectTarget::Focused, &ctx).await {
+                Ok(hit) => {
+                    self.release(vec![hit.key]).await;
+                    Some(hit.props)
                 }
+                Err(_) => None,
             }
-            _ => None,
+        } else {
+            None
         };
         let proposed = self.proposed(&action, resolved.as_ref(), focused.as_ref());
         *audit_target = proposed.target.clone();
