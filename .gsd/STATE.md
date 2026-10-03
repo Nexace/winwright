@@ -1,7 +1,7 @@
 # Winwright State
 
 **Updated:** 2026-10-03
-**Current phase:** CHECKPOINT. Tree green; the debugging batch is committed (c48e464..39a2a16). Next: remaining security fixes, see "CHECKPOINT 2026-10-03".
+**Current phase:** CHECKPOINT. Tree green; security audit H1-L5 and the leftover bugs are fixed and committed (327fa5f..e40dadf). Next: taint rule, see "CHECKPOINT 2026-10-03".
 **Toolchain:** Rust 1.98.1 MSVC (pinned), windows-rs 0.62.2, tokio 1.53, schemars 1.2, regex 1.13, rmcp 3.5
 
 ## Done
@@ -26,17 +26,24 @@
 - Verification hardening: combo select verified by the combo's value (Enter commit only while the
   list is open, focused, and in front); precise expectations re-checked up to 600 ms for providers
   that update asynchronously; tri-state toggle never double-toggles.
-- Tests: all workspace tests pass; clippy `-D warnings` clean. Live: `live_fixture` 7/7,
-  `mcp_stdio` 2/2, `live_confirm` 1/1.
+- Security audit H1-L5 (2026-10-03, see checkpoint): hardware-only approval, arming only while
+  in front, send shortcuts/Win chords/typed line breaks, launch allowlists, classifier hardening,
+  dialog context, own folders protected, risky copies/moves confirmed, prompts show the resolved
+  program and all arguments, reads and screenshots audited, 128 KB output cap.
+- Tests: all workspace tests pass; clippy `-D warnings` clean. Live: `live_confirm` 2/2 and
+  `live_desktop` 3/3 (2026-10-03); `live_fixture` 7/7 and `mcp_stdio` 2/2 last run before the
+  audit fixes (not re-run: they use the desktop).
 
 ## How to verify on resume
 - `cargo test --workspace`
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `cargo test -p winwright-cli --test live_fixture --test mcp_stdio -- --ignored --test-threads=1`
   (opens the Win32 fixture; UIA patterns plus one guarded Enter for the combo; ~8 s)
+- `cargo test -p winwright-overlay --test live_confirm -- --ignored --test-threads=1 --skip manual_`
+  (shows the confirm dialog twice, ~5 s; do not click it). `... manual_` asks a person to click Allow.
 
 ## Next (in order; plan in .gsd/INTEGRATION.md "Decisions and changes from the plan review")
-1. Remaining security fixes (list in the checkpoint).
+1. Re-run `live_fixture` + `mcp_stdio` once the user okays using the desktop (~8 s).
 2. Taint rule (web/Notion content read -> desktop changes need confirmation).
 3. Phase 7 physical-input live test (ask the user first; moves the mouse ~10 s).
 4. JARVIS end to end, then ElevenLabs (user sets ELEVENLABS_API_KEY as a user env var).
@@ -63,13 +70,22 @@ Dropped: Phase 1b, Phase 9, Phase 12, local speech models (Whisper/Kokoro), Jev.
 - Win32 list/tab selection via UIA may skip the app's change notification (e.g. LBN_SELCHANGE).
 - Mixed-DPI multi-monitor untested (single monitor).
 - MCP loopback HTTP transport not built (stdio only).
+- Dialog context (M1) covers owned windows and `#32770` dialogs; in-window dialogs (WinUI
+  ContentDialog, web modals) are judged by the button name only.
+- UI-driven execution remains possible without the shell gates: typing a command into Explorer's
+  address bar or the Run box (Win chords and Enter in "Open:"-style fields are judged, the
+  address bar is not).
+- `app_launch` URI allowlist is fixed in code (http, https, mailto, ms-settings, shell:<folder>);
+  no config for extra schemes yet.
+- Protecting the exe folder (M3) means file operations are refused in the folder winwright.exe
+  runs from (e.g. Downloads if run from there): install it in its own folder.
 
 ## JARVIS integration (2026-10-01)
 - `apps/jarvis` = vendored github.com/adewaskar/jarvis (MIT). Bridge patched to add a `winwright` MCP server when `JARVIS_WINWRIGHT_EXE` is set and to pass its tools through `decideTool` (Winwright enforces its own gates). `winwright assistant` launches it; it refuses until `npm install` is run in `apps/jarvis` (not auto-run: large download).
 - Not yet run live (needs `npm install`, Chrome, and the user's Claude Code login). Next: run it once with the user.
 
 ## CHECKPOINT 2026-10-03 (resume here)
-State of the tree: `cargo fmt --check`, `cargo clippy --workspace --all-targets -D warnings`, `cargo test --workspace` all pass; live `live_fixture` 7/7, `mcp_stdio` 2/2, `live_confirm` 1/1 (run 2026-10-03). `scripts/check.ps1` runs the same (`-Live` adds live tests).
+State of the tree: `cargo fmt --check`, `cargo clippy --workspace --all-targets -D warnings`, `cargo test --workspace` all pass (2026-10-03, after the audit fixes); live `live_confirm` 2/2 and `live_desktop` 3/3 after the fixes, `live_fixture` 7/7 and `mcp_stdio` 2/2 before them. `scripts/check.ps1` runs the same (`-Live` adds live tests).
 
 COMMITTED 2026-10-03 as c48e464 (contracts/mcp/cli, incl. idle timer + push-to-talk), 1b6a954 files, c4afe04 uia, 9bb432d shell, 8c3ad61 overlay, e276d97 inspector, 39a2a16 core/security:
 - contracts/mcp/cli: 20 fixes (camelCase file-op fields, typo-rejecting actions, stdout purity in mcp mode, negative coords, config switches honoured, overflow panics, CANCELLED hint, real elapsed ms) + my MCP idle timer (WINWRIGHT_IDLE_MINUTES) + `winwright assistant` push-to-talk hotkey (Ctrl+Space, /ptt relay).
@@ -77,15 +93,16 @@ COMMITTED 2026-10-03 as c48e464 (contracts/mcp/cli, incl. idle timer + push-to-t
 - overlay/inspector: confirm dialog (abandon-before-poll, no WM_CLOSE to recycled handle, typing cannot approve, BN_CLICKED from Allow only, per-thread DPI), tray set() leaks + single menu, Inspector races/splitter/Esc/clipboard fixes.
 - core/security: every Engine entry refuses after emergency stop (ensure_running); guard_self refuses any winwright.exe process; interpreters (cmd, powershell, python, wscript, mshta, rundll32, ..., and winwright itself) count as shell execution so app_launch of them is default-denied; PowerShell keeps its own switch in exec; shell_execute gets its requested timeout; Delete key, risky Select options and Enter on send-style buttons need confirmation; redaction/classifier extensions; snapshot/diff/wait fixes. 93 core tests.
 
-Remaining security audit items (not yet done):
-- H1: Allow must accept only real hardware input (reject injected/BM_CLICK/UIA Invoke via GetCurrentInputMessageSource); document: no voice-control/OSK approval.
-- H2 rest: classify the focused element when keys have no target; Ctrl/Alt+Enter, Win chords, newline in type_text.
-- H3: launch allowlist for URI schemes and file types; no UNC executables; .lnk/.url targets.
-- M1 classifier: strip zero-width/format chars, more verbs, dialog context. M2: is_sensitive uses labeled_by/help_text.
-- M3: protect %APPDATA%\winwright, %LOCALAPPDATA%\winwright, the exe folder; confirm move/rename. M4: confirm UNC/cross-volume/sensitive-source copies.
-- M5: guard_self in highlight; no overlays while a confirm is pending. M6: show full args + resolved path in prompts.
-- L2 audit screenshots/reads. L4 output caps. L5 arm delay from first activation.
-- Other reported: capture/input timeouts still say 0 ms (use ctx.started); config-disabled backend should be ACTION_BLOCKED; load_config value sanity; UIA depth-limit truncation never reported.
+Security audit items, all DONE 2026-10-03 (origin = github.com/Nexace/winwright, private):
+- H1 327fa5f: Allow counts only for input whose GetCurrentInputMessageSource origin is IMO_HARDWARE, handled by the dialog's own loop (BM_CLICK, forged WM_COMMAND, UIA Invoke, SendInput, OSK, voice control refused; documented). Live-verified both ways: forged clicks refused; a real mouse click approved (the user clicked a test dialog).
+- H2 d5a84fe: Win chords and Ctrl/Alt+Enter confirm; Enter in a message/reply/comment/chat/compose field confirms (classify_submit); typed \n/\r judged as Enter on the field (focused one when untargeted), Tab before the last line break confirms.
+- H3 3736b4d: URI scheme allowlist; default-handler opens only for document/image/media types (.lnk/.url/scripts/unknown refused); bare names via System32/PATH/App Paths registry, never ShellExecute search; UNC/device/mapped-drive executables refused before any filesystem access.
+- M1/M2 524bbaf: names normalized (format chars dropped, fullwidth folded), more verbs, dialog context for affirmative buttons; is_sensitive reads labeled_by/help_text.
+- M3/M4 bd41edc: own config/log/exe folders protected (both spellings: MSIX redirects AppData); move/rename confirm; copies judged by transfer_risk (share, other volume, secrets, whole drives/profiles).
+- M5/M6 97d726c: highlight guard_self + refused (and overlays cleared) while a confirm is open; prompts show resolved program + all args (600-char cap); policy judges the stricter of requested/resolved program; exec runs the path it resolved; dialog escapes control/bidi chars.
+- L5 2b07b80: arming starts at each real activation, disarms on deactivation, and checks foreground + elapsed (forged WM_ACTIVATE/WM_TIMER cannot arm early).
+- L2 755ad51 audit reads/screenshots/file reads; L4 d74cf6e 128 KB text cap in MCP.
+- Bugs: c38315e real elapsed in capture/input timeouts; 6414e1f overlay disabled -> ACTION_BLOCKED; 4d40fd0 config value ranges + loopback-only httpHost; e40dadf depth-limit truncation reported.
 
 Nothing is running (JARVIS and Winwright stopped). Final cleanup still owed: `cargo clean` (~11 GB), apps/jarvis/node_modules if unused.
 
