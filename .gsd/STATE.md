@@ -54,7 +54,10 @@
 1. Assistant end to end in Brave with the user (`winwright`): voice round trip, then the taint
    check ("weather in Pune", then "Open Notepad" must show Winwright's dialog). Then the user's
    feedback on the page's look.
-2. Reports + Notion memory (cloud, user's choice), last.
+2. Reports + Notion memory: reports and local memory DONE 2026-10-04 (see INTEGRATION.md
+   "Memory and reports"). Notion mirror waits on the user: no Notion MCP server is configured.
+3. The user retests the confirm dialog in Codex after the focus fix (a907911): create a file on
+   the Desktop, then delete it; one click on Allow should work.
 Dropped: Phase 1b, Phase 9, Phase 12, local speech models (Whisper/Kokoro), Jev.
 
 ## Decisions

@@ -1,6 +1,8 @@
 /target
 *.pdb
 /.claude/
+# The assistant's task reports: personal, never committed.
+/reports/
 .env
 .env.*
 !.env.example

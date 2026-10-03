@@ -21,16 +21,28 @@ import { query } from '@anthropic-ai/claude-agent-sdk'
 import { displayServer } from './panels.mjs'
 import { chromeAvailable, chromeServer } from './chrome.mjs'
 import { bringsOutsideContent, taintMarker } from './taint.mjs'
+import { isTask, loadMemory, newTurn, writeReport } from './reports.mjs'
 import { WINWRIGHT_PROMPT, serveFace } from './winwright-face.mjs'
+import { fileURLToPath } from 'node:url'
 import { timingSafeEqual } from 'node:crypto'
 import { homedir, tmpdir } from 'node:os'
 import { readFileSync, realpathSync } from 'node:fs'
 import { readFile, realpath, stat } from 'node:fs/promises'
 import { isAbsolute, join, relative, resolve as resolvePath } from 'node:path'
 import { openRemote, proxyError, vetTarget, PROXY_UA } from './net.mjs'
-import { probeUrl, renderPage } from './page.mjs'
+import { renderPage } from './page.mjs'
 
 const PORT = Number(process.env.JARVIS_BRIDGE_PORT ?? 8787)
+
+/**
+ * Where task reports go (reports.mjs): `reports/` in the Winwright checkout by
+ * default, which git ignores. JARVIS_REPORTS=0 turns reports and memory off.
+ */
+const REPORTS_DIR =
+  process.env.JARVIS_REPORTS === '0'
+    ? null
+    : (process.env.JARVIS_REPORTS_DIR ??
+      fileURLToPath(new URL('../../../reports', import.meta.url)))
 
 /**
  * A crash here takes the whole assistant down mid-sentence, and most of what
@@ -899,6 +911,7 @@ console.log(
   `[jarvis] speech ${elevenKey() ? 'via ElevenLabs (key from MCP config)' : 'using browser fallback voice'}`,
 )
 console.log(`[jarvis] model ${MODEL} · effort ${EFFORT}`)
+console.log(`[jarvis] task reports and memory: ${REPORTS_DIR ?? 'off (JARVIS_REPORTS=0)'}`)
 console.log(
   `[jarvis] writes ${ALLOW_WRITES ? 'ENABLED' : 'disabled'}` +
     (ALLOW_WRITES ? '' : ' — set JARVIS_ALLOW_WRITES=1 to permit shell/file/device actions'),
@@ -968,7 +981,12 @@ wss.on('connection', (socket) => {
   let closed = false
   const inbox = []
 
+  /** The turn in flight, for its report; and whether outside content was read. */
+  let turn = null
+  let readOutside = false
+
   async function* userMessages() {
+    let first = true
     while (!closed) {
       const text =
         inbox.shift() ??
@@ -976,9 +994,13 @@ wss.on('connection', (socket) => {
           deliver = resolve
         }))
       if (closed || text == null) return
+      // A new conversation starts with the newest reports as memory.
+      const memory = first && REPORTS_DIR ? loadMemory(REPORTS_DIR) : ''
+      first = false
+      turn = newTurn(text)
       yield {
         type: 'user',
-        message: { role: 'user', content: text },
+        message: { role: 'user', content: memory ? `${memory}\n\n${text}` : text },
         parent_tool_use_id: null,
       }
     }
@@ -1058,7 +1080,10 @@ wss.on('connection', (socket) => {
 
   const announceTool = (id, name) => {
     if (!name || (id && seenTools.has(id))) return
-    if (id) seenTools.add(id)
+    if (id) {
+      seenTools.add(id)
+      turn?.ran.set(id, name)
+    }
     // The display tool isn't work being done, it's the HUD drawing itself —
     // announcing it would put "jarvis · display" in the tool badge and trigger
     // a "working on it" filler for something already on screen.
@@ -1144,7 +1169,9 @@ wss.on('connection', (socket) => {
           {
             hooks: [
               async (input) => {
-                if (!taint || !bringsOutsideContent(input.tool_name)) return {}
+                const outside = bringsOutsideContent(input.tool_name)
+                if (outside) readOutside = true
+                if (!taint || !outside) return {}
                 try {
                   taint.mark()
                   return {}
@@ -1245,6 +1272,7 @@ wss.on('connection', (socket) => {
             for (const block of blocks) {
               if (block?.type === 'tool_result') {
                 settleTool(block.tool_use_id, block.is_error === true)
+                if (block.is_error === true) turn?.failed.add(block.tool_use_id)
               }
             }
             break
@@ -1272,6 +1300,19 @@ wss.on('connection', (socket) => {
                 message: RESULT_FAILURES[msg.subtype] ?? RESULT_FAILURES.default,
               })
             }
+            // A turn that did work leaves a report (names and summaries only).
+            if (turn && REPORTS_DIR && isTask(turn)) {
+              turn.outside = readOutside
+              try {
+                writeReport(REPORTS_DIR, turn, {
+                  outcome: msg.subtype === 'success' ? 'done' : msg.subtype,
+                  answer: msg.result ?? '',
+                })
+              } catch (err) {
+                console.error(`[jarvis] could not write the task report: ${err}`)
+              }
+            }
+            turn = null
             // Whatever was waiting on this turn to finish can go now. This is
             // the only place a turn is genuinely over.
             finishTurn?.()

@@ -42,6 +42,10 @@ First time only: `npm install` in this folder.
   file serving (strict CSP, local hosts only).
 - `bridge/taint.mjs`: marks a conversation once it has read outside content, so
   Winwright asks before every desktop change after that.
+- `bridge/reports.mjs`: after each task, a short report in `reports\` at the
+  checkout root (question, tools, answer; never what was typed). A new
+  conversation starts with the newest five as memory, marked as data; answers
+  given after reading a web page are left out of memory.
 - `bridge/panels.mjs`, `bridge/chrome.mjs`, `bridge/net.mjs`, `bridge/page.mjs`:
   cards, the user's Chrome (via the Claude extension), and safe fetching.
 - `winwright-ui/`: the page (HTML, CSS, JS; no framework, no build).
