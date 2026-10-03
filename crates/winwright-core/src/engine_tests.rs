@@ -2105,6 +2105,54 @@ async fn delete_key_outside_text_needs_confirmation() {
 }
 
 #[tokio::test]
+async fn yes_in_a_dialog_is_judged_by_what_the_dialog_asks() {
+    let fake = Fake::new();
+    fake.s().els.insert(
+        32,
+        el(
+            ControlRole::Text,
+            "Are you sure you want to permanently delete 3 files?",
+            "",
+            &[],
+        ),
+    );
+    fake.s().els.get_mut(&30).unwrap().children.push(32);
+    let engine = engine(&fake);
+    let session = engine.session(&sid(), "test").unwrap();
+    engine
+        .execute(&session, click(by("Button", "Open Dialog")))
+        .await
+        .unwrap();
+    let set_owner = |owner: Option<u64>| {
+        let mut s = fake.s();
+        let dialog = s.windows.iter_mut().find(|w| w.hwnd == DIALOG).unwrap();
+        dialog.owner_hwnd = owner;
+    };
+    set_owner(Some(MAIN));
+    let err = engine
+        .execute(&session, click(by("Button", "OK")))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code().as_str(), "CONFIRMATION_REQUIRED", "{err}");
+    assert!(
+        !fake.s().executed.iter().any(|e| e.contains("OK")),
+        "OK was not pressed"
+    );
+    // Harmless text, or a main window with risky text elsewhere, leave "OK" ordinary.
+    fake.s().els.get_mut(&32).unwrap().name = "Your settings were saved.".into();
+    engine
+        .execute(&session, click(by("Button", "OK")))
+        .await
+        .unwrap();
+    fake.s().els.get_mut(&32).unwrap().name = "Delete everything?".into();
+    set_owner(None);
+    engine
+        .execute(&session, click(by("Button", "OK")))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn win_chords_and_send_shortcuts_need_confirmation() {
     let fake = Fake::new();
     let input = Arc::new(FakeInput::default());

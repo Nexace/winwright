@@ -8,8 +8,8 @@ use winwright_contracts::action::{
     ActionMethod, ActionResult, DesktopAction, ScrollDirection, WindowAction, WindowVisualState,
 };
 use winwright_contracts::backend::{
-    InspectTarget, OperationContext, ScrollAmount, UiActionOutcome, UiPatternAction, UiProps,
-    UiTreeRequest,
+    ElementKey, InspectTarget, OperationContext, ScrollAmount, TreeRoot, UiActionOutcome, UiNode,
+    UiPatternAction, UiProps, UiTreeRequest,
 };
 use winwright_contracts::element::{ControlRole, ExpandState, ToggleState, UiPattern};
 use winwright_contracts::geometry::{PhysicalPoint, PhysicalRect};
@@ -60,7 +60,9 @@ fn describe(
     }
 }
 use winwright_contracts::{WinwrightError, WinwrightResult};
-use winwright_security::{classify_activation, classify_submit, is_sensitive, redacted_value};
+use winwright_security::{
+    classify_activation, classify_submit, is_affirmative, is_sensitive, redacted_value,
+};
 
 use crate::engine::Engine;
 use crate::find::Resolved;
@@ -284,12 +286,69 @@ impl Engine {
             .unwrap_or_default()
     }
 
-    /// `focused` is the element keys without a target would reach.
+    /// Risk of what a dialog asks when the action says yes to it ("Delete 3 files?", then
+    /// "Yes"): its title and text, never its other buttons. Only owned windows and standard
+    /// dialogs count, so unrelated text in a main window cannot make "OK" look risky.
+    async fn dialog_risk(
+        &self,
+        action: &DesktopAction,
+        target: Option<&Resolved>,
+        focused: Option<&UiProps>,
+        ctx: &OperationContext,
+    ) -> ActionRisk {
+        let activates = match action {
+            DesktopAction::Click { .. } => true,
+            DesktopAction::Press { keys, .. } => {
+                keys.iter().any(|k| matches!(k, Key::Enter | Key::Space))
+            }
+            _ => false,
+        };
+        let receiver = target.map(|r| &r.props).or(focused);
+        if !activates || !receiver.is_some_and(|p| is_affirmative(&p.name)) {
+            return ActionRisk::Normal;
+        }
+        let window = match target {
+            Some(r) => r.window.and_then(|w| self.windows.window(w).ok().flatten()),
+            None => self.windows.foreground_window().ok().flatten(),
+        };
+        let Some(window) = window.filter(|w| w.owner_hwnd.is_some() || w.class_name == "#32770")
+        else {
+            return ActionRisk::Normal;
+        };
+        let mut text = vec![window.title.clone()];
+        let request = UiTreeRequest {
+            root: TreeRoot::Window(window.hwnd),
+            max_depth: 6,
+            max_nodes: 300,
+            max_children: 100,
+            include_offscreen: false,
+        };
+        // Without the tree the title still says a lot ("Delete File").
+        if let Ok(tree) = self.uia.capture_tree(request, ctx).await {
+            fn walk(n: &UiNode, text: &mut Vec<String>, keys: &mut Vec<ElementKey>) {
+                keys.push(n.key);
+                if n.props.role == ControlRole::Text {
+                    text.push(n.props.name.clone());
+                }
+                for c in &n.children {
+                    walk(c, text, keys);
+                }
+            }
+            let mut keys = Vec::new();
+            walk(&tree.root, &mut text, &mut keys);
+            self.release(keys).await;
+        }
+        classify_activation(&text.join("\n"), "")
+    }
+
+    /// `focused` is the element keys without a target would reach; `dialog` is the risk of
+    /// what an affirmative button's dialog asks.
     fn proposed(
         &self,
         action: &DesktopAction,
         target: Option<&Resolved>,
         focused: Option<&UiProps>,
+        dialog: ActionRisk,
     ) -> ProposedAction {
         let summary = target
             .map(|r| TargetSummary {
@@ -388,7 +447,7 @@ impl Engine {
         ProposedAction {
             tool: format!("desktop_{}", action.name()),
             capability,
-            risk,
+            risk: risk.max(dialog),
             target: summary,
         }
     }
@@ -557,7 +616,10 @@ impl Engine {
         } else {
             None
         };
-        let proposed = self.proposed(&action, resolved.as_ref(), focused.as_ref());
+        let dialog = self
+            .dialog_risk(&action, resolved.as_ref(), focused.as_ref(), &ctx)
+            .await;
+        let proposed = self.proposed(&action, resolved.as_ref(), focused.as_ref(), dialog);
         *audit_target = proposed.target.clone();
         let summary = describe(&action, resolved.as_ref(), focused.as_ref());
         *confirmed = self.permit(session, proposed, summary, &mut lease).await?;

@@ -27,6 +27,17 @@ const DESTRUCTIVE: &[&str] = &[
     "overwrite",
     "replace the file",
     "replace the files",
+    "clear all",
+    "clear history",
+    "clear data",
+    "clear browsing data",
+    "purge",
+    "destroy",
+    "shred",
+    "revoke",
+    "deactivate",
+    "cancel subscription",
+    "unpublish",
 ];
 
 /// Phrases that send, publish, spend, or install.
@@ -62,13 +73,76 @@ const SENSITIVE: &[&str] = &[
     "i agree",
     "change password",
     "turn off protection",
+    "share",
+    "forward",
+    "invite",
+    "approve",
+    "upload",
+    "deploy",
+    "unsubscribe",
+    "upgrade",
+    "redeem",
+    "place bid",
+    "book now",
 ];
 
+/// Buttons that agree to whatever their dialog asks: judged by the dialog's text.
+const AFFIRMATIVE: &[&str] = &[
+    "yes",
+    "ok",
+    "okay",
+    "continue",
+    "confirm",
+    "proceed",
+    "go ahead",
+    "i understand",
+    "apply",
+    "finish",
+];
+
+/// Text as a person reads it: invisible format characters (zero-width spaces, direction marks,
+/// soft hyphens, variation selectors, tags, Hangul fillers) dropped and fullwidth ASCII folded,
+/// so `De\u{200B}lete` and `Ｄｅｌｅｔｅ` still say "Delete".
+pub(crate) fn normalize(text: &str) -> String {
+    text.chars()
+        .filter_map(|c| match c {
+            '\u{00AD}'
+            | '\u{034F}'
+            | '\u{061C}'
+            | '\u{115F}'
+            | '\u{1160}'
+            | '\u{17B4}'
+            | '\u{17B5}'
+            | '\u{180B}'..='\u{180F}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{206F}'
+            | '\u{3164}'
+            | '\u{FE00}'..='\u{FE0F}'
+            | '\u{FEFF}'
+            | '\u{FFA0}'
+            | '\u{1BCA0}'..='\u{1BCA3}'
+            | '\u{E0000}'..='\u{E0FFF}' => None,
+            '\u{FF01}'..='\u{FF5E}' => char::from_u32(c as u32 - 0xFEE0),
+            '\u{3000}' => Some(' '),
+            _ => Some(c),
+        })
+        .collect()
+}
+
 fn words(text: &str) -> Vec<String> {
-    text.split(|c: char| !c.is_alphanumeric())
+    normalize(text)
+        .split(|c: char| !c.is_alphanumeric())
         .filter(|w| !w.is_empty())
         .map(str::to_lowercase)
         .collect()
+}
+
+/// A button that says yes to its dialog ("Yes", "OK", "Continue"), so the dialog's own text
+/// says what clicking it does.
+pub fn is_affirmative(name: &str) -> bool {
+    let tokens = words(name);
+    tokens.len() <= 4 && AFFIRMATIVE.iter().any(|p| contains_phrase(&tokens, p))
 }
 
 fn contains_phrase(haystack: &[String], phrase: &str) -> bool {
@@ -297,6 +371,63 @@ mod tests {
                 Capability::ProcessLaunch,
                 "{program}"
             );
+        }
+    }
+
+    #[test]
+    fn invisible_and_fullwidth_characters_do_not_hide_a_verb() {
+        for name in [
+            "De\u{200B}lete",
+            "Del\u{00AD}ete",
+            "\u{202E}Delete",
+            "Dele\u{2060}te all",
+            "De\u{3164}lete",
+            "Ｄｅｌｅｔｅ",
+            "S\u{FE0F}end",
+        ] {
+            assert_ne!(
+                classify_activation(name, ""),
+                ActionRisk::Normal,
+                "{name:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn more_verbs_are_caught() {
+        for (name, risk) in [
+            ("Clear browsing data", ActionRisk::Destructive),
+            ("Revoke access", ActionRisk::Destructive),
+            ("Deactivate account", ActionRisk::Destructive),
+            ("Cancel subscription", ActionRisk::Destructive),
+            ("Share", ActionRisk::Sensitive),
+            ("Forward", ActionRisk::Sensitive),
+            ("Invite people", ActionRisk::Sensitive),
+            ("Approve", ActionRisk::Sensitive),
+            ("Upload files", ActionRisk::Sensitive),
+            ("Upgrade to Pro", ActionRisk::Sensitive),
+            ("Clear", ActionRisk::Normal),
+            ("Shared with me", ActionRisk::Normal),
+            ("Merge cells", ActionRisk::Normal),
+        ] {
+            assert_eq!(classify_activation(name, ""), risk, "{name}");
+        }
+    }
+
+    #[test]
+    fn affirmative_buttons_are_recognised() {
+        for name in [
+            "Yes",
+            "OK",
+            "Continue",
+            "Yes to all",
+            "I understand",
+            "Finish",
+        ] {
+            assert!(is_affirmative(name), "{name}");
+        }
+        for name in ["No", "Cancel", "Save", "Okay so here is a long sentence"] {
+            assert!(!is_affirmative(name), "{name}");
         }
     }
 
