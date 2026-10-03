@@ -1,7 +1,7 @@
 # Winwright State
 
 **Updated:** 2026-10-04
-**Current phase:** CHECKPOINT (2026-10-04, resume here). Tree green, all pushed except the last two commits. Done: security audit, taint rule, Phase 7 (live), our own assistant page (old JARVIS face deleted), and `winwright` as a one-word command (installed to ~\.cargo\bin). Next: the user tries `winwright` in Brave (voice + taint dialog).
+**Current phase:** CHECKPOINT (2026-10-04, resume here). Tree green; the last commits are not pushed. Done: security audit, taint rule, Phase 7 (live), our own assistant page (old JARVIS face deleted), `winwright` as a one-word command (installed to ~\.cargo\bin), assistant default Sonnet 5.5 at medium effort, Winwright registered in opencode/Codex/Antigravity, and `confirmationMode: "relaxed"` (the user's own config uses it). Next: the user tries `winwright` in Brave (voice + taint dialog) and Winwright from opencode with Go models.
 **Toolchain:** Rust 1.98.1 MSVC (pinned), windows-rs 0.62.2, tokio 1.53, schemars 1.2, regex 1.13, rmcp 3.5
 
 ## Done
@@ -79,9 +79,14 @@ Dropped: Phase 1b, Phase 9, Phase 12, local speech models (Whisper/Kokoro), Jev.
 - MCP loopback HTTP transport not built (stdio only).
 - Dialog context (M1) covers owned windows and `#32770` dialogs; in-window dialogs (WinUI
   ContentDialog, web modals) are judged by the button name only.
-- UI-driven execution remains possible without the shell gates: typing a command into Explorer's
-  address bar or the Run box (Win chords and Enter in "Open:"-style fields are judged, the
-  address bar is not).
+- UI-driven execution: Enter in a terminal window, and Enter in the Run box / Start search /
+  Explorer address bar on a shell command line, is judged as Shell/PowerShell; Win+R and Win+X
+  as PowerShell. Still open: clicking OK in an already-open Run box, Start's "Run command"
+  result, terminals inside other apps (VS Code), Task Manager's "Run new task".
+- Relaxed mode (2026-10-04): Sensitive is allowed; Destructive (now including spending and
+  security phrases), file delete, process terminate and the shell still ask. The user's real
+  config is `%APPDATA%\winwright\config.json` = `{"security":{"confirmationMode":"relaxed"}}`.
+  Outside the assistant the taint rule is off (nothing writes the marker).
 - `app_launch` URI allowlist is fixed in code (http, https, mailto, ms-settings, shell:<folder>);
   no config for extra schemes yet.
 - Protecting the exe folder (M3) means file operations are refused in the folder winwright.exe
