@@ -5,6 +5,10 @@
 //! - "Allow once" stays disabled for a moment after the dialog appears, so a click or key
 //!   meant for another window cannot approve an action. From the keyboard it also counts only
 //!   after a pause, so typing that runs into the dialog (Tab, then Space) cannot approve.
+//! - Only a real keyboard, mouse, pen or touch screen can press "Allow once". A BM_CLICK or
+//!   WM_COMMAND from another program, UI Automation's Invoke, and SendInput (Winwright's own
+//!   input, but also on-screen keyboards and voice control) are all ignored. People who can
+//!   only use those cannot approve, by design: anything they can do, a program can fake.
 //! - A prompt that is not answered in time, or whose request is abandoned, is denied and the
 //!   window closes itself.
 //!
@@ -32,6 +36,7 @@ use windows::Win32::UI::HiDpi::{
     MDT_EFFECTIVE_DPI, SetThreadDpiAwarenessContext,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, GetFocus, SetFocus};
+use windows::Win32::UI::Input::{GetCurrentInputMessageSource, IMO_HARDWARE, INPUT_MESSAGE_SOURCE};
 use windows::Win32::UI::WindowsAndMessaging::{
     BN_CLICKED, BS_DEFPUSHBUTTON, BS_PUSHBUTTON, CreateWindowExW, DC_HASDEFID, DM_GETDEFID,
     DefWindowProcW, DestroyIcon, DestroyWindow, DispatchMessageW, FLASHW_ALL, FLASHW_TIMERNOFG,
@@ -41,9 +46,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SendMessageW, SetForegroundWindow, SetTimer, SetWindowPos, SetWindowTextW, ShowWindow,
     TranslateMessage, WA_INACTIVE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_CLOSE,
     WM_COMMAND, WM_DESTROY, WM_DPICHANGED, WM_DRAWITEM, WM_ERASEBKGND, WM_KEYDOWN, WM_KEYFIRST,
-    WM_KEYLAST, WM_NOTIFY, WM_PAINT, WM_SETFONT, WM_SETICON, WM_SYSKEYDOWN, WM_TIMER, WS_CAPTION,
-    WS_CHILD, WS_CLIPCHILDREN, WS_EX_APPWINDOW, WS_EX_TOPMOST, WS_OVERLAPPED, WS_SYSMENU,
-    WS_TABSTOP, WS_VISIBLE,
+    WM_KEYLAST, WM_MOUSEFIRST, WM_MOUSELAST, WM_NOTIFY, WM_PAINT, WM_SETFONT, WM_SETICON,
+    WM_SYSKEYDOWN, WM_TIMER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_EX_APPWINDOW, WS_EX_TOPMOST,
+    WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 use windows::core::{HSTRING, PCWSTR, w};
 use winwright_contracts::WinwrightResult;
@@ -290,20 +295,47 @@ impl Keys {
         }
     }
 
-    /// A click from the mouse or assistive technology, or a key pressed after a pause.
+    /// A mouse click, or a key pressed after a pause.
     fn may_allow(self) -> bool {
         !self.handling || self.paused
     }
 }
 
-/// Whether a WM_COMMAND for `ID_ALLOW` approves: only the armed Allow button's own click.
-fn allow_counts(armed: bool, code: u32, from_allow: bool, keys: Keys) -> bool {
-    armed && code == BN_CLICKED && from_allow && keys.may_allow()
+/// Where the input the dialog is handling right now came from.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Origin {
+    /// No input message from the dialog's own loop: a sent or posted BM_CLICK or WM_COMMAND,
+    /// which is also how UI Automation's Invoke reaches a Win32 button.
+    #[default]
+    None,
+    /// Input a program made: SendInput, so also on-screen keyboards and voice control.
+    Injected,
+    /// A real keyboard, mouse, pen or touch screen.
+    Hardware,
+}
+
+impl Origin {
+    /// The origin of the input message this thread just retrieved.
+    fn of_current_message() -> Self {
+        let mut source = INPUT_MESSAGE_SOURCE::default();
+        // SAFETY: fills the struct we pass.
+        match unsafe { GetCurrentInputMessageSource(&mut source) } {
+            Ok(()) if source.originId == IMO_HARDWARE => Self::Hardware,
+            _ => Self::Injected,
+        }
+    }
+}
+
+/// Whether a WM_COMMAND for `ID_ALLOW` approves: only the armed Allow button's own click, made
+/// by a person with real hardware.
+fn allow_counts(armed: bool, code: u32, from_allow: bool, keys: Keys, origin: Origin) -> bool {
+    armed && code == BN_CLICKED && from_allow && origin == Origin::Hardware && keys.may_allow()
 }
 
 thread_local! {
     static DIALOG: RefCell<Option<Dialog>> = const { RefCell::new(None) };
     static KEYS: Cell<Keys> = Cell::new(Keys::default());
+    static ORIGIN: Cell<Origin> = const { Cell::new(Origin::None) };
 }
 
 fn with_dialog<R>(f: impl FnOnce(&mut Dialog) -> R) -> Option<R> {
@@ -792,13 +824,20 @@ fn run_dialog(
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
             let keyboard = (WM_KEYFIRST..=WM_KEYLAST).contains(&msg.message);
+            let input = keyboard || (WM_MOUSEFIRST..=WM_MOUSELAST).contains(&msg.message);
             if keyboard {
                 let press = msg.message == WM_KEYDOWN || msg.message == WM_SYSKEYDOWN;
                 KEYS.with(|k| k.set(k.get().begin(press, Instant::now())));
             }
+            if input {
+                ORIGIN.set(Origin::of_current_message());
+            }
             if !IsDialogMessageW(hwnd, &msg).as_bool() {
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
+            }
+            if input {
+                ORIGIN.set(Origin::None);
             }
             if keyboard {
                 KEYS.with(|k| k.set(k.get().end()));
@@ -934,7 +973,7 @@ unsafe extern "system" fn dialog_proc(
                     ID_ALLOW
                         if with_dialog(|d| {
                             let from_allow = lparam.0 == d.allow.0 as isize;
-                            allow_counts(d.armed, code, from_allow, KEYS.with(Cell::get))
+                            allow_counts(d.armed, code, from_allow, KEYS.get(), ORIGIN.get())
                         }) == Some(true) =>
                     {
                         finish(hwnd, true)
@@ -1141,42 +1180,57 @@ mod tests {
         let t0 = Instant::now();
         let ms = |n| t0 + Duration::from_millis(n);
         // Typing: Tab moves focus to "Allow once", Space follows 120 ms later.
+        let hw = Origin::Hardware;
         let keys = Keys::default().begin(true, ms(0)).end();
         let space_down = keys.begin(true, ms(120));
-        assert!(!allow_counts(true, BN_CLICKED, true, space_down));
+        assert!(!allow_counts(true, BN_CLICKED, true, space_down, hw));
         let space_up = space_down.end().begin(false, ms(180));
         assert!(
-            !allow_counts(true, BN_CLICKED, true, space_up),
+            !allow_counts(true, BN_CLICKED, true, space_up, hw),
             "Space clicks on key up"
         );
         // A deliberate press after a pause counts, on key down (Enter) or key up (Space).
         let pause = space_up.end().begin(true, ms(180 + 900));
-        assert!(allow_counts(true, BN_CLICKED, true, pause));
+        assert!(allow_counts(true, BN_CLICKED, true, pause, hw));
         assert!(allow_counts(
             true,
             BN_CLICKED,
             true,
-            pause.end().begin(false, ms(1_150))
+            pause.end().begin(false, ms(1_150)),
+            hw
         ));
-        // The mouse (or UI Automation's Invoke) is not keyboard input.
-        assert!(allow_counts(true, BN_CLICKED, true, space_up.end()));
+        // A mouse click is not keyboard input.
+        assert!(allow_counts(true, BN_CLICKED, true, space_up.end(), hw));
     }
 
     #[test]
     fn allow_needs_the_armed_allow_buttons_own_click() {
-        let idle = Keys::default();
-        assert!(allow_counts(true, BN_CLICKED, true, idle));
+        let (idle, hw) = (Keys::default(), Origin::Hardware);
+        assert!(allow_counts(true, BN_CLICKED, true, idle, hw));
         assert!(
-            !allow_counts(false, BN_CLICKED, true, idle),
+            !allow_counts(false, BN_CLICKED, true, idle, hw),
             "not armed yet"
         );
         assert!(
-            !allow_counts(true, 6, true, idle),
+            !allow_counts(true, 6, true, idle, hw),
             "BN_SETFOCUS is not a click"
         );
         assert!(
-            !allow_counts(true, BN_CLICKED, false, idle),
+            !allow_counts(true, BN_CLICKED, false, idle, hw),
             "not from the button"
+        );
+    }
+
+    #[test]
+    fn only_a_person_at_real_hardware_can_allow() {
+        let idle = Keys::default();
+        assert!(
+            !allow_counts(true, BN_CLICKED, true, idle, Origin::None),
+            "a sent or posted click, or UI Automation's Invoke"
+        );
+        assert!(
+            !allow_counts(true, BN_CLICKED, true, idle, Origin::Injected),
+            "SendInput"
         );
     }
 }
