@@ -13,7 +13,7 @@ Each phase keeps the workspace building, adds tests before behavior, and lands a
 | 4 | wait_for, UIA event subscriptions, action verification, snapshot diff | no fixed sleeps in fixture workflows | done |
 | 5 | rmcp MCP server (stdio + loopback HTTP) | MCP model operates Notepad semantically | done (stdio; loopback HTTP deferred) |
 | 6 | WGC capture + native no-activate overlays | element highlight accurate at mixed DPI | done (verified at 125%; mixed-DPI untestable on one monitor) |
-| 7 | SendInput physical fallback | custom canvas fixture controlled physically | built; live run awaits user OK |
+| 7 | SendInput physical fallback | custom canvas fixture controlled physically | done (2026-10-03: `live_canvas` click/right/double/type/chord/wheel + `live_input` 2/2; fixed 3x wheel steps) |
 | 8 | Permission engine, confirmations, audit, emergency stop, elevated-app detection | passwords never returned; stop halts queued work | done |
 | 9 | Optional Playwright/CDP browser bridge | DOM + native dialog in one workflow | planned | **Replaced 2026-10-01:** no own browser engine; Playwright MCP / `jarvis_chrome` own web pages, Winwright owns native dialogs and browser chrome (see `.gsd/INTEGRATION.md`).
 | 10 | VisionGrounder fallback | visual-only target found + clicked, flagged as vision | planned | **Scope 2026-10-01:** screen pixels of non-UIA apps only; unrelated to JARVIS camera.

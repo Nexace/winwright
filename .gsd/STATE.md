@@ -1,7 +1,7 @@
 # Winwright State
 
 **Updated:** 2026-10-03
-**Current phase:** CHECKPOINT. Tree green; security audit H1-L5, the leftover bugs, and the taint rule are done (327fa5f..24ef6a3). Next: Phase 7 physical-input live test (ask the user first).
+**Current phase:** CHECKPOINT. Tree green; security audit H1-L5, the leftover bugs, the taint rule, and Phase 7 (live) are done (327fa5f..f4f47bb). Next: JARVIS end to end (needs the user).
 **Toolchain:** Rust 1.98.1 MSVC (pinned), windows-rs 0.62.2, tokio 1.53, schemars 1.2, regex 1.13, rmcp 3.5
 
 ## Done
@@ -37,6 +37,10 @@
   (`node --test bridge/taint.test.mjs`); not yet exercised live with JARVIS running.
 - Tests: all workspace tests pass; clippy `-D warnings` clean. Live after the audit fixes
   (2026-10-03): `live_fixture` 7/7, `mcp_stdio` 2/2, `live_confirm` 2/2, `live_desktop` 3/3.
+- Phase 7 live (2026-10-03, user OK'd): `live_canvas` 1/1 twice (click, right-click,
+  double-click, type, Ctrl+K, wheel on the inaccessible canvas, all through SendInput) and
+  `live_input` 2/2. The first canvas run found a wheel step sending 3 notches (fixed, 218bf04).
+  Opt-in, moves the real mouse: `cargo test -p winwright-cli --test live_canvas -- --ignored`.
 
 ## How to verify on resume
 - `cargo test --workspace`
@@ -47,10 +51,9 @@
   (shows the confirm dialog twice, ~5 s; do not click it). `... manual_` asks a person to click Allow.
 
 ## Next (in order; plan in .gsd/INTEGRATION.md "Decisions and changes from the plan review")
-1. Phase 7 physical-input live test (ask the user first; moves the mouse ~10 s).
-2. JARVIS end to end (includes a live check of the taint rule: read a web page, then a desktop
+1. JARVIS end to end (includes a live check of the taint rule: read a web page, then a desktop
    change must prompt), then ElevenLabs (user sets ELEVENLABS_API_KEY as a user env var).
-3. Reports + Notion memory (cloud, user's choice), last.
+2. Reports + Notion memory (cloud, user's choice), last.
 Dropped: Phase 1b, Phase 9, Phase 12, local speech models (Whisper/Kokoro), Jev.
 
 ## Decisions
