@@ -34,7 +34,7 @@ pub struct Cli {
 impl Cli {
     /// `--json` errors go to stdout, except in MCP mode where stdout carries protocol frames only.
     pub fn json_errors(&self) -> bool {
-        self.json && !matches!(self.command, Command::Mcp)
+        self.json && !matches!(self.command, Command::Mcp(_))
     }
 }
 
@@ -91,7 +91,7 @@ pub enum Command {
     /// List running processes.
     Processes,
     /// Serve MCP over stdio (launched by an AI client; exits when the client disconnects).
-    Mcp,
+    Mcp(McpArgs),
     /// Show (or clear) the local audit log of what Winwright did and read (actions, text reads,
     /// screenshots, file listings).
     Audit(AuditArgs),
@@ -99,6 +99,14 @@ pub enum Command {
     Inspector,
     /// Start the JARVIS voice assistant (apps/jarvis) with Winwright as its desktop hands.
     Assistant,
+}
+
+#[derive(Args)]
+pub struct McpArgs {
+    /// A file the client creates once the conversation has read untrusted content (a web or
+    /// Notion page). From then on every desktop change needs the user's approval.
+    #[arg(long, value_name = "PATH")]
+    pub taint_file: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -630,6 +638,20 @@ mod tests {
         assert!(!cli.json_errors());
         let cli = Cli::try_parse_from(["winwright", "--json", "windows"]).unwrap();
         assert!(cli.json_errors());
+    }
+
+    #[test]
+    fn mcp_takes_an_optional_taint_file() {
+        let cli =
+            Cli::try_parse_from(["winwright", "mcp", "--taint-file", r"C:\t\conv-1"]).unwrap();
+        let Command::Mcp(m) = cli.command else {
+            panic!()
+        };
+        assert_eq!(m.taint_file, Some(PathBuf::from(r"C:\t\conv-1")));
+        let Command::Mcp(m) = Cli::try_parse_from(["winwright", "mcp"]).unwrap().command else {
+            panic!()
+        };
+        assert_eq!(m.taint_file, None);
     }
 
     #[test]

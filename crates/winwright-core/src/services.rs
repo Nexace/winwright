@@ -474,5 +474,6 @@ impl Engine {
     /// Re-enables the engine after an emergency stop. User-initiated only; not exposed to models.
     pub fn rearm(&self) {
         self.sessions.rearm();
+        self.taint.clear();
     }
 }

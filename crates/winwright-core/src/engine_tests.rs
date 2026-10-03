@@ -2603,6 +2603,59 @@ async fn prompts_show_the_resolved_program_and_every_argument() {
 }
 
 #[tokio::test]
+async fn after_untrusted_content_every_desktop_change_needs_a_yes() {
+    let fake = Fake::new();
+    let dir = crate::scratch_dir("taint");
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("conversation");
+    let answers = confirmer(false);
+    let engine = engine(&fake)
+        .with_confirmer(answers.clone())
+        .with_taint_file(file.clone());
+    let session = engine.session(&sid(), "test").unwrap();
+    engine
+        .execute(&session, click(by("Button", "Target")))
+        .await
+        .unwrap();
+    // The bridge marks the conversation after a web or Notion read.
+    std::fs::write(&file, b"").unwrap();
+    let err = engine
+        .execute(&session, click(by("Button", "Target")))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code().as_str(), "ACTION_BLOCKED", "declined: {err}");
+    let prompt = answers.prompts.lock().unwrap().pop().unwrap();
+    assert!(prompt.reason.contains("web or Notion"), "{}", prompt.reason);
+    // Reads stay free.
+    engine
+        .execute(
+            &session,
+            DesktopAction::ReadText {
+                target: by("Document", "Notes"),
+                max_chars: 100,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(answers.prompts.lock().unwrap().is_empty());
+    // Removing the file does not undo it; the user's re-enable does.
+    std::fs::remove_file(&file).unwrap();
+    assert!(
+        engine
+            .execute(&session, click(by("Button", "Target")))
+            .await
+            .is_err()
+    );
+    engine.rearm();
+    let session = engine.session(&sid(), "test").unwrap();
+    engine
+        .execute(&session, click(by("Button", "Target")))
+        .await
+        .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
 async fn strict_mode_confirms_changes_but_never_reads() {
     let fake = Fake::new();
     let mut config = Config::default();

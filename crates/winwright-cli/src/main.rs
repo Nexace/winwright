@@ -218,11 +218,14 @@ fn print_action(r: &ActionResult) {
 
 /// MCP mode: stdout carries protocol frames only. Capture starts on first use; overlays and
 /// the emergency-stop hotkey share one small native UI thread. Nothing persists after exit.
-async fn serve_mcp(config: Config) -> Result<(), WinwrightError> {
+async fn serve_mcp(
+    config: Config,
+    taint_file: Option<std::path::PathBuf>,
+) -> Result<(), WinwrightError> {
     let native = winwright_overlay::NativeUi::start()?;
     let uia = winwright_uia::UiaBackend::start()?;
     let overlays = config.overlay.enabled;
-    let engine = with_safety(Engine::new(
+    let mut engine = with_safety(Engine::new(
         config,
         Arc::new(winwright_win32::Win32Windows),
         Arc::new(uia),
@@ -231,6 +234,9 @@ async fn serve_mcp(config: Config) -> Result<(), WinwrightError> {
     .with_capture(Arc::new(lazy::LazyCapture::default()))
     .with_processes(Arc::new(winwright_shell::SystemProcesses::new()))
     .with_files(Arc::new(winwright_files::LocalFiles::new()));
+    if let Some(file) = taint_file {
+        engine = engine.with_taint_file(file);
+    }
     let engine = Arc::new(if overlays {
         engine.with_overlay(Arc::new(native.overlay))
     } else {
@@ -427,9 +433,9 @@ async fn run(cli: Cli) -> Result<(), WinwrightError> {
             print_json(&config);
             return Ok(());
         }
-        Command::Mcp => {
+        Command::Mcp(m) => {
             check_mcp_enabled(&config)?;
-            return serve_mcp(config).await;
+            return serve_mcp(config, m.taint_file).await;
         }
         Command::Audit(a) => {
             let Some(path) = winwright_core::audit::AuditLog::default_path() else {
@@ -460,7 +466,7 @@ async fn run(cli: Cli) -> Result<(), WinwrightError> {
     match command {
         Command::Version
         | Command::Config
-        | Command::Mcp
+        | Command::Mcp(_)
         | Command::Audit(_)
         | Command::Inspector
         | Command::Assistant => unreachable!("handled above"),

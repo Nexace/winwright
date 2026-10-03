@@ -1,8 +1,9 @@
 //! The engine every transport calls: windows, snapshots, inspection. Finding, actions and
 //! waits live in sibling modules as further `impl Engine` blocks.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use winwright_contracts::action::ActionMethod;
@@ -90,6 +91,39 @@ pub struct Engine {
     pub(crate) lease: ActionLease,
     /// Confirmation dialogs open right now.
     pub(crate) confirming: AtomicUsize,
+    pub(crate) taint: Taint,
+}
+
+/// Whether the conversation has read untrusted content (a web or Notion page), which could
+/// carry instructions aimed at the assistant. The assistant's bridge creates `file` when that
+/// happens; once seen, the taint holds for this process until the user re-enables Winwright,
+/// so removing the file does not undo it.
+#[derive(Debug, Default)]
+pub(crate) struct Taint {
+    file: Option<PathBuf>,
+    seen: AtomicBool,
+}
+
+impl Taint {
+    pub(crate) fn is_set(&self) -> bool {
+        if self.seen.load(Ordering::SeqCst) {
+            return true;
+        }
+        let present = self.file.as_deref().is_some_and(Path::exists);
+        if present {
+            self.seen.store(true, Ordering::SeqCst);
+        }
+        present
+    }
+
+    /// The user re-enabled Winwright: forget the taint (the bridge marks it again on the next
+    /// untrusted read).
+    pub(crate) fn clear(&self) {
+        if let Some(file) = &self.file {
+            let _ = std::fs::remove_file(file);
+        }
+        self.seen.store(false, Ordering::SeqCst);
+    }
 }
 
 /// Counts one open confirmation dialog for as long as it lives.
@@ -129,6 +163,7 @@ impl Engine {
             sessions: SessionRegistry::default(),
             lease: ActionLease::default(),
             confirming: AtomicUsize::new(0),
+            taint: Taint::default(),
         }
     }
 
@@ -160,6 +195,16 @@ impl Engine {
     /// Trusted local approval UI. Without one, confirmations fail with `CONFIRMATION_REQUIRED`.
     pub fn with_confirmer(mut self, confirmer: Arc<dyn Confirmer>) -> Self {
         self.confirmer = Some(confirmer);
+        self
+    }
+
+    /// The file whose existence means this conversation has read untrusted content (see
+    /// `Taint`); passed by the assistant's bridge as `winwright mcp --taint-file`.
+    pub fn with_taint_file(mut self, file: PathBuf) -> Self {
+        self.taint = Taint {
+            file: Some(file),
+            seen: AtomicBool::new(false),
+        };
         self
     }
 
@@ -227,7 +272,17 @@ impl Engine {
         lease: &mut Option<LeaseGuard>,
     ) -> WinwrightResult<bool> {
         self.ensure_running()?;
-        let verdict = self.policy.evaluate(&action);
+        let mut verdict = self.policy.evaluate(&action);
+        // After untrusted content, what policy would allow needs a person's yes instead.
+        if verdict.decision == PermissionDecision::Allow
+            && action.risk != ActionRisk::ReadOnly
+            && self.taint.is_set()
+        {
+            verdict.decision = PermissionDecision::Confirm;
+            verdict.reason = "this conversation has read web or Notion content, so desktop \
+                              changes need your approval until a new conversation"
+                .into();
+        }
         match verdict.decision {
             PermissionDecision::Allow => Ok(false),
             PermissionDecision::Deny => Err(WinwrightError::ActionBlocked {
