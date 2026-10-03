@@ -38,8 +38,30 @@ const INSTRUCTIONS: &str = "Winwright operates Windows apps through UI Automatio
 Errors are JSON with a code and a hint. CONFIRMATION_REQUIRED means the user must approve: do not work around it. \
 CANCELLED after an emergency stop means the user stopped you: stop and ask them before doing anything else.";
 
+/// Text results are cut beyond this: a model's context is better spent on a narrower call
+/// than on a megabyte of text it asked for by accident.
+const MAX_TEXT_BYTES: usize = 128 * 1024;
+
 fn text(s: impl Into<String>) -> CallToolResult {
-    CallToolResult::success(vec![ContentBlock::text(s)])
+    CallToolResult::success(vec![ContentBlock::text(capped(s.into()))])
+}
+
+/// `s` cut at a character boundary to `MAX_TEXT_BYTES`, saying how much was left out.
+fn capped(mut s: String) -> String {
+    if s.len() <= MAX_TEXT_BYTES {
+        return s;
+    }
+    let mut end = MAX_TEXT_BYTES;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    let dropped = s.len() - end;
+    s.truncate(end);
+    s.push_str(&format!(
+        "\n\u{2026} output cut: {dropped} more bytes. Ask for less: a smaller maxChars, a \
+         narrower folder or pattern, or one window instead of the desktop."
+    ));
+    s
 }
 
 fn json<T: Serialize>(value: &T) -> CallToolResult {
@@ -601,6 +623,28 @@ mod tests {
             serde_json::from_str(&format!(r#"{{"action":"focus","hwnd":{hwnd}}}"#))
                 .unwrap_or_else(|e| panic!("hwnd={hwnd} is not accepted back: {e}"));
         assert_eq!(input.hwnd, Some(0x1234));
+    }
+
+    #[test]
+    fn huge_text_results_are_cut_with_a_note() {
+        let small = "x".repeat(100);
+        assert_eq!(capped(small.clone()), small);
+        // A three-byte character straddles the limit: the cut stays on a boundary.
+        let big = format!(
+            "{}\u{20AC}{}",
+            "a".repeat(MAX_TEXT_BYTES - 1),
+            "b".repeat(5_000)
+        );
+        let cut = capped(big);
+        let (kept, note) = cut.split_once('\n').unwrap();
+        assert_eq!(kept, "a".repeat(MAX_TEXT_BYTES - 1));
+        assert!(!note.contains('\u{20AC}'));
+        assert!(
+            cut.ends_with("one window instead of the desktop."),
+            "{}",
+            &cut[cut.len() - 200..]
+        );
+        assert!(cut.contains("output cut: 5003 more bytes"));
     }
 
     #[test]
