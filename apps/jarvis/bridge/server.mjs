@@ -22,6 +22,7 @@ import { uiServer } from './ui.mjs'
 import { chromeAvailable, chromeServer } from './chrome.mjs'
 import { visionServer } from './vision.mjs'
 import { bringsOutsideContent, taintMarker } from './taint.mjs'
+import { FACE, WINWRIGHT_PROMPT, serveFace } from './winwright-face.mjs'
 import { timingSafeEqual } from 'node:crypto'
 import { homedir, tmpdir } from 'node:os'
 import { readFileSync, realpathSync } from 'node:fs'
@@ -87,6 +88,8 @@ function originAllowed(origin) {
   }
   if (url.protocol !== 'http:') return false
   if (!LOCAL_HOSTS.has(url.hostname)) return false
+  // Winwright's page is served by this bridge, so it arrives from our own port.
+  if (FACE && Number(url.port) === PORT) return true
   return isDevPort(Number(url.port))
 }
 
@@ -714,6 +717,7 @@ const handleRequest = async (req, res) => {
     res.writeHead(403, { vary: 'origin' })
     return res.end('forbidden')
   }
+  if (FACE && (await serveFace(req, res))) return
   const cors = corsFor(req)
 
   // Push-to-talk from Winwright's global hotkey. Only enabled when the launcher
@@ -1069,6 +1073,7 @@ const wss = new WebSocketServer({
 server.listen(PORT)
 
 console.log(`[jarvis] bridge listening on ws://localhost:${PORT}`)
+if (FACE) console.log(`[jarvis] Winwright page: http://localhost:${PORT}/`)
 console.log(
   `[jarvis] speech ${elevenKey() ? 'via ElevenLabs (key from MCP config)' : 'using browser fallback voice'}`,
 )
@@ -1301,19 +1306,21 @@ wss.on('connection', (socket) => {
         // MCP tool names are `mcp__<key>__<tool>` and one key can only carry
         // one server; the underscore in it is why decideTool and announceTool
         // both name `jarvis_ui` explicitly.
-        jarvis_ui: uiServer((op, args) => send({ type: 'ui', op, args })),
+        // Winwright's chat page has no 3D scene for it to steer.
+        ...(FACE ? {} : { jarvis_ui: uiServer((op, args) => send({ type: 'ui', op, args })) }),
         // The user's own Chrome, over the extension's native-host socket. It
         // holds no per-connection state, but it is built here with the rest so
         // the write gate is read once, at the same point as everything else.
         jarvis_chrome: chromeServer({ allowWrites: ALLOW_WRITES }),
         // The camera, which unlike everything else here has to ask and wait.
-        jarvis_eyes: visionServer(ask),
+        // Winwright's chat page has no camera (and no 3D scene, see jarvis_ui).
+        ...(FACE ? {} : { jarvis_eyes: visionServer(ask) }),
       },
       // A plain system prompt, not the claude_code preset. The preset is
       // tuned for a coding agent — verbose, file-oriented, and a large chunk
       // of input tokens on every turn. Replacing it makes the persona stick,
       // keeps answers short enough to speak, and cuts cost per turn.
-      systemPrompt: SYSTEM_PROMPT,
+      systemPrompt: FACE ? WINWRIGHT_PROMPT : SYSTEM_PROMPT,
       // Run from the home directory so project-scoped MCP servers don't shadow
       // the global ones, and so file tools have a sane root.
       cwd: homedir(),

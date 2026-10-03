@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Winwright</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/ui/style.css">
+<script src="/ui/purify.min.js" defer></script>
+<script src="/ui/app.js" defer></script>
+</head>
+<body>
+<div class="app">
+  <header class="top">
+    <div class="brand">
+      <svg class="mark" viewBox="0 0 24 24" aria-hidden="true">
+        <rect x="3" y="3" width="8" height="8" rx="2"></rect>
+        <rect x="13" y="3" width="8" height="8" rx="2"></rect>
+        <rect x="3" y="13" width="8" height="8" rx="2"></rect>
+        <rect x="13" y="13" width="8" height="8" rx="2"></rect>
+      </svg>
+      <h1>Winwright</h1>
+    </div>
+    <div id="status" class="status" data-state="connecting" role="status" aria-live="polite">
+      <span class="dot" aria-hidden="true"></span><span class="label">Connecting…</span>
+    </div>
+  </header>
+
+  <main id="log" class="log" aria-label="Conversation">
+    <section id="welcome" class="welcome">
+      <h2>What should I do on this PC?</h2>
+      <p>Type below, or press <kbd>Ctrl</kbd>+<kbd>Space</kbd> and talk. I ask before anything risky.</p>
+      <div class="examples">
+        <button type="button" class="example">Open Notepad</button>
+        <button type="button" class="example">What windows are open?</button>
+        <button type="button" class="example">What's the weather in Pune today?</button>
+      </div>
+    </section>
+  </main>
+
+  <form id="composer" class="composer" autocomplete="off">
+    <label class="sr-only" for="input">Message Winwright</label>
+    <textarea id="input" rows="1" placeholder="Ask Winwright…" enterkeyhint="send"></textarea>
+    <button type="button" id="mic" class="icon-btn" aria-label="Talk (Ctrl+Space)" aria-pressed="false" title="Talk (Ctrl+Space)">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"></rect><path d="M5 11a7 7 0 0 0 14 0M12 18v3"></path></svg>
+    </button>
+    <button type="submit" id="send" class="icon-btn primary" aria-label="Send" title="Send (Enter)" disabled>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h13M13 6l6 6-6 6"></path></svg>
+    </button>
+  </form>
+  <p class="hint">Enter to send · Shift+Enter for a new line · Esc to stop</p>
+</div>
+</body>
+</html>

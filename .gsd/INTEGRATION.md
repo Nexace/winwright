@@ -74,3 +74,18 @@ Jev (classifier/router) was considered and dropped. Not building a classifier; J
 **Pruned.** Dropped: Phase 1b (named-pipe service; the MCP process already persists), Phase 12 (recorder), Phase 9 (own browser bridge), and any local speech models. Kept: Phase 7 acceptance, Phase 10 (vision, screen pixels only).
 
 **Smaller.** `scripts/check.ps1` is the one command for build, lint and tests (`-Live` adds the live tests). JARVIS shows a reconnect message after an idle shutdown. Every edit to the vendored JARVIS code is listed in `apps/jarvis/WINWRIGHT-EDITS.md`.
+
+## Own assistant UI (decided 2026-10-04)
+
+The user does not like the JARVIS face (React + Three.js HUD). Replace it with our own page; keep the bridge.
+
+**Decisions (user):** clean chat panel; voice and typing; plain HTML/CSS/JS with no framework, served by the bridge itself; the assistant is called Winwright.
+
+**Spec.**
+- `winwright assistant` runs only the bridge (`node bridge/server.mjs`, no Vite, no 3D) with `WINWRIGHT_FACE=1`, and prints `http://localhost:8787/`.
+- With `WINWRIGHT_FACE=1` the bridge: serves the page (`/` and `/ui/*`, plus DOMPurify from node_modules) with a strict CSP; accepts its own origin on the socket and HTTP routes; uses a Winwright system prompt (JARVIS's desktop, routing, brevity and reporting rules; no blades/theme/camera); leaves out `jarvis_ui` (3D scene controls) and `jarvis_eyes` (camera). `display`/`blade` stay and render as cards in the chat. Without the flag the bridge behaves exactly as before.
+- Page: header with name and status (connecting, ready, listening, thinking, working, speaking, offline); conversation with user bubbles, streamed replies, tool activity lines with plain labels, error lines, and cards for blades (markup sanitised with DOMPurify and the `hud-*` class allowlist; images/video via the bridge's `/img`, `/media`, `/file`; articles via `/page`; YouTube/Vimeo embeds only); a text box (Enter sends, Shift+Enter new line) and a mic button.
+- Voice: Ctrl+Space (relayed `ptt`) or the mic button starts listening; recording stops after a pause in speech, a second press, or 30 s; audio goes to `/stt`; replies to a spoken request are read out with `/tts` (typed ones stay silent). A new request while a turn runs interrupts it. Without an ElevenLabs key the mic is disabled with a hint.
+- Light and dark themes follow the system; usable at phone width; keyboard reachable; reduced motion respected.
+
+**Plan.** (1) Bridge: `bridge/winwright-face.mjs` (prompt, static serving, CSP) and the flagged wiring in `server.mjs`. (2) Page: `winwright-ui/index.html`, `style.css`, `app.js`. (3) Launcher change and checks: node tests for the face module, a typed end-to-end turn in a browser, then voice with the user.
