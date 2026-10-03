@@ -1683,27 +1683,44 @@ async fn audit_log_records_outcomes_without_text() {
     let _ = engine
         .execute(&session, click(by("Button", "Submit")))
         .await;
-    // Reads are not audited.
+    // Reads and screenshots are audited too, never what they returned.
     engine
         .execute(
             &session,
             DesktopAction::ReadText {
                 target: by("Document", "Notes"),
-                max_chars: 10,
+                max_chars: 100,
             },
         )
         .await
         .unwrap();
+    let _ = engine
+        .screenshot(&session, serde_json::from_str("{}").unwrap())
+        .await;
     let lines = crate::audit::AuditLog::tail(&path, 10).unwrap();
-    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert_eq!(lines.len(), 4, "{lines:?}");
     assert!(
         lines[0].contains("\"tool\":\"desktop_fill\"") && lines[0].contains("\"result\":\"ok\"")
     );
     assert!(lines[0].contains("\"method\":\"ValuePattern\""));
     assert!(lines[1].contains("\"result\":\"ACTION_BLOCKED\""));
     assert!(
-        !lines.join("\n").contains("secret"),
-        "typed text never reaches the log"
+        lines[2].contains("\"tool\":\"desktop_readText\"")
+            && lines[2].contains("\"result\":\"ok\""),
+        "{}",
+        lines[2]
+    );
+    assert!(
+        lines[3].contains("\"tool\":\"desktop_screenshot\"")
+            && lines[3].contains(r#"window \"Fixture\""#),
+        "{}",
+        lines[3]
+    );
+    let all = lines.join("\n");
+    assert!(!all.contains("secret"), "typed text never reaches the log");
+    assert!(
+        !all.contains("hello notes"),
+        "read text never reaches the log"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

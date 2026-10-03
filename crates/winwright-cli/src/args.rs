@@ -92,7 +92,8 @@ pub enum Command {
     Processes,
     /// Serve MCP over stdio (launched by an AI client; exits when the client disconnects).
     Mcp,
-    /// Show (or clear) the local audit log of actions Winwright performed.
+    /// Show (or clear) the local audit log of what Winwright did and read (actions, text reads,
+    /// screenshots, file listings).
     Audit(AuditArgs),
     /// Open the Inspector window: browse a window's UI tree, pick, highlight, copy locators.
     Inspector,

@@ -517,7 +517,7 @@ impl Engine {
         }
     }
 
-    /// Execute an element-level action (spec §14). State-changing actions are audited.
+    /// Execute an element-level action (spec §14). Every action is audited, reading text too.
     pub async fn execute(
         &self,
         session: &Session,
@@ -525,24 +525,21 @@ impl Engine {
     ) -> WinwrightResult<ActionResult> {
         let started = Instant::now();
         let tool = format!("desktop_{}", action.name());
-        let mutating = !matches!(action, DesktopAction::ReadText { .. });
         let mut target = None;
         let mut confirmed = false;
         let result = self
             .execute_inner(session, action, &mut target, &mut confirmed)
             .await;
-        if mutating {
-            let method = result.as_ref().ok().map(|r| r.method);
-            self.record(
-                session,
-                &tool,
-                target.as_ref(),
-                method,
-                &result,
-                confirmed,
-                started,
-            );
-        }
+        let method = result.as_ref().ok().map(|r| r.method);
+        self.record(
+            session,
+            &tool,
+            target.as_ref(),
+            method,
+            &result,
+            confirmed,
+            started,
+        );
         result
     }
 

@@ -9,6 +9,7 @@ use winwright_contracts::security::{ActionRisk, Capability, ProposedAction, Targ
 use winwright_contracts::system::{
     ExecRequest, ExecResult, FileOperation, FileResult, LaunchRequest, LaunchResult, ProcessInfo,
 };
+use winwright_contracts::window::WindowInfo;
 use winwright_contracts::{WinwrightError, WinwrightResult};
 use winwright_security::{program_capability, transfer_risk};
 
@@ -125,10 +126,36 @@ fn proposed(
 
 impl Engine {
     /// On-demand screenshot (never continuous). Element targets crop the element's bounds.
+    /// Audited: a screenshot can carry anything on screen.
     pub async fn screenshot(
         &self,
         session: &Session,
         request: ScreenshotRequest,
+    ) -> WinwrightResult<CapturedImage> {
+        let started = Instant::now();
+        let mut what = None;
+        let result = self.screenshot_inner(session, request, &mut what).await;
+        let target = what.map(|name| TargetSummary {
+            name: Some(name),
+            ..Default::default()
+        });
+        self.record(
+            session,
+            "desktop_screenshot",
+            target.as_ref(),
+            None,
+            &result,
+            false,
+            started,
+        );
+        result
+    }
+
+    async fn screenshot_inner(
+        &self,
+        session: &Session,
+        request: ScreenshotRequest,
+        what: &mut Option<String>,
     ) -> WinwrightResult<CapturedImage> {
         self.authorize(proposed(
             "desktop_screenshot",
@@ -136,16 +163,16 @@ impl Engine {
             ActionRisk::ReadOnly,
             None,
         ))?;
-        let capture = self
-            .capture
-            .as_deref()
-            .ok_or_else(|| unavailable("capture"))?;
         let ctx = session.operation(self.timeout())?;
-        let target = match &request.target {
-            ScreenshotTarget::Active => CaptureTarget::Window(self.active_window()?.hwnd),
-            ScreenshotTarget::Window(selector) => {
-                CaptureTarget::Window(self.find_window(selector)?.hwnd)
-            }
+        let window = |w: WindowInfo| {
+            (
+                CaptureTarget::Window(w.hwnd),
+                format!("window {:?}", w.title),
+            )
+        };
+        let (target, label) = match &request.target {
+            ScreenshotTarget::Active => window(self.active_window()?),
+            ScreenshotTarget::Window(selector) => window(self.find_window(selector)?),
             ScreenshotTarget::Element { reference } => {
                 let epoch = self.uia.worker_epoch();
                 let key = session.state().refs.get_live(reference, epoch)?.key;
@@ -155,12 +182,20 @@ impl Engine {
                         reason: format!("{} is not on screen", props.label()),
                     }
                 })?;
-                CaptureTarget::Region(bounds)
+                (CaptureTarget::Region(bounds), props.label())
             }
-            ScreenshotTarget::Monitor(i) => CaptureTarget::Monitor(*i),
-            ScreenshotTarget::Region(r) => CaptureTarget::Region(*r),
-            ScreenshotTarget::Desktop => CaptureTarget::Desktop,
+            ScreenshotTarget::Monitor(i) => (CaptureTarget::Monitor(*i), format!("monitor {i}")),
+            ScreenshotTarget::Region(r) => (
+                CaptureTarget::Region(*r),
+                format!("region {},{} {}x{}", r.left, r.top, r.width(), r.height()),
+            ),
+            ScreenshotTarget::Desktop => (CaptureTarget::Desktop, "desktop".to_owned()),
         };
+        *what = Some(label);
+        let capture = self
+            .capture
+            .as_deref()
+            .ok_or_else(|| unavailable("capture"))?;
         capture
             .capture(
                 CaptureRequest {
@@ -314,14 +349,28 @@ impl Engine {
             risk,
             Some(summary.clone()),
         );
-        if risk == ActionRisk::ReadOnly {
-            self.authorize(action)?;
-            let files = self.files.as_deref().ok_or_else(|| unavailable("files"))?;
-            let ctx = session.operation(self.timeout())?;
-            return files.execute(op, &ctx).await;
-        }
         let started = Instant::now();
         let target = action.target.clone();
+        if risk == ActionRisk::ReadOnly {
+            // Audited too: listings and searches reveal what is on disk.
+            let result = async {
+                self.authorize(action)?;
+                let files = self.files.as_deref().ok_or_else(|| unavailable("files"))?;
+                let ctx = session.operation(self.timeout())?;
+                files.execute(op, &ctx).await
+            }
+            .await;
+            self.record(
+                session,
+                "filesystem_operation",
+                target.as_ref(),
+                None,
+                &result,
+                false,
+                started,
+            );
+            return result;
+        }
         let mut lease = None;
         let mut confirmed = false;
         let result = async {
