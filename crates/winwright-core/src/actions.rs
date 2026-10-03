@@ -72,7 +72,6 @@ use crate::session::Session;
 const SETTLE: Duration = Duration::from_millis(600);
 const SETTLE_POLL: Duration = Duration::from_millis(60);
 const MAX_TEXT_CHARS: usize = 10_000;
-const WHEEL_LINES_PER_STEP: i32 = 3;
 
 /// Outcome of one dispatch before window/focus evidence is attached.
 struct Step {
@@ -1247,12 +1246,13 @@ impl Engine {
                 .ok_or_else(|| WinwrightError::InputFailed {
                     reason: format!("{} has no bounds to scroll over", r.label()),
                 })?;
-        let lines = amount as i32 * WHEEL_LINES_PER_STEP;
+        // One step is one wheel notch (3 lines with Windows' default setting).
+        let notches = i32::try_from(amount).unwrap_or(i32::MAX);
         let (x, y) = match direction {
-            ScrollDirection::Up => (0, -lines),
-            ScrollDirection::Down => (0, lines),
-            ScrollDirection::Left => (-lines, 0),
-            ScrollDirection::Right => (lines, 0),
+            ScrollDirection::Up => (0, -notches),
+            ScrollDirection::Down => (0, notches),
+            ScrollDirection::Left => (-notches, 0),
+            ScrollDirection::Right => (notches, 0),
         };
         input.scroll(point, x, y, ctx).await?;
         let mut step = Step::new(ActionMethod::PhysicalScroll);

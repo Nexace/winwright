@@ -13,7 +13,7 @@ use winwright_contracts::{WinwrightError, WinwrightResult};
 use crate::keys::{Layout, is_extended, is_modifier_vk, resolve_chord};
 
 pub(crate) const MAX_CLICKS: u32 = 3;
-pub(crate) const MAX_SCROLL_LINES: i32 = 100;
+pub(crate) const MAX_SCROLL_NOTCHES: i32 = 100;
 pub(crate) const MAX_TEXT_CHARS: usize = 10_000;
 pub(crate) const TEXT_CHUNK_CHARS: usize = 32;
 pub(crate) const MIN_DRAG: Duration = Duration::from_millis(100);
@@ -181,22 +181,24 @@ pub(crate) fn plan_click(button: MouseButton, count: u32) -> WinwrightResult<Vec
         .collect())
 }
 
-/// Wheel events: positive `lines_y` scrolls down (negative wheel delta), positive `lines_x`
-/// scrolls right. One "line" is one wheel notch (`WHEEL_DELTA`); each axis is clamped to
-/// ±[`MAX_SCROLL_LINES`]. Vertical first, then horizontal; zero axes are omitted.
-pub(crate) fn plan_scroll(lines_x: i32, lines_y: i32) -> Vec<RawInput> {
-    let delta = |lines: i32| lines.clamp(-MAX_SCROLL_LINES, MAX_SCROLL_LINES) * WHEEL_DELTA as i32;
+/// Wheel events: positive `notches_y` scrolls down (negative wheel delta), positive `notches_x`
+/// scrolls right. A notch is one `WHEEL_DELTA` (Windows scrolls 3 lines per notch by
+/// default); each axis is clamped to ±[`MAX_SCROLL_NOTCHES`]. Vertical first, then
+/// horizontal; zero axes are omitted.
+pub(crate) fn plan_scroll(notches_x: i32, notches_y: i32) -> Vec<RawInput> {
+    let delta =
+        |notches: i32| notches.clamp(-MAX_SCROLL_NOTCHES, MAX_SCROLL_NOTCHES) * WHEEL_DELTA as i32;
     let mut events = Vec::with_capacity(2);
-    if lines_y != 0 {
+    if notches_y != 0 {
         events.push(RawInput::Wheel {
             horizontal: false,
-            delta: -delta(lines_y),
+            delta: -delta(notches_y),
         });
     }
-    if lines_x != 0 {
+    if notches_x != 0 {
         events.push(RawInput::Wheel {
             horizontal: true,
-            delta: delta(lines_x),
+            delta: delta(notches_x),
         });
     }
     events

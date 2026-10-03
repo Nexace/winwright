@@ -2678,3 +2678,26 @@ async fn strict_mode_confirms_changes_but_never_reads() {
         .unwrap_err();
     assert_eq!(err.code().as_str(), "CONFIRMATION_REQUIRED", "{err}");
 }
+
+#[tokio::test]
+async fn one_scroll_step_is_one_wheel_notch() {
+    let fake = Fake::new();
+    let input = Arc::new(FakeInput::default());
+    let engine = engine(&fake).with_input(input.clone());
+    let session = engine.session(&sid(), "test").unwrap();
+    // No ScrollPattern on a button: the wheel is the fallback.
+    let r = engine
+        .execute(
+            &session,
+            DesktopAction::Scroll {
+                target: by("Button", "Target"),
+                direction: winwright_contracts::action::ScrollDirection::Down,
+                amount: 2,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.method, ActionMethod::PhysicalScroll);
+    let log = input.log.lock().unwrap();
+    assert_eq!(log.last().map(String::as_str), Some("wheel 0,2"), "{log:?}");
+}

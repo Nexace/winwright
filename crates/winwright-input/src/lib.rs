@@ -118,11 +118,11 @@ impl InputBackend for SendInputBackend {
     fn scroll<'a>(
         &'a self,
         point: PhysicalPoint,
-        lines_x: i32,
-        lines_y: i32,
+        notches_x: i32,
+        notches_y: i32,
         ctx: &'a OperationContext,
     ) -> BackendFuture<'a, ()> {
-        Box::pin(self.engine.scroll(point, lines_x, lines_y, ctx))
+        Box::pin(self.engine.scroll(point, notches_x, notches_y, ctx))
     }
 
     fn type_text<'a>(&'a self, text: &'a str, ctx: &'a OperationContext) -> BackendFuture<'a, ()> {
@@ -327,11 +327,11 @@ impl<P: Platform> Engine<P> {
     async fn scroll(
         &self,
         point: PhysicalPoint,
-        lines_x: i32,
-        lines_y: i32,
+        notches_x: i32,
+        notches_y: i32,
         ctx: &OperationContext,
     ) -> WinwrightResult<()> {
-        let wheel = plan::plan_scroll(lines_x, lines_y);
+        let wheel = plan::plan_scroll(notches_x, notches_y);
         let mut seq = self.begin("scroll", ctx).await?;
         let target = plan::plan_move(point, self.platform.virtual_screen()?)?;
         tracing::debug!(events = wheel.len(), "scroll");
@@ -845,7 +845,7 @@ mod tests {
             ]
         );
         engine.scroll(pt(10, 10), 0, 0, &c).await.unwrap();
-        assert_eq!(batches(&engine).len(), 3, "zero lines only moves");
+        assert_eq!(batches(&engine).len(), 3, "zero notches only moves");
     }
 
     #[test]

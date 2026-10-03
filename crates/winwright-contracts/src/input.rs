@@ -218,12 +218,12 @@ pub trait InputBackend: Send + Sync {
         ctx: &'a OperationContext,
     ) -> BackendFuture<'a, ()>;
 
-    /// Wheel at `point`; positive `lines_y` scrolls down, positive `lines_x` scrolls right.
+    /// Wheel at `point`; positive `notches_y` scrolls down, positive `notches_x` scrolls right.
     fn scroll<'a>(
         &'a self,
         point: PhysicalPoint,
-        lines_x: i32,
-        lines_y: i32,
+        notches_x: i32,
+        notches_y: i32,
         ctx: &'a OperationContext,
     ) -> BackendFuture<'a, ()>;
 
