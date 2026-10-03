@@ -30,9 +30,8 @@
   in front, send shortcuts/Win chords/typed line breaks, launch allowlists, classifier hardening,
   dialog context, own folders protected, risky copies/moves confirmed, prompts show the resolved
   program and all arguments, reads and screenshots audited, 128 KB output cap.
-- Tests: all workspace tests pass; clippy `-D warnings` clean. Live: `live_confirm` 2/2 and
-  `live_desktop` 3/3 (2026-10-03); `live_fixture` 7/7 and `mcp_stdio` 2/2 last run before the
-  audit fixes (not re-run: they use the desktop).
+- Tests: all workspace tests pass; clippy `-D warnings` clean. Live after the audit fixes
+  (2026-10-03): `live_fixture` 7/7, `mcp_stdio` 2/2, `live_confirm` 2/2, `live_desktop` 3/3.
 
 ## How to verify on resume
 - `cargo test --workspace`
@@ -43,11 +42,10 @@
   (shows the confirm dialog twice, ~5 s; do not click it). `... manual_` asks a person to click Allow.
 
 ## Next (in order; plan in .gsd/INTEGRATION.md "Decisions and changes from the plan review")
-1. Re-run `live_fixture` + `mcp_stdio` once the user okays using the desktop (~8 s).
-2. Taint rule (web/Notion content read -> desktop changes need confirmation).
-3. Phase 7 physical-input live test (ask the user first; moves the mouse ~10 s).
-4. JARVIS end to end, then ElevenLabs (user sets ELEVENLABS_API_KEY as a user env var).
-5. Reports + Notion memory (cloud, user's choice), last.
+1. Taint rule (web/Notion content read -> desktop changes need confirmation).
+2. Phase 7 physical-input live test (ask the user first; moves the mouse ~10 s).
+3. JARVIS end to end, then ElevenLabs (user sets ELEVENLABS_API_KEY as a user env var).
+4. Reports + Notion memory (cloud, user's choice), last.
 Dropped: Phase 1b, Phase 9, Phase 12, local speech models (Whisper/Kokoro), Jev.
 
 ## Decisions
@@ -85,7 +83,7 @@ Dropped: Phase 1b, Phase 9, Phase 12, local speech models (Whisper/Kokoro), Jev.
 - Not yet run live (needs `npm install`, Chrome, and the user's Claude Code login). Next: run it once with the user.
 
 ## CHECKPOINT 2026-10-03 (resume here)
-State of the tree: `cargo fmt --check`, `cargo clippy --workspace --all-targets -D warnings`, `cargo test --workspace` all pass (2026-10-03, after the audit fixes); live `live_confirm` 2/2 and `live_desktop` 3/3 after the fixes, `live_fixture` 7/7 and `mcp_stdio` 2/2 before them. `scripts/check.ps1` runs the same (`-Live` adds live tests).
+State of the tree: `cargo fmt --check`, `cargo clippy --workspace --all-targets -D warnings`, `cargo test --workspace` all pass (2026-10-03, after the audit fixes); live `live_fixture` 7/7, `mcp_stdio` 2/2, `live_confirm` 2/2 and `live_desktop` 3/3 after the fixes. `scripts/check.ps1` runs the same (`-Live` adds live tests).
 
 COMMITTED 2026-10-03 as c48e464 (contracts/mcp/cli, incl. idle timer + push-to-talk), 1b6a954 files, c4afe04 uia, 9bb432d shell, 8c3ad61 overlay, e276d97 inspector, 39a2a16 core/security:
 - contracts/mcp/cli: 20 fixes (camelCase file-op fields, typo-rejecting actions, stdout purity in mcp mode, negative coords, config switches honoured, overflow panics, CANCELLED hint, real elapsed ms) + my MCP idle timer (WINWRIGHT_IDLE_MINUTES) + `winwright assistant` push-to-talk hotkey (Ctrl+Space, /ptt relay).
