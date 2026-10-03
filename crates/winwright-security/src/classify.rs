@@ -1,6 +1,8 @@
 //! Risk follows the intended effect and the resolved target (spec §66): clicking a button
 //! named "Send" or "Delete" is not an ordinary click.
 
+use std::path::{Component, Path, Prefix};
+
 use winwright_contracts::security::{ActionRisk, Capability};
 
 /// Whole-word phrases (lower-case, space separated) that make activating a control destructive.
@@ -200,6 +202,74 @@ fn split_camel(id: &str) -> String {
         out.push(c);
     }
     out
+}
+
+/// Folders whose contents are secrets wherever they are copied: browser profiles and app
+/// tokens (AppData), SSH, cloud and cluster credentials.
+const SECRET_FOLDERS: &[&str] = &[
+    "appdata", ".ssh", ".aws", ".azure", ".gnupg", ".kube", ".docker",
+];
+/// File names that hold credentials.
+const SECRET_FILES: &[&str] = &[
+    ".env",
+    ".git-credentials",
+    ".netrc",
+    "_netrc",
+    ".npmrc",
+    ".pypirc",
+    "id_rsa",
+    "id_dsa",
+    "id_ecdsa",
+    "id_ed25519",
+    "login data",
+    "cookies",
+    "logins.json",
+    "key4.db",
+];
+/// Key stores and password databases.
+const SECRET_EXTENSIONS: &[&str] = &[
+    "kdbx", "kdb", "pem", "key", "pfx", "p12", "ppk", "jks", "keystore", "ovpn", "gpg",
+];
+
+/// Risk of copying `from` to `to`. A copy to or from a share or another volume (a USB stick,
+/// a mapped drive) can carry data off the machine; whole drives and profiles, and secrets
+/// (keys, password databases, browser and app data), need a person's yes wherever they go.
+pub fn transfer_risk(from: &Path, to: &Path) -> ActionRisk {
+    let same_volume = volume(from).is_some_and(|v| volume(to) == Some(v));
+    let parts: Vec<String> = from
+        .components()
+        .filter_map(|c| match c {
+            Component::Normal(part) => Some(part.to_string_lossy().to_lowercase()),
+            _ => None,
+        })
+        .collect();
+    let file = parts.last().map(String::as_str).unwrap_or_default();
+    let extension = file
+        .rsplit_once('.')
+        .map(|(_, ext)| ext)
+        .unwrap_or_default();
+    let secret = parts.iter().any(|p| SECRET_FOLDERS.contains(&p.as_str()))
+        || SECRET_FILES.contains(&file)
+        || file.starts_with(".env.")
+        || SECRET_EXTENSIONS.contains(&extension);
+    if !same_volume || secret || parts.len() <= 2 {
+        ActionRisk::Sensitive
+    } else {
+        ActionRisk::Normal
+    }
+}
+
+/// The drive letter of a local drive path; `None` for shares, device paths, and the rest.
+fn volume(path: &Path) -> Option<char> {
+    match path.components().next() {
+        Some(Component::Prefix(prefix)) => match prefix.kind() {
+            Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => {
+                Some(char::from(letter).to_ascii_uppercase())
+            }
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 /// Programs that run whatever command or script their arguments name.
@@ -429,6 +499,45 @@ mod tests {
         for name in ["No", "Cancel", "Save", "Okay so here is a long sentence"] {
             assert!(!is_affirmative(name), "{name}");
         }
+    }
+
+    #[test]
+    fn copies_that_can_carry_data_away_need_a_yes() {
+        let risk = |from: &str, to: &str| transfer_risk(Path::new(from), Path::new(to));
+        for (from, to) in [
+            (
+                r"C:\Users\me\Documents\report.docx",
+                r"\\server\share\r.docx",
+            ),
+            (
+                r"\\server\share\tool.zip",
+                r"C:\Users\me\Downloads\tool.zip",
+            ),
+            (r"C:\Users\me\Documents\report.docx", r"E:\report.docx"),
+            (r"C:\Users\me\.ssh\id_ed25519", r"C:\Users\me\Desktop\k"),
+            (
+                r"C:\Users\me\AppData\Local\Google\Chrome\User Data\Default\Login Data",
+                r"C:\Users\me\Desktop\x",
+            ),
+            (
+                r"C:\Users\me\Documents\vault.KDBX",
+                r"C:\Users\me\Desktop\v.kdbx",
+            ),
+            (
+                r"C:\Users\me\code\app\.env.local",
+                r"C:\Users\me\Desktop\env",
+            ),
+            (r"C:\Users\me", r"C:\backup\me"),
+        ] {
+            assert_eq!(risk(from, to), ActionRisk::Sensitive, "{from} -> {to}");
+        }
+        assert_eq!(
+            risk(
+                r"C:\Users\me\Documents\report.docx",
+                r"c:\Users\me\Desktop\report.docx"
+            ),
+            ActionRisk::Normal
+        );
     }
 
     #[test]

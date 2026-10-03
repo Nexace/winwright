@@ -95,6 +95,25 @@ pub(crate) fn system_protected() -> Protected {
         .filter_map(std::env::var_os)
         .map(PathBuf::from),
     );
+    // Winwright's own config, audit log, and program folder (a DLL dropped next to the exe
+    // loads into it): changing them changes the rules.
+    trees.extend(
+        [FOLDERID_RoamingAppData, FOLDERID_LocalAppData]
+            .iter()
+            .filter_map(known_folder_path)
+            .chain(
+                ["APPDATA", "LOCALAPPDATA"]
+                    .into_iter()
+                    .filter_map(std::env::var_os)
+                    .map(PathBuf::from),
+            )
+            .map(|dir| dir.join("winwright")),
+    );
+    trees.extend(
+        std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(Path::to_path_buf)),
+    );
     let profile = known_folder_path(&FOLDERID_Profile)
         .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from));
     Protected::new(trees, profile)
@@ -303,4 +322,35 @@ pub(crate) fn recycle(path: &Path) -> WinwrightResult<()> {
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn winwrights_own_folders_are_protected() {
+        let protected = system_protected();
+        let local = known_folder_path(&FOLDERID_LocalAppData).unwrap();
+        let roaming = known_folder_path(&FOLDERID_RoamingAppData).unwrap();
+        let exe_dir = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        for path in [
+            local.join("winwright").join("audit.jsonl"),
+            roaming.join("winwright").join("config.json"),
+            exe_dir.join("version.dll"),
+            // Containing them is protected too.
+            roaming.clone(),
+        ] {
+            assert!(protected.check(&path).is_err(), "{}", path.display());
+        }
+        assert!(
+            protected
+                .check(&std::env::temp_dir().join("winwright-scratch.txt"))
+                .is_ok()
+        );
+    }
 }

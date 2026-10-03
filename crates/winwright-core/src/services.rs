@@ -10,7 +10,7 @@ use winwright_contracts::system::{
     ExecRequest, ExecResult, FileOperation, FileResult, LaunchRequest, LaunchResult, ProcessInfo,
 };
 use winwright_contracts::{WinwrightError, WinwrightResult};
-use winwright_security::program_capability;
+use winwright_security::{program_capability, transfer_risk};
 
 use std::time::{Duration, Instant};
 
@@ -244,17 +244,19 @@ impl Engine {
             | FileOperation::Metadata { .. }
             | FileOperation::Search { .. }
             | FileOperation::KnownFolder { .. } => (Capability::FileRead, ActionRisk::ReadOnly),
-            FileOperation::Copy { overwrite, .. } | FileOperation::Move { overwrite, .. } => (
-                Capability::FileWrite,
-                if *overwrite {
-                    ActionRisk::Destructive
-                } else {
-                    ActionRisk::Normal
-                },
-            ),
-            FileOperation::Rename { .. } | FileOperation::CreateDirectory { .. } => {
-                (Capability::FileWrite, ActionRisk::Normal)
+            FileOperation::Copy { overwrite, .. } | FileOperation::Move { overwrite, .. }
+                if *overwrite =>
+            {
+                (Capability::FileWrite, ActionRisk::Destructive)
             }
+            FileOperation::Copy { from, to, .. } => {
+                (Capability::FileWrite, transfer_risk(from, to))
+            }
+            // Moved or renamed things vanish from where the user (and their apps) expect them.
+            FileOperation::Move { .. } | FileOperation::Rename { .. } => {
+                (Capability::FileWrite, ActionRisk::Sensitive)
+            }
+            FileOperation::CreateDirectory { .. } => (Capability::FileWrite, ActionRisk::Normal),
             FileOperation::Delete { .. } => (Capability::FileDelete, ActionRisk::Destructive),
         };
         let summary = describe_file_op(&op);

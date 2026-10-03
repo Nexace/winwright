@@ -1439,6 +1439,46 @@ async fn risky_system_operations_are_gated_by_policy() {
 }
 
 #[tokio::test]
+async fn moves_renames_and_copies_off_the_machine_need_confirmation() {
+    use winwright_contracts::system::FileOperation;
+    let fake = Fake::new();
+    let engine = engine(&fake);
+    let session = engine.session(&sid(), "test").unwrap();
+    let doc = r"C:\Users\x\Documents\a.txt";
+    let copy = |from: &str, to: &str| FileOperation::Copy {
+        from: from.into(),
+        to: to.into(),
+        overwrite: false,
+    };
+    for op in [
+        FileOperation::Move {
+            from: doc.into(),
+            to: r"C:\Users\x\Desktop\a.txt".into(),
+            overwrite: false,
+        },
+        FileOperation::Rename {
+            path: doc.into(),
+            new_name: "a.bat".into(),
+        },
+        copy(doc, r"\\server\share\a.txt"),
+        copy(doc, r"E:\a.txt"),
+        copy(r"C:\Users\x\.ssh\id_rsa", r"C:\Users\x\Desktop\k"),
+    ] {
+        let err = engine
+            .file_operation(&session, op.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(err.code().as_str(), "CONFIRMATION_REQUIRED", "{op:?}");
+    }
+    // A plain copy on the same disk only fails here for want of a file backend.
+    let err = engine
+        .file_operation(&session, copy(doc, r"C:\Users\x\Desktop\a.txt"))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code().as_str(), "BACKEND_UNAVAILABLE");
+}
+
+#[tokio::test]
 async fn diff_snapshot_sends_only_changes() {
     let fake = Fake::new();
     let engine = engine(&fake);

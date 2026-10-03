@@ -279,7 +279,10 @@ impl Protected {
             (key(&canonical), display(&canonical))
         };
         let mut out = Self::default();
-        for (tree_key, shown) in trees.into_iter().filter(|p| p.is_absolute()).map(resolve) {
+        // Both spellings: canonicalization can redirect (packaged apps see AppData through a
+        // per-package copy), and a target may be checked in either form.
+        let both = |path: PathBuf| [(key(&path), display(&path)), resolve(path)];
+        for (tree_key, shown) in trees.into_iter().filter(|p| p.is_absolute()).flat_map(both) {
             if !tree_key.is_empty() && !out.trees.iter().any(|(k, _)| *k == tree_key) {
                 out.trees.push((tree_key, shown));
             }
