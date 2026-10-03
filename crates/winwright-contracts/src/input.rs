@@ -162,7 +162,13 @@ pub fn parse_chord(value: &str) -> Result<Vec<Key>, String> {
     let keys = value
         .split('+')
         .map(|part| {
-            Key::parse(part).ok_or_else(|| format!("unknown key {:?} in {value:?}", part.trim()))
+            Key::parse(part).ok_or_else(|| {
+                if part.trim().is_empty() {
+                    format!("empty key in {value:?} (write a literal + as Plus, e.g. Ctrl+Plus)")
+                } else {
+                    format!("unknown key {:?} in {value:?}", part.trim())
+                }
+            })
         })
         .collect::<Result<Vec<_>, _>>()?;
     validate_chord(&keys)?;
@@ -288,5 +294,6 @@ mod tests {
         assert!(parse_chord("A+Ctrl").is_err());
         assert!(parse_chord("Ctrl+Bogus").is_err());
         assert!(parse_chord("").is_err());
+        assert!(parse_chord("Ctrl++").unwrap_err().contains("Plus"));
     }
 }

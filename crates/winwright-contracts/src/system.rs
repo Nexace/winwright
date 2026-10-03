@@ -81,12 +81,19 @@ pub struct ExecResult {
     pub duration_ms: u64,
 }
 
+/// Tagged by `op`; field names are camelCase (`includeHidden`, `newName`, `maxResults`), and
+/// the earlier snake_case spellings are still accepted.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", tag = "op", deny_unknown_fields)]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "op",
+    deny_unknown_fields
+)]
 pub enum FileOperation {
     List {
         path: PathBuf,
-        #[serde(default)]
+        #[serde(default, alias = "include_hidden")]
         include_hidden: bool,
     },
     Metadata {
@@ -106,6 +113,7 @@ pub enum FileOperation {
     },
     Rename {
         path: PathBuf,
+        #[serde(alias = "new_name")]
         new_name: String,
     },
     /// Moves to the Recycle Bin; never a permanent delete.
@@ -119,7 +127,7 @@ pub enum FileOperation {
         root: PathBuf,
         /// Case-insensitive glob on file names, e.g. `*.png`.
         pattern: String,
-        #[serde(default = "default_search_limit")]
+        #[serde(default = "default_search_limit", alias = "max_results")]
         max_results: usize,
     },
     /// Resolves a known folder: `Desktop`, `Documents`, `Downloads`, `Pictures`, ...
@@ -184,4 +192,48 @@ pub trait FileService: Send + Sync {
         op: FileOperation,
         ctx: &'a OperationContext,
     ) -> BackendFuture<'a, FileResult>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_operation_fields_are_camel_case() {
+        let op: FileOperation =
+            serde_json::from_str(r#"{"op":"rename","path":"a.txt","newName":"b.txt"}"#).unwrap();
+        assert!(matches!(op, FileOperation::Rename { ref new_name, .. } if new_name == "b.txt"));
+        let op: FileOperation = serde_json::from_str(
+            r#"{"op":"search","root":"docs","pattern":"*.png","maxResults":5}"#,
+        )
+        .unwrap();
+        assert!(matches!(op, FileOperation::Search { max_results: 5, .. }));
+        let json = serde_json::to_value(FileOperation::List {
+            path: "docs".into(),
+            include_hidden: true,
+        })
+        .unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"op": "list", "path": "docs", "includeHidden": true})
+        );
+        // Earlier snake_case spellings keep working; typos are still rejected.
+        let op: FileOperation =
+            serde_json::from_str(r#"{"op":"list","path":"docs","include_hidden":true}"#).unwrap();
+        assert!(matches!(
+            op,
+            FileOperation::List {
+                include_hidden: true,
+                ..
+            }
+        ));
+        assert!(
+            serde_json::from_str::<FileOperation>(r#"{"op":"list","path":"docs","hidden":true}"#)
+                .is_err()
+        );
+        let schema = serde_json::to_string(&schemars::schema_for!(FileOperation)).unwrap();
+        for field in ["includeHidden", "newName", "maxResults"] {
+            assert!(schema.contains(field), "{field} missing from {schema}");
+        }
+    }
 }

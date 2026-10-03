@@ -6,7 +6,7 @@ use serde::Deserialize;
 use winwright_contracts::WinwrightError;
 use winwright_contracts::action::{DesktopAction, ElementTarget, ScrollDirection, WindowAction};
 use winwright_contracts::capture::{ImageFormat, ScreenshotRequest, ScreenshotTarget};
-use winwright_contracts::geometry::PhysicalRect;
+use winwright_contracts::geometry::{PhysicalPoint, PhysicalRect};
 use winwright_contracts::input::MouseButton;
 use winwright_contracts::locator::{ElementLocator, FindRequest, MatchMode};
 use winwright_contracts::overlay::{HighlightRequest, OverlayStyle};
@@ -14,6 +14,7 @@ use winwright_contracts::snapshot::{SnapshotRequest, SnapshotTarget};
 use winwright_contracts::system::{ExecRequest, FileOperation, LaunchRequest};
 use winwright_contracts::wait::{WaitRequest, WaitState};
 use winwright_contracts::window::WindowSelector;
+use winwright_core::InspectRequest;
 
 type Result<T> = std::result::Result<T, WinwrightError>;
 
@@ -122,14 +123,15 @@ pub struct SnapshotInput {
     pub all: Option<bool>,
     pub include_bounds: Option<bool>,
     pub include_offscreen: Option<bool>,
-    /// Default 500.
+    /// Default: the configured automation.maxSnapshotNodes (500).
     pub max_nodes: Option<u32>,
     /// Default 12.
     pub max_depth: Option<u32>,
 }
 
 impl SnapshotInput {
-    pub fn request(&self) -> SnapshotRequest {
+    /// `default_max_nodes` is the configured `automation.maxSnapshotNodes`.
+    pub fn request(&self, default_max_nodes: u32) -> SnapshotRequest {
         let defaults = SnapshotRequest::default();
         SnapshotRequest {
             target: match &self.reference {
@@ -141,7 +143,7 @@ impl SnapshotInput {
             interactive_only: !self.all.unwrap_or(false),
             include_bounds: self.include_bounds.unwrap_or(false),
             include_offscreen: self.include_offscreen.unwrap_or(false),
-            max_nodes: self.max_nodes.unwrap_or(defaults.max_nodes),
+            max_nodes: self.max_nodes.unwrap_or(default_max_nodes),
             max_depth: self.max_depth.unwrap_or(defaults.max_depth),
             diff: self.diff.unwrap_or(false),
             ..defaults
@@ -196,7 +198,20 @@ pub struct InspectInput {
     pub reference: Option<String>,
     /// Physical screen X (with y). Omit ref and x/y to inspect the focused element.
     pub x: Option<i32>,
+    /// Physical screen Y (with x).
     pub y: Option<i32>,
+}
+
+impl InspectInput {
+    pub fn request(&self) -> Result<InspectRequest> {
+        match (&self.reference, self.x, self.y) {
+            (Some(r), None, None) => Ok(InspectRequest::Ref(r.clone())),
+            (None, Some(x), Some(y)) => Ok(InspectRequest::Point(PhysicalPoint { x, y })),
+            (None, None, None) => Ok(InspectRequest::Focused),
+            (Some(_), _, _) => Err(WinwrightError::invalid("give either ref or x/y, not both")),
+            (None, _, _) => Err(WinwrightError::invalid("x and y must be given together")),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
@@ -416,7 +431,7 @@ pub struct WaitInput {
     pub target: TargetFields,
     /// Expected value for the `value`/`text` states (exact=false for substring).
     pub value: Option<String>,
-    /// Default 10000.
+    /// Default: the configured automation.defaultTimeoutMs (10000). Max 600000.
     pub timeout_ms: Option<u64>,
 }
 
@@ -546,6 +561,18 @@ pub struct ScreenshotInput {
 
 impl ScreenshotInput {
     pub fn request(&self) -> Result<ScreenshotRequest> {
+        let targets = [
+            self.reference.is_some(),
+            self.window.is_some(),
+            self.monitor.is_some(),
+            self.region.is_some(),
+            self.desktop == Some(true),
+        ];
+        if targets.into_iter().filter(|&t| t).count() > 1 {
+            return Err(WinwrightError::invalid(
+                "give only one of ref, window, monitor, region, or desktop",
+            ));
+        }
         let target = if let Some(r) = &self.reference {
             ScreenshotTarget::Element {
                 reference: r.clone(),
@@ -558,7 +585,12 @@ impl ScreenshotInput {
                     "region width and height must be positive",
                 ));
             }
-            ScreenshotTarget::Region(PhysicalRect::new(x, y, x + w, y + h))
+            let (Some(right), Some(bottom)) = (x.checked_add(w), y.checked_add(h)) else {
+                return Err(WinwrightError::invalid(
+                    "region extends past the coordinate range",
+                ));
+            };
+            ScreenshotTarget::Region(PhysicalRect::new(x, y, right, bottom))
         } else if self.desktop == Some(true) {
             ScreenshotTarget::Desktop
         } else if let Some(title) = &self.window {
@@ -694,6 +726,64 @@ mod tests {
         let r = s.request().unwrap();
         assert_eq!(r.target, ScreenshotTarget::Active);
         assert_eq!(r.format, ImageFormat::Jpeg);
+    }
+
+    #[test]
+    fn inspect_needs_both_coordinates_and_one_target() {
+        let i: InspectInput = serde_json::from_str(r#"{"x":10,"y":-20}"#).unwrap();
+        assert_eq!(
+            i.request().unwrap(),
+            InspectRequest::Point(PhysicalPoint { x: 10, y: -20 })
+        );
+        let i: InspectInput = serde_json::from_str("{}").unwrap();
+        assert_eq!(i.request().unwrap(), InspectRequest::Focused);
+        let i: InspectInput = serde_json::from_str(r#"{"ref":"e4"}"#).unwrap();
+        assert_eq!(i.request().unwrap(), InspectRequest::Ref("e4".into()));
+        for bad in [r#"{"x":10}"#, r#"{"y":10}"#, r#"{"ref":"e1","x":1,"y":2}"#] {
+            let i: InspectInput = serde_json::from_str(bad).unwrap();
+            assert!(i.request().is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn screenshot_region_is_checked_without_overflow() {
+        let s: ScreenshotInput = serde_json::from_str(r#"{"region":[-1920,10,800,600]}"#).unwrap();
+        assert_eq!(
+            s.request().unwrap().target,
+            ScreenshotTarget::Region(PhysicalRect::new(-1920, 10, -1120, 610))
+        );
+        let s: ScreenshotInput =
+            serde_json::from_str(r#"{"region":[2147483000,0,1000,10]}"#).unwrap();
+        assert_eq!(
+            s.request().unwrap_err().code(),
+            winwright_contracts::ErrorCode::InvalidRequest
+        );
+    }
+
+    #[test]
+    fn screenshot_takes_exactly_one_target() {
+        for bad in [
+            r#"{"window":"Notepad","region":[0,0,10,10]}"#,
+            r#"{"ref":"e3","monitor":0}"#,
+            r#"{"desktop":true,"window":"Notepad"}"#,
+        ] {
+            let s: ScreenshotInput = serde_json::from_str(bad).unwrap();
+            assert!(s.request().is_err(), "{bad}");
+        }
+        let s: ScreenshotInput =
+            serde_json::from_str(r#"{"window":"Notepad","desktop":false}"#).unwrap();
+        assert!(matches!(
+            s.request().unwrap().target,
+            ScreenshotTarget::Window(_)
+        ));
+    }
+
+    #[test]
+    fn snapshot_node_budget_defaults_to_the_configured_one() {
+        let s: SnapshotInput = serde_json::from_str("{}").unwrap();
+        assert_eq!(s.request(1_200).max_nodes, 1_200);
+        let s: SnapshotInput = serde_json::from_str(r#"{"maxNodes":50}"#).unwrap();
+        assert_eq!(s.request(1_200).max_nodes, 50);
     }
 
     #[test]

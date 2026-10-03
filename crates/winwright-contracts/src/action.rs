@@ -71,7 +71,7 @@ fn default_max_chars() -> u32 {
 
 /// Element-level actions. Serialized with an `action` tag, e.g. `{"action":"click",...}`.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "action", rename_all = "camelCase")]
+#[serde(tag = "action", rename_all = "camelCase", deny_unknown_fields)]
 pub enum DesktopAction {
     #[serde(rename_all = "camelCase")]
     Click {
@@ -263,7 +263,7 @@ pub enum WindowVisualState {
 
 /// Top-level window control (spec §17).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "action", rename_all = "camelCase")]
+#[serde(tag = "action", rename_all = "camelCase", deny_unknown_fields)]
 pub enum WindowAction {
     Focus {
         window: WindowSelector,
@@ -344,6 +344,17 @@ mod tests {
         let a: DesktopAction = serde_json::from_str(json).unwrap();
         assert_eq!(a.name(), "fill");
         assert!(a.target().unwrap().validate().is_ok());
+    }
+
+    #[test]
+    fn action_typos_are_rejected() {
+        // A misspelled clickCount must not silently become a single click.
+        let json = r#"{"action":"click","target":{"ref":"e6"},"clickcount":2}"#;
+        assert!(serde_json::from_str::<DesktopAction>(json).is_err());
+        let json = r#"{"action":"resize","window":{"title":"Notepad"},"width":800,"hieght":600}"#;
+        assert!(serde_json::from_str::<WindowAction>(json).is_err());
+        let json = r#"{"action":"resize","window":{"title":"Notepad"},"width":800,"height":600}"#;
+        assert!(serde_json::from_str::<WindowAction>(json).is_ok());
     }
 
     #[test]

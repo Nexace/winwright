@@ -4,7 +4,9 @@
 
 mod inputs;
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -19,8 +21,9 @@ use winwright_contracts::ids::SessionId;
 use winwright_contracts::input::parse_chord;
 use winwright_contracts::locator::FindResult;
 use winwright_contracts::snapshot::DesktopSnapshot;
+use winwright_contracts::window::WindowInfo;
+use winwright_core::Engine;
 use winwright_core::session::Session;
-use winwright_core::{Engine, InspectRequest};
 
 pub use inputs::*;
 
@@ -92,11 +95,49 @@ fn render_found(f: &FindResult) -> String {
     out
 }
 
+/// `hwnd` is printed in decimal: window_control takes it back as a JSON number.
+fn render_windows(windows: &[WindowInfo]) -> String {
+    windows
+        .iter()
+        .map(|w| {
+            format!(
+                "{}{:?} ({}) hwnd={}{}{}",
+                if w.foreground { "* " } else { "  " },
+                w.title,
+                w.process_name,
+                w.hwnd,
+                if w.minimized { " minimized" } else { "" },
+                if w.maximized { " maximized" } else { "" }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[derive(Clone)]
 pub struct WinwrightMcp {
     engine: Arc<Engine>,
     session: Arc<Mutex<Arc<Session>>>,
     tool_router: ToolRouter<Self>,
+    activity: Arc<Activity>,
+}
+
+/// When the last tool call happened, for idle shutdown.
+struct Activity {
+    start: Instant,
+    last_ms: AtomicU64,
+}
+
+impl Activity {
+    fn touch(&self) {
+        self.last_ms
+            .store(self.start.elapsed().as_millis() as u64, Ordering::Relaxed);
+    }
+
+    fn idle_for(&self) -> Duration {
+        let last = Duration::from_millis(self.last_ms.load(Ordering::Relaxed));
+        self.start.elapsed().saturating_sub(last)
+    }
 }
 
 fn session_id() -> SessionId {
@@ -110,12 +151,17 @@ impl WinwrightMcp {
             engine,
             session: Arc::new(Mutex::new(session)),
             tool_router: Self::tool_router(),
+            activity: Arc::new(Activity {
+                start: Instant::now(),
+                last_ms: AtomicU64::new(0),
+            }),
         })
     }
 
     /// The current session. After an emergency stop it stays cancelled (every tool fails with
     /// CANCELLED) until the user re-enables Winwright, which yields a fresh session here.
     fn sess(&self) -> Arc<Session> {
+        self.activity.touch();
         let mut current = self.session.lock().unwrap_or_else(PoisonError::into_inner);
         if current.is_cancelled()
             && let Ok(fresh) = self.engine.session(&session_id(), "mcp")
@@ -144,7 +190,14 @@ impl WinwrightMcp {
     )]
     async fn desktop_snapshot(&self, Parameters(input): Parameters<SnapshotInput>) -> ToolResult {
         Ok(
-            match self.engine.snapshot(&self.sess(), input.request()).await {
+            match self
+                .engine
+                .snapshot(
+                    &self.sess(),
+                    input.request(self.engine.config().automation.max_snapshot_nodes),
+                )
+                .await
+            {
                 Ok(s) => text(render_snapshot(&s)),
                 Err(e) => fail(e),
             },
@@ -166,23 +219,9 @@ impl WinwrightMcp {
 
     #[tool(description = "List visible top-level windows (the foreground window is marked).")]
     async fn desktop_windows(&self) -> ToolResult {
+        self.activity.touch();
         Ok(match self.engine.list_windows() {
-            Ok(ws) => text(
-                ws.iter()
-                    .map(|w| {
-                        format!(
-                            "{}{:?} ({}) hwnd={:#x}{}{}",
-                            if w.foreground { "* " } else { "  " },
-                            w.title,
-                            w.process_name,
-                            w.hwnd,
-                            if w.minimized { " minimized" } else { "" },
-                            if w.maximized { " maximized" } else { "" }
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            ),
+            Ok(ws) => text(render_windows(&ws)),
             Err(e) => fail(e),
         })
     }
@@ -191,15 +230,11 @@ impl WinwrightMcp {
         description = "Detailed properties of one element: by ref, at screen point x,y, or the focused element."
     )]
     async fn desktop_inspect(&self, Parameters(input): Parameters<InspectInput>) -> ToolResult {
-        let request = match (input.reference, input.x.zip(input.y)) {
-            (Some(r), _) => InspectRequest::Ref(r),
-            (None, Some((x, y))) => {
-                InspectRequest::Point(winwright_contracts::geometry::PhysicalPoint { x, y })
-            }
-            (None, None) => InspectRequest::Focused,
-        };
-        Ok(match self.engine.inspect(&self.sess(), request).await {
-            Ok(d) => json(&d),
+        Ok(match input.request() {
+            Ok(request) => match self.engine.inspect(&self.sess(), request).await {
+                Ok(d) => json(&d),
+                Err(e) => fail(e),
+            },
             Err(e) => fail(e),
         })
     }
@@ -288,7 +323,7 @@ impl WinwrightMcp {
 
     #[tool(
         description = "Wait (no fixed sleeps) until an element reaches a state (exists, missing, visible, hidden, enabled, disabled, focused, value, text) \
-        or a window opens/closes (window-open, window-closed with windowTitle)."
+        or a window opens/closes (window-open, window-closed with `window` = a title substring)."
     )]
     async fn desktop_wait_for(&self, Parameters(input): Parameters<WaitInput>) -> ToolResult {
         Ok(match input.request() {
@@ -365,6 +400,7 @@ impl WinwrightMcp {
 
     #[tool(description = "Remove all overlays.")]
     async fn overlay_clear(&self) -> ToolResult {
+        self.activity.touch();
         Ok(match self.engine.clear_overlays(None) {
             Ok(()) => text("cleared"),
             Err(e) => fail(e),
@@ -385,6 +421,7 @@ impl WinwrightMcp {
 
     #[tool(description = "List running processes (pid, name, integrity level).")]
     async fn process_list(&self) -> ToolResult {
+        self.activity.touch();
         Ok(match self.engine.process_list() {
             Ok(list) => text(
                 list.iter()
@@ -447,12 +484,133 @@ impl ServerHandler for WinwrightMcp {
 }
 
 /// Serves MCP over stdin/stdout until the client disconnects.
+/// Why `serve_stdio` returned.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ended {
+    /// The client closed the connection.
+    Disconnected,
+    /// No tool call for the whole idle period; the caller should exit.
+    Idle,
+}
+
+/// Serves MCP on stdio. With `idle` set, returns [`Ended::Idle`] after that long without a
+/// tool call (the pending stdin read means the caller should then exit the process).
 pub async fn serve_stdio(
     engine: Arc<Engine>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    idle: Option<Duration>,
+) -> Result<Ended, Box<dyn std::error::Error + Send + Sync>> {
     let server = WinwrightMcp::new(engine)?;
-    let running = server.serve(rmcp::transport::stdio()).await?;
-    let reason = running.waiting().await?;
-    tracing::info!(?reason, "MCP client disconnected");
-    Ok(())
+    let activity = Arc::clone(&server.activity);
+    // The timer runs from the start: a client that connects and never sends anything (or
+    // never connects at all) must not keep the process alive either.
+    let watch = async {
+        let Some(limit) = idle else {
+            return std::future::pending::<()>().await;
+        };
+        loop {
+            let idle_for = activity.idle_for();
+            if idle_for >= limit {
+                return;
+            }
+            tokio::time::sleep((limit - idle_for).max(Duration::from_secs(1))).await;
+        }
+    };
+    let serving = async {
+        let running = server.serve(rmcp::transport::stdio()).await?;
+        let reason = running.waiting().await?;
+        tracing::info!(?reason, "MCP client disconnected");
+        Ok::<_, Box<dyn std::error::Error + Send + Sync>>(Ended::Disconnected)
+    };
+    tokio::select! {
+        ended = serving => ended,
+        () = watch => {
+            tracing::info!("no tool calls for the idle period; stopping");
+            Ok(Ended::Idle)
+        }
+    }
+}
+
+#[cfg(test)]
+mod idle_tests {
+    use super::*;
+
+    #[test]
+    fn idle_time_resets_on_touch() {
+        let a = Activity {
+            start: Instant::now() - Duration::from_secs(100),
+            last_ms: AtomicU64::new(0),
+        };
+        assert!(a.idle_for() >= Duration::from_secs(100));
+        a.touch();
+        assert!(a.idle_for() < Duration::from_secs(1));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use winwright_contracts::geometry::PhysicalRect;
+    use winwright_contracts::{ErrorCode, ErrorPayload};
+
+    use super::*;
+
+    #[test]
+    fn tool_schemas_are_objects_that_name_every_described_field() {
+        let tools = WinwrightMcp::tool_router().list_all();
+        assert_eq!(tools.len(), 23);
+        for tool in tools {
+            let schema = serde_json::Value::Object(tool.input_schema.as_ref().clone());
+            assert_eq!(schema["type"], "object", "{}", tool.name);
+            let schema = schema.to_string();
+            let description = tool.description.as_deref().unwrap_or_default();
+            // camelCase words in a description are field names or values the model will send.
+            for word in description.split(|c: char| !c.is_ascii_alphanumeric()) {
+                if word.starts_with(|c: char| c.is_ascii_lowercase())
+                    && word.contains(|c: char| c.is_ascii_uppercase())
+                {
+                    assert!(
+                        schema.contains(&format!("\"{word}\"")),
+                        "{}: the description names `{word}`, which its input schema lacks",
+                        tool.name
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn listed_hwnds_can_be_passed_back_to_window_control() {
+        let listed = render_windows(&[WindowInfo {
+            hwnd: 0x1234,
+            title: "Untitled - Notepad".into(),
+            class_name: "Notepad".into(),
+            process_id: 42,
+            process_name: "Notepad.exe".into(),
+            bounds: PhysicalRect::new(0, 0, 800, 600),
+            minimized: false,
+            maximized: false,
+            foreground: true,
+            topmost: false,
+            owner_hwnd: None,
+        }]);
+        let hwnd = listed
+            .split("hwnd=")
+            .nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+            .unwrap();
+        let input: WindowInput =
+            serde_json::from_str(&format!(r#"{{"action":"focus","hwnd":{hwnd}}}"#))
+                .unwrap_or_else(|e| panic!("hwnd={hwnd} is not accepted back: {e}"));
+        assert_eq!(input.hwnd, Some(0x1234));
+    }
+
+    #[test]
+    fn cancelled_reaches_the_model_as_an_error_with_a_hint() {
+        let result = fail(WinwrightError::Cancelled);
+        assert_eq!(result.is_error, Some(true));
+        let content = serde_json::to_value(&result.content[0]).unwrap();
+        let payload: ErrorPayload =
+            serde_json::from_str(content["text"].as_str().unwrap()).unwrap();
+        assert_eq!(payload.error, ErrorCode::Cancelled);
+        assert!(payload.hint.is_some());
+    }
 }

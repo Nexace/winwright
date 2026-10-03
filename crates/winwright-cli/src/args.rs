@@ -31,6 +31,13 @@ pub struct Cli {
     pub command: Command,
 }
 
+impl Cli {
+    /// `--json` errors go to stdout, except in MCP mode where stdout carries protocol frames only.
+    pub fn json_errors(&self) -> bool {
+        self.json && !matches!(self.command, Command::Mcp)
+    }
+}
+
 #[derive(Subcommand)]
 pub enum Command {
     /// Print version and build information.
@@ -89,6 +96,8 @@ pub enum Command {
     Audit(AuditArgs),
     /// Open the Inspector window: browse a window's UI tree, pick, highlight, copy locators.
     Inspector,
+    /// Start the JARVIS voice assistant (apps/jarvis) with Winwright as its desktop hands.
+    Assistant,
 }
 
 #[derive(Args)]
@@ -308,8 +317,8 @@ pub struct InspectArgs {
     /// Element with keyboard focus.
     #[arg(long)]
     pub focused: bool,
-    /// Element at physical screen coordinates X,Y.
-    #[arg(long, value_parser = parse_point)]
+    /// Element at physical screen coordinates X,Y (negative left of/above the primary monitor).
+    #[arg(long, value_parser = parse_point, allow_hyphen_values = true)]
     pub at: Option<PhysicalPoint>,
 }
 
@@ -586,6 +595,50 @@ mod tests {
             }
         ));
     }
+
+    #[test]
+    fn regions_reject_overflow_instead_of_panicking() {
+        assert_eq!(
+            parse_region("-1920, 10, 800, 600").unwrap(),
+            winwright_contracts::geometry::PhysicalRect::new(-1920, 10, -1120, 610)
+        );
+        assert!(parse_region("2147483000,0,1000,10").is_err());
+        assert!(parse_region("0,2147483000,10,1000").is_err());
+        assert!(parse_region("0,0,10").is_err());
+    }
+
+    #[test]
+    fn points_and_regions_left_of_the_primary_monitor_parse() {
+        let cli = Cli::try_parse_from(["winwright", "inspect", "--at", "-100,200"]).unwrap();
+        let Command::Inspect(i) = cli.command else {
+            panic!()
+        };
+        assert_eq!(i.at, Some(PhysicalPoint { x: -100, y: 200 }));
+        let cli =
+            Cli::try_parse_from(["winwright", "screenshot", "--region", "-1920,-200,800,600"])
+                .unwrap();
+        let Command::Screenshot(s) = cli.command else {
+            panic!()
+        };
+        assert!(s.region.is_some());
+    }
+
+    #[test]
+    fn mcp_mode_never_prints_errors_to_stdout() {
+        let cli = Cli::try_parse_from(["winwright", "--json", "mcp"]).unwrap();
+        assert!(!cli.json_errors());
+        let cli = Cli::try_parse_from(["winwright", "--json", "windows"]).unwrap();
+        assert!(cli.json_errors());
+    }
+
+    #[test]
+    fn screenshot_rejects_all_windows() {
+        let cli = Cli::try_parse_from(["winwright", "screenshot", "--all-windows"]).unwrap();
+        let Command::Screenshot(s) = cli.command else {
+            panic!()
+        };
+        assert!(s.request().is_err());
+    }
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -671,7 +724,12 @@ pub struct ScreenshotArgs {
     #[arg(long, conflicts_with_all = ["window", "process", "hwnd", "region", "desktop"])]
     pub monitor: Option<u32>,
     /// Physical desktop region X,Y,WIDTH,HEIGHT.
-    #[arg(long, value_parser = parse_region, conflicts_with_all = ["window", "process", "hwnd", "desktop"])]
+    #[arg(
+        long,
+        value_parser = parse_region,
+        allow_hyphen_values = true,
+        conflicts_with_all = ["window", "process", "hwnd", "desktop"]
+    )]
     pub region: Option<winwright_contracts::geometry::PhysicalRect>,
     /// Every monitor composed into one image.
     #[arg(long, conflicts_with_all = ["window", "process", "hwnd"])]
@@ -681,8 +739,13 @@ pub struct ScreenshotArgs {
 }
 
 impl ScreenshotArgs {
-    pub fn request(&self) -> winwright_contracts::capture::ScreenshotRequest {
+    pub fn request(&self) -> WinwrightResult<winwright_contracts::capture::ScreenshotRequest> {
         use winwright_contracts::capture::{ImageFormat, ScreenshotRequest, ScreenshotTarget};
+        if self.scope.all_windows {
+            return Err(WinwrightError::invalid(
+                "screenshot takes one window; use --desktop for every monitor",
+            ));
+        }
         let selector = self.scope.selector();
         let target = if let Some(m) = self.monitor {
             ScreenshotTarget::Monitor(m)
@@ -700,7 +763,7 @@ impl ScreenshotArgs {
             .extension()
             .and_then(|e| e.to_str())
             .is_some_and(|e| e.eq_ignore_ascii_case("jpg") || e.eq_ignore_ascii_case("jpeg"));
-        ScreenshotRequest {
+        Ok(ScreenshotRequest {
             target,
             format: if jpeg {
                 ImageFormat::Jpeg
@@ -708,7 +771,7 @@ impl ScreenshotArgs {
                 ImageFormat::Png
             },
             quality: Some(self.quality),
-        }
+        })
     }
 }
 
@@ -753,10 +816,10 @@ fn parse_region(s: &str) -> Result<winwright_contracts::geometry::PhysicalRect, 
     if w <= 0 || h <= 0 {
         return Err("width and height must be positive".into());
     }
+    let (Some(right), Some(bottom)) = (x.checked_add(w), y.checked_add(h)) else {
+        return Err("region extends past the coordinate range".into());
+    };
     Ok(winwright_contracts::geometry::PhysicalRect::new(
-        x,
-        y,
-        x + w,
-        y + h,
+        x, y, right, bottom,
     ))
 }

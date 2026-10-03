@@ -23,16 +23,20 @@ pub type BackendFuture<'a, T> = Pin<Box<dyn Future<Output = WinwrightResult<T>> 
 pub struct OperationContext {
     pub session_id: SessionId,
     pub action_epoch: u64,
+    /// When the operation started; timeouts report the time elapsed since then.
+    pub started: Instant,
     pub deadline: Instant,
     pub cancel: CancellationToken,
 }
 
 impl OperationContext {
     pub fn new(session_id: SessionId, timeout: Duration, cancel: CancellationToken) -> Self {
+        let started = Instant::now();
         Self {
             session_id,
             action_epoch: 0,
-            deadline: Instant::now() + timeout,
+            started,
+            deadline: started + timeout,
             cancel,
         }
     }
@@ -49,7 +53,7 @@ impl OperationContext {
         if self.remaining().is_zero() {
             return Err(WinwrightError::Timeout {
                 operation: operation.to_owned(),
-                elapsed_ms: 0,
+                elapsed_ms: u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX),
             });
         }
         Ok(())
@@ -355,4 +359,29 @@ pub trait UiAutomationBackend: Send + Sync {
         action: UiPatternAction,
         ctx: &'a OperationContext,
     ) -> BackendFuture<'a, UiActionOutcome>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn timeouts_report_the_real_elapsed_time() {
+        let ctx = OperationContext::new(
+            SessionId::parse("t").unwrap(),
+            Duration::from_millis(10),
+            CancellationToken::new(),
+        );
+        std::thread::sleep(Duration::from_millis(30));
+        let Err(WinwrightError::Timeout { elapsed_ms, .. }) = ctx.check("desktop_click") else {
+            panic!("expected a timeout");
+        };
+        assert!(elapsed_ms >= 30, "elapsed_ms={elapsed_ms}");
+    }
+
+    #[test]
+    fn set_value_debug_hides_text() {
+        let a = UiPatternAction::SetValue("hunter2".into());
+        assert_eq!(format!("{a:?}"), "SetValue(chars=7)");
+    }
 }

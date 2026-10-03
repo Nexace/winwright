@@ -4,9 +4,22 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// Caller session selector. The engine owns identity and permissions; this is only a key.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, JsonSchema)]
 #[serde(transparent)]
 pub struct SessionId(String);
+
+/// Deserializing applies the same rules as [`SessionId::parse`].
+impl<'de> Deserialize<'de> for SessionId {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(&value).ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "invalid session id {value:?}: use 1-{} of A-Z a-z 0-9 _ -",
+                Self::MAX_LEN
+            ))
+        })
+    }
+}
 
 impl SessionId {
     pub const MAX_LEN: usize = 64;
@@ -63,6 +76,15 @@ mod tests {
         assert!(SessionId::parse("a b").is_none());
         assert!(SessionId::parse(r"..\pipe").is_none());
         assert!(SessionId::parse(&"x".repeat(65)).is_none());
+    }
+
+    #[test]
+    fn session_ids_deserialize_with_the_same_rules() {
+        let id: SessionId = serde_json::from_str(r#""sess_01-a""#).unwrap();
+        assert_eq!(serde_json::to_string(&id).unwrap(), r#""sess_01-a""#);
+        for bad in [r#""""#, r#""a b""#, r#""..\\pipe""#] {
+            assert!(serde_json::from_str::<SessionId>(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

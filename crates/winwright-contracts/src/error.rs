@@ -179,13 +179,15 @@ impl WinwrightError {
             Self::ActionOutcomeUnknown { .. } => {
                 "Observe the UI before retrying; the action may already have happened."
             }
+            Self::Cancelled => {
+                "The user stopped Winwright (emergency stop). Stop and ask the user before doing                  anything else; only they can resume it."
+            }
             Self::ActionBlocked { .. }
             | Self::ProcessExited { .. }
             | Self::CaptureFailed { .. }
             | Self::DpiConversionFailed { .. }
             | Self::InputFailed { .. }
             | Self::VisionNoMatch { .. }
-            | Self::Cancelled
             | Self::SensitiveField { .. }
             | Self::InvalidRequest { .. }
             | Self::Platform { .. } => return None,
@@ -263,10 +265,16 @@ mod tests {
 
     #[test]
     fn empty_optional_fields_are_omitted() {
-        let json = serde_json::to_value(WinwrightError::Cancelled.payload()).unwrap();
+        let json = serde_json::to_value(WinwrightError::invalid("bad").payload()).unwrap();
         assert_eq!(
             json,
-            serde_json::json!({"error": "CANCELLED", "message": "operation cancelled"})
+            serde_json::json!({"error": "INVALID_REQUEST", "message": "invalid request: bad"})
         );
+    }
+
+    #[test]
+    fn cancelled_tells_the_model_to_stop() {
+        let hint = WinwrightError::Cancelled.payload().hint.unwrap();
+        assert!(hint.contains("user"), "{hint}");
     }
 }

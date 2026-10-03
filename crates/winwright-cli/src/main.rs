@@ -44,6 +44,33 @@ struct Extras {
     system: bool,
 }
 
+impl Extras {
+    fn for_command(command: &Command, config: &Config) -> Self {
+        Self {
+            capture: matches!(command, Command::Screenshot(_)),
+            overlay: matches!(command, Command::Highlight(_)) && config.overlay.enabled,
+            system: matches!(command, Command::Launch(_) | Command::Processes),
+        }
+    }
+}
+
+fn overlays_disabled() -> WinwrightError {
+    WinwrightError::ActionBlocked {
+        reason: "overlays are disabled in config (overlay.enabled)".into(),
+    }
+}
+
+/// `server.mcpStdio: false` turns the stdio MCP server off.
+fn check_mcp_enabled(config: &Config) -> Result<(), WinwrightError> {
+    if config.server.mcp_stdio {
+        Ok(())
+    } else {
+        Err(WinwrightError::ActionBlocked {
+            reason: "MCP over stdio is disabled in config (server.mcpStdio)".into(),
+        })
+    }
+}
+
 /// Confirmations always go to the person at this machine; audit follows config.
 fn with_safety(engine: Engine) -> Engine {
     let audit = engine.config().security.audit;
@@ -194,18 +221,21 @@ fn print_action(r: &ActionResult) {
 async fn serve_mcp(config: Config) -> Result<(), WinwrightError> {
     let native = winwright_overlay::NativeUi::start()?;
     let uia = winwright_uia::UiaBackend::start()?;
-    let engine = Arc::new(
-        with_safety(Engine::new(
-            config,
-            Arc::new(winwright_win32::Win32Windows),
-            Arc::new(uia),
-        ))
-        .with_input(Arc::new(winwright_input::SendInputBackend::new()))
-        .with_capture(Arc::new(lazy::LazyCapture::default()))
-        .with_overlay(Arc::new(native.overlay))
-        .with_processes(Arc::new(winwright_shell::SystemProcesses::new()))
-        .with_files(Arc::new(winwright_files::LocalFiles::new())),
-    );
+    let overlays = config.overlay.enabled;
+    let engine = with_safety(Engine::new(
+        config,
+        Arc::new(winwright_win32::Win32Windows),
+        Arc::new(uia),
+    ))
+    .with_input(Arc::new(winwright_input::SendInputBackend::new()))
+    .with_capture(Arc::new(lazy::LazyCapture::default()))
+    .with_processes(Arc::new(winwright_shell::SystemProcesses::new()))
+    .with_files(Arc::new(winwright_files::LocalFiles::new()));
+    let engine = Arc::new(if overlays {
+        engine.with_overlay(Arc::new(native.overlay))
+    } else {
+        engine
+    });
     // Weak: callbacks must not keep the engine (and its UI thread) alive.
     let weak = Arc::downgrade(&engine);
     let tray = native.tray.clone();
@@ -226,7 +256,7 @@ async fn serve_mcp(config: Config) -> Result<(), WinwrightError> {
                     engine.rearm();
                     tray.update(tray_state(false));
                 }
-                TRAY_INSPECTOR => spawn_detached(&["inspector"]),
+                TRAY_INSPECTOR => open_inspector(),
                 TRAY_AUDIT if !open_audit_log() => tray.notify(
                     "No audit log yet",
                     "Winwright records every AI action here once an assistant acts.",
@@ -256,15 +286,29 @@ async fn serve_mcp(config: Config) -> Result<(), WinwrightError> {
         ),
         Err(err) => tracing::warn!(%err, "emergency-stop hotkey unavailable"),
     }
-    winwright_mcp::serve_stdio(Arc::clone(&engine))
+    let served = winwright_mcp::serve_stdio(Arc::clone(&engine), mcp_idle_timeout())
         .await
         .map_err(|e| WinwrightError::BackendUnavailable {
             backend: "mcp".into(),
             reason: e.to_string(),
-        })?;
+        });
+    // Also on a failed handshake: an icon left behind stays in the tray until hovered.
     native.tray.remove();
     native.hotkeys.shutdown();
-    Ok(())
+    if matches!(served, Ok(winwright_mcp::Ended::Idle)) {
+        // The pending stdin read would keep the runtime from shutting down.
+        std::process::exit(0);
+    }
+    served.map(|_| ())
+}
+
+/// Idle shutdown for `winwright mcp`: `WINWRIGHT_IDLE_MINUTES` (default 10, 0 = never).
+fn mcp_idle_timeout() -> Option<std::time::Duration> {
+    let minutes = std::env::var("WINWRIGHT_IDLE_MINUTES")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(10);
+    (minutes > 0).then(|| std::time::Duration::from_secs(minutes * 60))
 }
 
 const TRAY_STOP: u32 = 1;
@@ -311,20 +355,23 @@ fn tray_state(stopped: bool) -> winwright_overlay::TrayState {
     }
 }
 
-/// Starts another `winwright` process (the Inspector) without waiting for it.
-fn spawn_detached(args: &[&str]) {
+/// Starts a program for the user without waiting for it. Its stdio is never the MCP pipes:
+/// stdout carries protocol frames, and a child holding the pipes keeps them open after exit.
+fn spawn_detached(command: &mut std::process::Command) {
+    if let Err(err) = command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        tracing::warn!(%err, "could not start {:?}", command.get_program());
+    }
+}
+
+/// Starts another `winwright` process (the Inspector).
+fn open_inspector() {
     match std::env::current_exe() {
-        Ok(exe) => {
-            if let Err(err) = std::process::Command::new(exe)
-                .args(args)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()
-            {
-                tracing::warn!(%err, "could not start {args:?}");
-            }
-        }
+        Ok(exe) => spawn_detached(std::process::Command::new(exe).arg("inspector")),
         Err(err) => tracing::warn!(%err, "cannot locate winwright.exe"),
     }
 }
@@ -338,9 +385,7 @@ fn open_audit_log() -> bool {
     if !path.exists() {
         return false;
     }
-    if let Err(err) = std::process::Command::new("notepad.exe").arg(&path).spawn() {
-        tracing::warn!(%err, "could not open the audit log");
-    }
+    spawn_detached(std::process::Command::new("notepad.exe").arg(&path));
     true
 }
 
@@ -382,7 +427,10 @@ async fn run(cli: Cli) -> Result<(), WinwrightError> {
             print_json(&config);
             return Ok(());
         }
-        Command::Mcp => return serve_mcp(config).await,
+        Command::Mcp => {
+            check_mcp_enabled(&config)?;
+            return serve_mcp(config).await;
+        }
         Command::Audit(a) => {
             let Some(path) = winwright_core::audit::AuditLog::default_path() else {
                 return Err(WinwrightError::invalid("LOCALAPPDATA is not set"));
@@ -407,18 +455,15 @@ async fn run(cli: Cli) -> Result<(), WinwrightError> {
     };
 
     let max_nodes = config.automation.max_snapshot_nodes;
-    let extras = Extras {
-        capture: matches!(command, Command::Screenshot(_)),
-        overlay: matches!(command, Command::Highlight(_)),
-        system: matches!(command, Command::Launch(_) | Command::Processes),
-    };
+    let extras = Extras::for_command(&command, &config);
     let engine = build_engine(config, extras)?;
     match command {
         Command::Version
         | Command::Config
         | Command::Mcp
         | Command::Audit(_)
-        | Command::Inspector => unreachable!("handled above"),
+        | Command::Inspector
+        | Command::Assistant => unreachable!("handled above"),
         Command::Windows => {
             let windows = engine.list_windows()?;
             if json {
@@ -633,7 +678,7 @@ async fn run(cli: Cli) -> Result<(), WinwrightError> {
         }
         Command::Screenshot(a) => {
             let session = engine.session(&cli_session(), "cli")?;
-            let image = engine.screenshot(&session, a.request()).await?;
+            let image = engine.screenshot(&session, a.request()?).await?;
             std::fs::write(&a.out, &image.bytes).map_err(|e| {
                 WinwrightError::invalid(format!("cannot write {}: {e}", a.out.display()))
             })?;
@@ -661,6 +706,9 @@ async fn run(cli: Cli) -> Result<(), WinwrightError> {
         }
         Command::Highlight(a) => {
             use winwright_contracts::overlay::{HighlightRequest, OverlayStyle};
+            if !extras.overlay {
+                return Err(overlays_disabled());
+            }
             let session = engine.session(&cli_session(), "cli")?;
             let result = engine
                 .highlight(
@@ -733,16 +781,130 @@ fn main() -> ExitCode {
     // Must precede any HWND creation so every coordinate is physical pixels.
     winwright_win32::enable_per_monitor_dpi_awareness();
     let cli = Cli::parse();
-    let json = cli.json;
+    let json = cli.json_errors();
     if matches!(cli.command, Command::Inspector) {
         // The Inspector drives its own window loop and runtime on this thread.
         return report(run_inspector(cli.config.as_deref()), json);
+    }
+    if matches!(cli.command, Command::Assistant) {
+        return report(run_assistant(), json);
     }
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_time()
         .build()
         .expect("tokio runtime");
     report(runtime.block_on(run(cli)), json)
+}
+
+/// Where JARVIS lives: `WINWRIGHT_JARVIS_DIR`, else `apps/jarvis` above the executable
+/// (`target/{debug,release}/winwright.exe` inside a checkout).
+fn jarvis_dir() -> Option<std::path::PathBuf> {
+    if let Some(dir) = std::env::var_os("WINWRIGHT_JARVIS_DIR") {
+        return Some(dir.into());
+    }
+    let exe = std::env::current_exe().ok()?;
+    exe.ancestors()
+        .map(|a| a.join("apps").join("jarvis"))
+        .find(|d| d.join("scripts").join("start.mjs").is_file())
+}
+
+/// A per-run secret for the bridge's local push-to-talk endpoint (OS-seeded hashing, 128 bits).
+fn random_token() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let part = |salt: u64| {
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u64(salt);
+        h.write_u32(std::process::id());
+        h.finish()
+    };
+    format!("{:016x}{:016x}", part(1), part(2))
+}
+
+/// Tells the bridge the hotkey was pressed. Best effort: if JARVIS is not up yet, nothing happens.
+fn post_ptt(port: &str, token: &str) {
+    use std::io::Write;
+    let Ok(mut conn) = std::net::TcpStream::connect(format!("127.0.0.1:{port}")) else {
+        return;
+    };
+    let _ = conn.set_write_timeout(Some(std::time::Duration::from_secs(2)));
+    let _ = write!(
+        conn,
+        "POST /ptt HTTP/1.1
+Host: localhost
+x-jarvis-ptt: {token}
+Content-Length: 0
+Connection: close
+
+"
+    );
+}
+
+/// Runs JARVIS (a Node app) until it exits. It talks to Winwright by launching
+/// `winwright mcp`, so every Winwright safety gate (confirmations, default-deny shell,
+/// Ctrl+Alt+Esc, audit log) applies exactly as for any other MCP client.
+fn run_assistant() -> Result<(), WinwrightError> {
+    let unavailable = |reason: String| WinwrightError::BackendUnavailable {
+        backend: "assistant".into(),
+        reason,
+    };
+    let dir = jarvis_dir().ok_or_else(|| {
+        unavailable("apps/jarvis not found; set WINWRIGHT_JARVIS_DIR to its folder".into())
+    })?;
+    if !dir.join("node_modules").is_dir() {
+        return Err(unavailable(format!(
+            "JARVIS dependencies are not installed. Run `npm install` in {} first \
+             (it downloads several hundred MB).",
+            dir.display()
+        )));
+    }
+    let exe = std::env::current_exe().map_err(|e| unavailable(e.to_string()))?;
+    let token = random_token();
+    let port = std::env::var("JARVIS_BRIDGE_PORT").unwrap_or_else(|_| "8787".into());
+    // Push-to-talk: a global hotkey (it works while a game has focus), relayed to the
+    // page by the bridge. Nothing listens until it is pressed.
+    let chord = std::env::var("WINWRIGHT_PTT_HOTKEY").unwrap_or_else(|_| "Ctrl+Space".into());
+    let native = winwright_overlay::NativeUi::start()?;
+    let registered = parse_chord(&chord)
+        .map_err(|e| WinwrightError::invalid(format!("invalid hotkey {chord:?}: {e}")))
+        .and_then(|keys| {
+            let (port, token) = (port.clone(), token.clone());
+            native.hotkeys.register(
+                &keys,
+                Box::new(move || {
+                    let (port, token) = (port.clone(), token.clone());
+                    // Off the UI thread: the hotkey callback must return quickly.
+                    std::thread::spawn(move || post_ptt(&port, &token));
+                }),
+            )
+        });
+    match registered {
+        Ok(_) => println!("Push-to-talk hotkey: {chord} (works in any app, and in games)."),
+        Err(err) => eprintln!(
+            "warning: hotkey {chord} unavailable ({err}); press Space in the JARVIS page instead."
+        ),
+    }
+    println!("Starting JARVIS from {} (Ctrl+C to stop).", dir.display());
+    println!(
+        "Open the printed URL in your browser and click INITIALISE; then press {chord} to talk."
+    );
+    let status = std::process::Command::new("node")
+        .arg("scripts/start.mjs")
+        .current_dir(&dir)
+        .env("JARVIS_WINWRIGHT_EXE", exe)
+        .env("JARVIS_PTT_TOKEN", &token)
+        .status()
+        .map_err(|e| {
+            unavailable(format!(
+                "cannot start node (is Node.js 20+ installed?): {e}"
+            ))
+        });
+    native.hotkeys.shutdown();
+    let status = status?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(unavailable(format!("JARVIS exited with {status}")))
+    }
 }
 
 fn run_inspector(config: Option<&std::path::Path>) -> Result<(), WinwrightError> {
@@ -776,5 +938,35 @@ fn report(result: Result<(), WinwrightError>, json: bool) -> ExitCode {
             }
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn command(args: &[&str]) -> Command {
+        Cli::try_parse_from(args).unwrap().command
+    }
+
+    #[test]
+    fn mcp_respects_server_mcp_stdio() {
+        let mut config = Config::default();
+        assert!(check_mcp_enabled(&config).is_ok());
+        config.server.mcp_stdio = false;
+        let err = check_mcp_enabled(&config).unwrap_err();
+        assert_eq!(err.code().as_str(), "ACTION_BLOCKED");
+        assert!(err.to_string().contains("mcpStdio"), "{err}");
+    }
+
+    #[test]
+    fn overlays_follow_overlay_enabled() {
+        let highlight = command(&["winwright", "highlight", "--name", "Save"]);
+        let mut config = Config::default();
+        assert!(Extras::for_command(&highlight, &config).overlay);
+        config.overlay.enabled = false;
+        assert!(!Extras::for_command(&highlight, &config).overlay);
+        let shot = command(&["winwright", "screenshot"]);
+        assert!(Extras::for_command(&shot, &config).capture);
     }
 }
