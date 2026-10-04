@@ -254,6 +254,10 @@ pub fn draw(canvas: &mut Canvas<'_>, layout: &Layout, m: &Metrics, color: u32) {
         canvas.fill_circle(x, y, ring, lighten(color, 140), MARKER_RING_ALPHA);
         canvas.fill_circle(x, y, m.marker_radius as f32, color, 255);
     }
+    if let Some(pointer) = &layout.pointer {
+        canvas.fill_triangle(pointer.edge, WHITE, 255);
+        canvas.fill_triangle(pointer.fill, color, 255);
+    }
     if let Some(label) = layout.label {
         canvas.fill_rounded_rect(label, m.label_radius as f32, color, 255);
     }
@@ -413,12 +417,37 @@ mod tests {
     }
 
     #[test]
+    fn pointer_is_a_colored_dart_with_a_white_edge() {
+        let m = Metrics::for_dpi(96);
+        let layout = compute_layout(&LayoutInput {
+            target: PhysicalRect::new(100, 100, 140, 120),
+            style: OverlayStyle::Pointer,
+            monitor: PhysicalRect::new(0, 0, 800, 600),
+            work: PhysicalRect::new(0, 0, 800, 560),
+            metrics: m,
+            label_text: None,
+            badge_text: None,
+        })
+        .unwrap();
+        let (w, h) = (layout.window.width(), layout.window.height());
+        let mut px = vec![0u32; (w * h) as usize];
+        let mut c = Canvas::new(w, h, &mut px);
+        draw(&mut c, &layout, &m, RED);
+        let tip = layout.pointer.unwrap().tip;
+        assert_eq!(c.pixel(tip.x + 6, tip.y + 6), premultiply(RED, 255));
+        // Past the dart's tail, inside its edge.
+        assert_eq!(c.pixel(tip.x + 14, tip.y + 14), premultiply(WHITE, 255));
+        assert_premultiplied(&px);
+    }
+
+    #[test]
     fn every_style_paints_valid_premultiplied_pixels() {
         let m = Metrics::for_dpi(144);
         for style in [
             OverlayStyle::Highlight,
             OverlayStyle::Arrow,
             OverlayStyle::ClickMarker,
+            OverlayStyle::Pointer,
         ] {
             let layout = compute_layout(&LayoutInput {
                 target: PhysicalRect::new(300, 300, 400, 340),

@@ -29,6 +29,7 @@ mod confirm;
 mod keys;
 mod layout;
 mod paint;
+mod pointer;
 mod render;
 pub mod theme;
 mod thread;
@@ -43,7 +44,9 @@ use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 use winwright_contracts::input::{Key, parse_chord};
-use winwright_contracts::overlay::{OverlayId, OverlayRequest, OverlayService};
+use winwright_contracts::overlay::{
+    OverlayId, OverlayRequest, OverlayService, PointerCallback, PointerWatch,
+};
 use winwright_contracts::{WinwrightError, WinwrightResult};
 
 use crate::thread::{Callback, Command, Signals, WM_APP_WAKE};
@@ -367,6 +370,22 @@ impl OverlayService for NativeOverlay {
             Err(WinwrightError::BackendUnavailable { .. }) => Ok(()),
             other => other,
         }
+    }
+
+    /// Waits until the hook is in place, so no click after this returns is missed.
+    fn watch_pointer(&self, on_event: PointerCallback) -> WinwrightResult<PointerWatch> {
+        let id = self.ui.next_overlay.fetch_add(1, Ordering::Relaxed);
+        let watcher: pointer::Watcher = Arc::from(on_event);
+        self.ui
+            .request("pointer watch", |reply| Command::WatchPointer {
+                id,
+                watcher,
+                reply,
+            })??;
+        let ui = Arc::clone(&self.ui);
+        Ok(PointerWatch::new(move || {
+            let _ = ui.submit(Command::UnwatchPointer { id });
+        }))
     }
 }
 

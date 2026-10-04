@@ -137,6 +137,33 @@ fn every_style_renders_and_clear_all_removes_them() {
 
 #[test]
 #[ignore = "needs an interactive desktop"]
+fn pointer_renders_and_the_click_watch_comes_and_goes() {
+    let ui = NativeUi::start().unwrap();
+    let mut req = request([600, 300, 700, 340], OverlayStyle::Pointer);
+    req.label = Some("Click here".into());
+    let id = ui.overlay.show(req).unwrap();
+    let handle = ui
+        .overlay
+        .window_handle(id)
+        .unwrap()
+        .expect("pointer window");
+    assert!(is_window(handle));
+
+    let first = ui.overlay.watch_pointer(Box::new(|_| {})).unwrap();
+    let second = ui.overlay.watch_pointer(Box::new(|_| {})).unwrap();
+    drop(first);
+    drop(second);
+    // The hook went with the last watcher and comes back for the next one.
+    drop(ui.overlay.watch_pointer(Box::new(|_| {})).unwrap());
+
+    sleep(Duration::from_millis(300));
+    ui.overlay.clear(None).unwrap();
+    assert_eq!(ui.overlay.window_handle(id).unwrap(), None);
+    assert!(!is_window(handle));
+}
+
+#[test]
+#[ignore = "needs an interactive desktop"]
 fn shutdown_destroys_overlays_and_rejects_later_shows() {
     let ui = NativeUi::start().unwrap();
     let id = ui

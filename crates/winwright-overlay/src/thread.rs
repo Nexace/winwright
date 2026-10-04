@@ -78,6 +78,14 @@ pub enum Command {
         body: String,
     },
     TrayRemove,
+    WatchPointer {
+        id: u64,
+        watcher: crate::pointer::Watcher,
+        reply: SyncSender<WinwrightResult<()>>,
+    },
+    UnwatchPointer {
+        id: u64,
+    },
     Shutdown,
 }
 
@@ -258,7 +266,7 @@ unsafe extern "system" fn host_proc(
 }
 
 /// A panic must not unwind into user32 (that aborts the process): log it, keep the loop alive.
-fn guarded(what: &'static str, f: impl FnOnce()) {
+pub(crate) fn guarded(what: &'static str, f: impl FnOnce()) {
     if catch_unwind(AssertUnwindSafe(f)).is_err() {
         tracing::error!(what, "native UI handler panicked");
     }
@@ -415,6 +423,10 @@ impl UiState {
             }
             Command::TrayBalloon { title, body } => crate::tray::balloon(&title, &body),
             Command::TrayRemove => crate::tray::remove(),
+            Command::WatchPointer { id, watcher, reply } => {
+                let _ = reply.send(crate::pointer::watch(self.hinstance, id, watcher));
+            }
+            Command::UnwatchPointer { id } => crate::pointer::unwatch(id),
             Command::Shutdown => {}
         }
     }
@@ -511,6 +523,7 @@ impl UiState {
     /// mailbox, and finally destroys the host window.
     fn destroy(mut self) {
         self.clear_all();
+        crate::pointer::stop();
         crate::tray::remove();
         for &id in self.hotkeys.keys() {
             // SAFETY: `id` was registered on `host` by this thread.
