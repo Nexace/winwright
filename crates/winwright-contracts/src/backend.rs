@@ -304,6 +304,12 @@ pub trait WindowBackend: Send + Sync {
     fn cursor_position(&self) -> WinwrightResult<PhysicalPoint>;
     fn process_name(&self, pid: u32) -> String;
 
+    /// When the person last used the keyboard or mouse (a tick count in milliseconds; never
+    /// which key). `None` when unknown.
+    fn last_input_ms(&self) -> Option<u64> {
+        None
+    }
+
     /// Restores if minimized and brings to the foreground. Fails with `WINDOW_NOT_FOCUSED`
     /// when Windows refuses the foreground change.
     fn focus_window(&self, hwnd: u64) -> WinwrightResult<()>;

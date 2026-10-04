@@ -1,6 +1,8 @@
 //! Teaching (Phase 22): pointing at spots given by pixels, and guides that point at each step
 //! in turn and wait for the person to do it. Nothing here clicks or types for them.
 
+use std::collections::HashSet;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::time::Duration;
 
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
@@ -95,6 +97,94 @@ async fn wait(pause: Duration, ctx: &OperationContext) -> WinwrightResult<bool> 
         () = ctx.cancel.cancelled() => Err(WinwrightError::Cancelled),
         () = tokio::time::sleep_until(ctx.deadline.into()) => Ok(false),
     }
+}
+
+/// The person's next press and, once it is released, where (when they dragged); `None` when
+/// the guide's time runs out first. A press still held then answers on its own.
+async fn next_press(
+    events: &mut UnboundedReceiver<PointerEvent>,
+    ctx: &OperationContext,
+) -> WinwrightResult<Option<(PointerEvent, Option<PhysicalPoint>)>> {
+    let press = loop {
+        match next_event(events, ctx).await? {
+            None => return Ok(None),
+            Some(event) if event.down => break event,
+            // The release of a press made before this step.
+            Some(_) => {}
+        }
+    };
+    while let Some(event) = next_event(events, ctx).await? {
+        if !event.down && event.button == press.button {
+            return Ok(Some((press, dragged(press.point, event.point))));
+        }
+    }
+    Ok(Some((press, None)))
+}
+
+/// What a click means for the step on screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Verdict {
+    Done,
+    /// Marked "Not there"; the step keeps waiting.
+    Missed,
+    /// One miss too many: the guide stops for help.
+    GiveUp,
+}
+
+fn verdict(inside: bool, misses: &mut u32) -> Verdict {
+    if inside {
+        return Verdict::Done;
+    }
+    *misses += 1;
+    if *misses >= MAX_MISSES {
+        Verdict::GiveUp
+    } else {
+        Verdict::Missed
+    }
+}
+
+/// Decides when a keyboard step's area has changed. Frames seen before the person touches
+/// anything are its normal life (a blinking caret, a looping animation) and never count; after
+/// their input, a frame not seen before counts once it shows on two captures running.
+struct ChangeWatch {
+    normal: HashSet<u64>,
+    input_at_start: Option<u64>,
+    pending: bool,
+}
+
+impl ChangeWatch {
+    fn new(first: u64, input_at_start: Option<u64>) -> Self {
+        Self {
+            normal: HashSet::from([first]),
+            input_at_start,
+            pending: false,
+        }
+    }
+
+    /// Whether the step is done after this frame. `input` is the person's last input time,
+    /// `None` when unknown (then any new frame may count).
+    fn see(&mut self, frame: u64, input: Option<u64>) -> bool {
+        if input.is_some() && input == self.input_at_start {
+            self.normal.insert(frame);
+            self.pending = false;
+            return false;
+        }
+        if self.normal.contains(&frame) {
+            self.pending = false;
+            return false;
+        }
+        if self.pending {
+            return true;
+        }
+        self.pending = true;
+        false
+    }
+}
+
+fn frame_hash(bytes: &[u8]) -> u64 {
+    let mut h = DefaultHasher::new();
+    bytes.hash(&mut h);
+    h.finish()
 }
 
 /// A step on screen: its area, and the origin its pixels are counted from.
@@ -261,18 +351,19 @@ impl Engine {
                         };
                         let inside = click.inside;
                         result.clicks.push(click);
-                        if inside {
-                            break;
+                        match verdict(inside, &mut misses) {
+                            Verdict::Done => break,
+                            Verdict::GiveUp => {
+                                result.outcome = GuideOutcome::ClickedElsewhere;
+                                missed = Some((shown.rect, number, caption));
+                                break 'steps;
+                            }
+                            Verdict::Missed => {
+                                // The same step, marked, waits for the right click.
+                                let _ = overlay.clear(Some(drawn.id));
+                                drawn.id = show(not_there(caption), MISS_COLOR)?;
+                            }
                         }
-                        misses += 1;
-                        if misses == MAX_MISSES {
-                            result.outcome = GuideOutcome::ClickedElsewhere;
-                            missed = Some((shown.rect, number, caption));
-                            break 'steps;
-                        }
-                        // The same step, marked, waits for the right click.
-                        let _ = overlay.clear(Some(drawn.id));
-                        drawn.id = show(not_there(caption), MISS_COLOR)?;
                     }
                 }
                 GuideWait::Change => {
@@ -342,22 +433,9 @@ impl Engine {
         step: usize,
         ctx: &OperationContext,
     ) -> WinwrightResult<Option<GuideClick>> {
-        let press = loop {
-            match next_event(events, ctx).await? {
-                None => return Ok(None),
-                Some(event) if event.down => break event,
-                // The release of a press made before this step.
-                Some(_) => {}
-            }
+        let Some((press, drag_to)) = next_press(events, ctx).await? else {
+            return Ok(None);
         };
-        let mut drag_to = None;
-        // Still held when time runs out: the press alone answers the step.
-        while let Some(event) = next_event(events, ctx).await? {
-            if !event.down && event.button == press.button {
-                drag_to = dragged(press.point, event.point);
-                break;
-            }
-        }
         let at = shown.local(press.point);
         Ok(Some(GuideClick {
             step: step as u32,
@@ -384,7 +462,8 @@ impl Engine {
         }
     }
 
-    /// Whether the pixels of `rect` change before the guide's time is up.
+    /// Whether the pixels of `rect` change, as [`ChangeWatch`] judges it, before the guide's
+    /// time is up.
     async fn next_change(
         &self,
         rect: PhysicalRect,
@@ -407,14 +486,18 @@ impl Engine {
         if !wait(CHANGE_SETTLE, ctx).await? {
             return Ok(false);
         }
-        let before = shot().await?.bytes;
+        let input_at_start = self.windows.last_input_ms();
+        let mut watch = ChangeWatch::new(frame_hash(&shot().await?.bytes), input_at_start);
         loop {
             if !wait(CHANGE_POLL, ctx).await? {
                 return Ok(false);
             }
             match shot().await {
-                Ok(now) if now.bytes != before => return Ok(true),
-                Ok(_) => {}
+                Ok(now) => {
+                    if watch.see(frame_hash(&now.bytes), self.windows.last_input_ms()) {
+                        return Ok(true);
+                    }
+                }
                 Err(WinwrightError::Timeout { .. }) => return Ok(false),
                 Err(other) => return Err(other),
             }
@@ -471,6 +554,87 @@ mod tests {
         assert_eq!(dragged(press, PhysicalPoint { x: 104, y: 97 }), None);
         let far = PhysicalPoint { x: 160, y: 100 };
         assert_eq!(dragged(press, far), Some(far));
+    }
+
+    fn press(x: i32, down: bool) -> PointerEvent {
+        PointerEvent {
+            point: PhysicalPoint { x, y: 0 },
+            button: winwright_contracts::input::MouseButton::Left,
+            down,
+        }
+    }
+
+    fn ctx(ms: u64) -> OperationContext {
+        OperationContext::new(
+            winwright_contracts::ids::SessionId::parse("guide-test").unwrap(),
+            Duration::from_millis(ms),
+            tokio_util::sync::CancellationToken::new(),
+        )
+    }
+
+    #[tokio::test]
+    async fn presses_pair_with_their_release_and_stale_releases_are_skipped() {
+        let (tx, mut rx) = unbounded_channel();
+        // A release left over from the step before, then a click, then a drag.
+        for e in [press(5, false), press(10, true), press(12, false)] {
+            tx.send(e).unwrap();
+        }
+        tx.send(press(100, true)).unwrap();
+        tx.send(press(300, false)).unwrap();
+        let ctx = ctx(1_000);
+        let (p, drag) = next_press(&mut rx, &ctx).await.unwrap().unwrap();
+        assert_eq!((p.point.x, drag), (10, None));
+        let (p, drag) = next_press(&mut rx, &ctx).await.unwrap().unwrap();
+        assert_eq!((p.point.x, drag.map(|d| d.x)), (100, Some(300)));
+        // Nothing more: time runs out.
+        assert!(next_press(&mut rx, &ctx).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_press_still_held_when_time_runs_out_answers_alone_and_a_stop_cancels() {
+        let (tx, mut rx) = unbounded_channel();
+        tx.send(press(7, true)).unwrap();
+        let (p, drag) = next_press(&mut rx, &ctx(200)).await.unwrap().unwrap();
+        assert_eq!((p.point.x, drag), (7, None));
+        let stopped = ctx(5_000);
+        stopped.cancel.cancel();
+        let err = next_press(&mut rx, &stopped).await.unwrap_err();
+        assert!(matches!(err, WinwrightError::Cancelled));
+    }
+
+    #[test]
+    fn wrong_clicks_are_marked_until_the_third_stops_the_guide() {
+        let mut misses = 0;
+        assert_eq!(verdict(false, &mut misses), Verdict::Missed);
+        assert_eq!(verdict(false, &mut misses), Verdict::Missed);
+        assert_eq!(verdict(true, &mut misses), Verdict::Done);
+        let mut misses = 0;
+        assert_eq!(verdict(false, &mut misses), Verdict::Missed);
+        assert_eq!(verdict(false, &mut misses), Verdict::Missed);
+        assert_eq!(verdict(false, &mut misses), Verdict::GiveUp);
+    }
+
+    #[test]
+    fn a_blinking_caret_never_counts_as_the_change() {
+        // Caret on (1) and off (2) while the person does nothing: learned as normal.
+        let mut w = ChangeWatch::new(1, Some(100));
+        assert!(!w.see(2, Some(100)));
+        assert!(!w.see(1, Some(100)));
+        // They press a key (input time moves): the caret keeps blinking, nothing counts.
+        assert!(!w.see(2, Some(900)));
+        assert!(!w.see(1, Some(900)));
+        // The text changes (3) and stays: counted on its second capture.
+        assert!(!w.see(3, Some(900)));
+        assert!(w.see(3, Some(900)));
+    }
+
+    #[test]
+    fn a_one_frame_glitch_does_not_count_and_unknown_input_still_works() {
+        let mut w = ChangeWatch::new(1, None);
+        assert!(!w.see(4, None));
+        assert!(!w.see(1, None));
+        assert!(!w.see(5, None));
+        assert!(w.see(6, None));
     }
 
     #[test]

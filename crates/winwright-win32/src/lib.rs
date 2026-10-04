@@ -40,6 +40,17 @@ impl WindowBackend for Win32Windows {
         process::process_name(pid).unwrap_or_default()
     }
 
+    fn last_input_ms(&self) -> Option<u64> {
+        let mut info = windows::Win32::UI::Input::KeyboardAndMouse::LASTINPUTINFO {
+            cbSize: size_of::<windows::Win32::UI::Input::KeyboardAndMouse::LASTINPUTINFO>() as u32,
+            dwTime: 0,
+        };
+        // SAFETY: `info` is a valid out-parameter with `cbSize` set.
+        unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetLastInputInfo(&mut info) }
+            .as_bool()
+            .then_some(u64::from(info.dwTime))
+    }
+
     fn focus_window(&self, hwnd: u64) -> WinwrightResult<()> {
         control::focus_window(hwnd)
     }
