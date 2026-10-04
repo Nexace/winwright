@@ -6,15 +6,16 @@ use windows::Win32::System::StationsAndDesktops::{
     CloseDesktop, DESKTOP_CONTROL_FLAGS, DESKTOP_SWITCHDESKTOP, OpenInputDesktop,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBD_EVENT_FLAGS, KEYBDINPUT,
-    KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MAPVK_VK_TO_VSC, MOUSE_EVENT_FLAGS,
-    MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
-    MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN,
-    MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEINPUT, MapVirtualKeyW,
-    SendInput, VIRTUAL_KEY, VkKeyScanW,
+    GetKeyboardLayout, HKL, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBD_EVENT_FLAGS,
+    KEYBDINPUT, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MAPVK_VK_TO_VSC,
+    MOUSE_EVENT_FLAGS, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN,
+    MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE,
+    MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL,
+    MOUSEINPUT, MapVirtualKeyExW, SendInput, VIRTUAL_KEY, VkKeyScanExW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+    GetForegroundWindow, GetSystemMetrics, GetWindowThreadProcessId, SM_CXVIRTUALSCREEN,
+    SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
 };
 use winwright_contracts::geometry::PhysicalRect;
 use winwright_contracts::input::MouseButton;
@@ -28,16 +29,32 @@ use crate::{Platform, Shortfall};
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct Win32;
 
+/// The keyboard layout of the thread that owns the foreground window: keys go to that thread,
+/// and it may use another layout than ours (each app keeps its own when the person switches).
+fn target_layout() -> HKL {
+    // SAFETY: handle and id queries; the optional process-id pointer is not passed.
+    unsafe {
+        let window = GetForegroundWindow();
+        let thread = if window.is_invalid() {
+            0
+        } else {
+            GetWindowThreadProcessId(window, None)
+        };
+        GetKeyboardLayout(thread)
+    }
+}
+
 impl Layout for Win32 {
     fn scan_code(&self, vk: u16) -> u16 {
-        // SAFETY: table lookup in the calling thread's keyboard layout; no pointers involved.
-        let scan = unsafe { MapVirtualKeyW(u32::from(vk), MAPVK_VK_TO_VSC) };
+        // SAFETY: table lookup in a keyboard layout; no pointers involved.
+        let scan =
+            unsafe { MapVirtualKeyExW(u32::from(vk), MAPVK_VK_TO_VSC, Some(target_layout())) };
         u16::try_from(scan).unwrap_or(0)
     }
 
     fn vk_key_scan(&self, unit: u16) -> i16 {
-        // SAFETY: table lookup in the calling thread's keyboard layout; no pointers involved.
-        unsafe { VkKeyScanW(unit) }
+        // SAFETY: table lookup in a keyboard layout; no pointers involved.
+        unsafe { VkKeyScanExW(unit, target_layout()) }
     }
 }
 

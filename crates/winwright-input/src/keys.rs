@@ -10,8 +10,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use winwright_contracts::input::{Key, validate_chord};
 use winwright_contracts::{WinwrightError, WinwrightResult};
 
-/// Keyboard-layout queries. The Win32 implementation wraps `MapVirtualKeyW` and `VkKeyScanW`
-/// (the calling thread's active layout); tests substitute a fixed US layout.
+/// Keyboard-layout queries. The Win32 implementation asks the layout of the foreground window's
+/// thread, which receives the keys; tests substitute a fixed US layout.
 pub(crate) trait Layout {
     /// Hardware scan code for `vk` (`MAPVK_VK_TO_VSC`), or 0 when the layout has none.
     fn scan_code(&self, vk: u16) -> u16;
