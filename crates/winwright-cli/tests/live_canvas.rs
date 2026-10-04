@@ -7,7 +7,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use winwright_contracts::action::{ActionMethod, DesktopAction, ElementTarget, ScrollDirection};
+use winwright_contracts::action::{
+    ActionMethod, DesktopAction, ElementTarget, ScreenPoint, ScrollDirection,
+};
 use winwright_contracts::backend::WindowBackend;
 use winwright_contracts::config::Config;
 use winwright_contracts::input::{InputBackend, Key, MouseButton};
@@ -144,6 +146,159 @@ async fn phase7_canvas_is_driven_with_real_input() {
     assert!(wheel.ends_with("-120"), "one notch down: {wheel}");
 
     // Nothing stays pressed, and the cursor goes back where the user left it.
+    input.release_all().unwrap();
+    let ctx = winwright_contracts::backend::OperationContext::new(
+        winwright_contracts::ids::SessionId::parse("live").unwrap(),
+        Duration::from_secs(5),
+        tokio_util::sync::CancellationToken::new(),
+    );
+    input.move_to(cursor, &ctx).await.unwrap();
+}
+
+/// Phase 17: mouse input by position (`desktop_mouse`), in screen pixels and in pixels of the
+/// window, the way a model aims from a screenshot.
+#[tokio::test]
+#[ignore = "moves the real mouse over the canvas fixture for a few seconds"]
+async fn phase17_mouse_acts_by_position() {
+    winwright_win32::enable_per_monitor_dpi_awareness();
+    let windows = winwright_win32::Win32Windows;
+    let cursor = windows.cursor_position().unwrap();
+    let fx = FixtureProcess::launch(Fixture::Canvas).expect("canvas launches");
+    let input = Arc::new(winwright_input::SendInputBackend::new());
+    let engine = Engine::new(
+        Config::default(),
+        Arc::new(winwright_win32::Win32Windows),
+        Arc::new(winwright_uia::UiaBackend::start().expect("UIA worker")),
+    )
+    .with_input(input.clone());
+    let session = engine
+        .session(
+            &winwright_contracts::ids::SessionId::parse("live").unwrap(),
+            "test",
+        )
+        .unwrap();
+    let event = |want: &str| {
+        let title = fx.wait_for_title(|t| t.ends_with(want), Duration::from_secs(3));
+        assert!(
+            title.is_some(),
+            "want {want:?}, title is {:?}",
+            fx.window_title()
+        );
+    };
+
+    // The squares' centres: green holds the window's centre; red and blue sit 160 DIPs either
+    // side (the client area is 520 DIPs wide, the window a few pixels more).
+    let bounds = windows
+        .window(fx.hwnd)
+        .unwrap()
+        .expect("canvas window")
+        .bounds;
+    let center = bounds.center();
+    let side = (f64::from(bounds.width()) * 160.0 / 520.0) as i32;
+    let screen = |x: i32| ScreenPoint {
+        x,
+        y: center.y,
+        window: None,
+    };
+    let in_window = |x: i32| ScreenPoint {
+        x: x - bounds.left,
+        y: center.y - bounds.top,
+        window: Some(WindowSelector {
+            hwnd: Some(fx.hwnd),
+            ..Default::default()
+        }),
+    };
+
+    let clicked = engine
+        .execute(
+            &session,
+            DesktopAction::ClickAt {
+                at: screen(center.x),
+                button: MouseButton::Left,
+                click_count: 1,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(clicked.method, ActionMethod::PhysicalClick, "{clicked:?}");
+    assert!(
+        clicked
+            .target
+            .ends_with(&format!(" at {},{}", center.x, center.y)),
+        "the result says where: {clicked:?}"
+    );
+    event(" - clicked green");
+
+    engine
+        .execute(
+            &session,
+            DesktopAction::ClickAt {
+                at: in_window(center.x),
+                button: MouseButton::Right,
+                click_count: 1,
+            },
+        )
+        .await
+        .unwrap();
+    event(" - right-clicked green");
+
+    let moved = engine
+        .execute(
+            &session,
+            DesktopAction::MoveMouse {
+                at: in_window(center.x - side),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(moved.method, ActionMethod::PhysicalMove, "{moved:?}");
+    assert!(moved.verified, "the pointer is on red: {moved:?}");
+
+    let dragged = engine
+        .execute(
+            &session,
+            DesktopAction::Drag {
+                from: screen(center.x - side),
+                to: screen(center.x + side),
+                button: MouseButton::Left,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(dragged.method, ActionMethod::PhysicalDrag, "{dragged:?}");
+    event(" - dragged red to blue");
+
+    engine
+        .execute(
+            &session,
+            DesktopAction::ScrollAt {
+                at: screen(center.x + side),
+                direction: ScrollDirection::Down,
+                amount: 1,
+            },
+        )
+        .await
+        .unwrap();
+    event(" - wheel -120");
+
+    // A point outside the window it is relative to is refused before any input.
+    let outside = engine
+        .execute(
+            &session,
+            DesktopAction::ClickAt {
+                at: ScreenPoint {
+                    x: bounds.width() + 50,
+                    y: 10,
+                    window: in_window(0).window,
+                },
+                button: MouseButton::Left,
+                click_count: 1,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(outside.code().as_str(), "INVALID_REQUEST", "{outside}");
+
     input.release_all().unwrap();
     let ctx = winwright_contracts::backend::OperationContext::new(
         winwright_contracts::ids::SessionId::parse("live").unwrap(),

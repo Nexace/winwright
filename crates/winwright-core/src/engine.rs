@@ -751,7 +751,37 @@ impl Engine {
             }
         };
         let inspection = self.uia.inspect(target, &ctx).await?;
+        let (reference, _) = self.remember(session, &inspection, known_window).await;
+        let props = &inspection.props;
 
+        let ancestors: Vec<String> = inspection.ancestors.iter().map(|a| a.label()).collect();
+        let mut path = ancestors.join(" > ");
+        if !path.is_empty() {
+            path.push_str(" > ");
+        }
+        path.push_str(&props.label());
+        Ok(ElementDetails {
+            element: element_info(props, reference, path, true, true),
+            control_type_id: props.control_type_id,
+            process_id: props.process_id,
+            process_name: self.windows.process_name(props.process_id),
+            native_window_handle: props.native_window_handle,
+            runtime_id: props.runtime_id.clone(),
+            keyboard_focusable: props.keyboard_focusable,
+            offscreen: props.offscreen,
+            help_text: props.help_text.clone(),
+            ancestors,
+        })
+    }
+
+    /// Gives an inspected element a ref in `session` (the same one when it already has one)
+    /// and returns it with the element's top-level window.
+    pub(crate) async fn remember(
+        &self,
+        session: &Session,
+        inspection: &winwright_contracts::backend::UiInspection,
+        known_window: Option<u64>,
+    ) -> (String, Option<u64>) {
         let fingerprint = inspection.ancestors.iter().fold(0, fingerprint_step);
         let fingerprint = fingerprint_step(fingerprint, &inspection.props);
         let props = &inspection.props;
@@ -780,24 +810,6 @@ impl Engine {
             (up.number, up.replaced_key)
         };
         self.release(replaced.into_iter().collect()).await;
-
-        let ancestors: Vec<String> = inspection.ancestors.iter().map(|a| a.label()).collect();
-        let mut path = ancestors.join(" > ");
-        if !path.is_empty() {
-            path.push_str(" > ");
-        }
-        path.push_str(&props.label());
-        Ok(ElementDetails {
-            element: element_info(props, format_element_ref(number), path, true, true),
-            control_type_id: props.control_type_id,
-            process_id: props.process_id,
-            process_name: self.windows.process_name(props.process_id),
-            native_window_handle: props.native_window_handle,
-            runtime_id: props.runtime_id.clone(),
-            keyboard_focusable: props.keyboard_focusable,
-            offscreen: props.offscreen,
-            help_text: props.help_text.clone(),
-            ancestors,
-        })
+        (format_element_ref(number), window)
     }
 }

@@ -5,7 +5,8 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use winwright_contracts::action::{
-    ActionMethod, ActionResult, DesktopAction, ScrollDirection, WindowAction, WindowVisualState,
+    ActionMethod, ActionResult, DesktopAction, ScreenPoint, ScrollDirection, WindowAction,
+    WindowVisualState,
 };
 use winwright_contracts::backend::{
     ElementKey, InspectTarget, OperationContext, ScrollAmount, TreeRoot, UiActionOutcome, UiNode,
@@ -57,6 +58,26 @@ fn describe(
             format!("Press {} in {on}", chord.join("+"))
         }
         DesktopAction::ReadText { .. } => format!("Read text of {on}"),
+        DesktopAction::MoveMouse { .. } => format!("Move the mouse pointer over {on}"),
+        // `focused` is what the click acts on: the button around an icon, say.
+        DesktopAction::ClickAt {
+            button,
+            click_count,
+            ..
+        } => {
+            let verb = match (button, click_count) {
+                (_, 2..) => "Double-click",
+                (MouseButton::Right, _) => "Right-click",
+                _ => "Click",
+            };
+            let what = focused.map_or(on, UiProps::label);
+            format!("{verb} {what} (by screen position)")
+        }
+        DesktopAction::Drag { .. } => format!(
+            "Drag from {on} to {}",
+            focused.map_or_else(|| "a point".to_owned(), UiProps::label)
+        ),
+        DesktopAction::ScrollAt { .. } => format!("Scroll {on} with the mouse wheel"),
     }
 }
 use winwright_contracts::{WinwrightError, WinwrightResult};
@@ -290,6 +311,62 @@ fn submitted_lines(value: Option<&str>, text: &str) -> Vec<String> {
     lines
 }
 
+/// Where a mouse action lands, past the element under its first point.
+struct Pointer {
+    /// Screen points in order: one, or a drag's start and end.
+    points: Vec<PhysicalPoint>,
+    /// What a click acts on (the element under the point or its nearest clickable ancestor),
+    /// or for a drag the element at the drop point.
+    beneath: UiProps,
+}
+
+/// How long a drag takes from press to release.
+const DRAG_DURATION: Duration = Duration::from_millis(300);
+
+/// What a click on `hit` acts on: the element itself or its nearest ancestor that responds to
+/// clicks, so an icon inside a "Delete" button counts as the button. `ancestors` run outermost
+/// first.
+fn clicked_element<'a>(hit: &'a UiProps, ancestors: &'a [UiProps]) -> &'a UiProps {
+    let acts_on_clicks = |p: &UiProps| {
+        [
+            UiPattern::Invoke,
+            UiPattern::Toggle,
+            UiPattern::SelectionItem,
+            UiPattern::ExpandCollapse,
+        ]
+        .into_iter()
+        .any(|pattern| p.has_pattern(pattern))
+            || matches!(
+                p.role,
+                ControlRole::Button
+                    | ControlRole::CheckBox
+                    | ControlRole::Link
+                    | ControlRole::ListItem
+                    | ControlRole::MenuItem
+                    | ControlRole::RadioButton
+                    | ControlRole::SplitButton
+                    | ControlRole::TabItem
+                    | ControlRole::TreeItem
+            )
+    };
+    std::iter::once(hit)
+        .chain(ancestors.iter().rev())
+        .find(|p| acts_on_clicks(p))
+        .unwrap_or(hit)
+}
+
+/// Dragging in Explorer or on the desktop moves files, and onto the Recycle Bin deletes them.
+fn drag_risk(from_process: &str, to_process: &str) -> ActionRisk {
+    if [from_process, to_process]
+        .iter()
+        .any(|p| p.eq_ignore_ascii_case("explorer.exe"))
+    {
+        ActionRisk::Destructive
+    } else {
+        ActionRisk::Normal
+    }
+}
+
 /// What saying yes to a dialog does: the risk of what it asks, and the command it runs (the
 /// Run box).
 #[derive(Clone, Copy)]
@@ -359,13 +436,17 @@ impl Engine {
         ctx: &OperationContext,
     ) -> Option<DialogAnswer> {
         let activates = match action {
-            DesktopAction::Click { .. } => true,
+            DesktopAction::Click { .. } | DesktopAction::ClickAt { .. } => true,
             DesktopAction::Press { keys, .. } => {
                 keys.iter().any(|k| matches!(k, Key::Enter | Key::Space))
             }
             _ => false,
         };
-        let receiver = target.map(|r| &r.props).or(focused);
+        // A click by position answers with the button around the point, not the label in it.
+        let receiver = match action {
+            DesktopAction::ClickAt { .. } => focused.or(target.map(|r| &r.props)),
+            _ => target.map(|r| &r.props).or(focused),
+        };
         if !activates || !receiver.is_some_and(|p| is_affirmative(&p.name)) {
             return None;
         }
@@ -565,6 +646,25 @@ impl Engine {
             DesktopAction::Check { .. }
             | DesktopAction::Uncheck { .. }
             | DesktopAction::Toggle { .. } => (Capability::Interact, activation()),
+            DesktopAction::MoveMouse { .. } | DesktopAction::ScrollAt { .. } => {
+                (Capability::PhysicalInput, ActionRisk::Normal)
+            }
+            // Judged as clicking the element under the point and what that click acts on.
+            DesktopAction::ClickAt { .. } => (
+                opens().unwrap_or(Capability::PhysicalInput),
+                activation().max(focused.map_or(ActionRisk::Normal, |p| {
+                    classify_activation(&p.name, &p.automation_id)
+                })),
+            ),
+            DesktopAction::Drag { .. } => (
+                Capability::PhysicalInput,
+                drag_risk(
+                    &target.map_or_else(String::new, |r| {
+                        self.windows.process_name(r.props.process_id)
+                    }),
+                    &focused.map_or_else(String::new, |p| self.windows.process_name(p.process_id)),
+                ),
+            ),
         };
         ProposedAction {
             tool: format!("desktop_{}", action.name()),
@@ -677,8 +777,17 @@ impl Engine {
     ) -> WinwrightResult<ActionResult> {
         let started = Instant::now();
         let ctx = session.operation(self.timeout())?;
+        // Mouse input at a point acts on whatever is there: that element is the target.
+        let mut pointer = None;
         let resolved = match action.target() {
             Some(t) => Some(self.resolve_target(session, t, &ctx).await?),
+            None if !action.points().is_empty() => {
+                let (hit, at) = self
+                    .resolve_pointer(session, &action.points(), &ctx)
+                    .await?;
+                pointer = Some(at);
+                Some(hit)
+            }
             None => None,
         };
         if let (DesktopAction::ReadText { .. }, Some(r)) = (&action, &resolved)
@@ -688,6 +797,9 @@ impl Engine {
         }
         if let Some(r) = &resolved {
             self.guard_self(r.props.process_id, &r.label())?;
+        }
+        if let Some(p) = &pointer {
+            self.guard_self(p.beneath.process_id, &p.beneath.label())?;
         }
         if resolved.is_none()
             && matches!(
@@ -727,7 +839,9 @@ impl Engine {
             DesktopAction::TypeText { text, .. } => text.contains(['\n', '\r']),
             _ => false,
         };
-        let focused = if resolved.is_none() && acts_on_focus {
+        let focused = if let Some(p) = &pointer {
+            Some(p.beneath.clone())
+        } else if resolved.is_none() && acts_on_focus {
             match self.uia.inspect(InspectTarget::Focused, &ctx).await {
                 Ok(hit) => {
                     self.release(vec![hit.key]).await;
@@ -763,6 +877,17 @@ impl Engine {
                 ),
             });
         }
+        if let Some(p) = &pointer
+            && self.windows.is_more_privileged(p.beneath.process_id)
+        {
+            return Err(WinwrightError::UipiBlocked {
+                target: format!(
+                    "{} in {}",
+                    p.beneath.label(),
+                    self.windows.process_name(p.beneath.process_id)
+                ),
+            });
+        }
         let before_windows = if mutating {
             self.window_set()
         } else {
@@ -771,6 +896,7 @@ impl Engine {
         tracing::debug!(action = ?action, target = resolved.as_ref().map(|r| r.label()), "executing");
 
         let r = resolved.as_ref();
+        let at = |i: usize| pointer.as_ref().expect("mouse actions have points").points[i];
         let mut step = match &action {
             DesktopAction::Click {
                 button,
@@ -816,6 +942,26 @@ impl Engine {
             DesktopAction::ReadText { max_chars, .. } => {
                 self.read_text(r.expect("target"), *max_chars, &ctx).await?
             }
+            DesktopAction::MoveMouse { .. } => self.move_mouse(at(0), &ctx).await?,
+            DesktopAction::ClickAt {
+                button,
+                click_count,
+                ..
+            } => {
+                self.input()?
+                    .click(at(0), *button, *click_count, &ctx)
+                    .await?;
+                Step::new(ActionMethod::PhysicalClick)
+            }
+            DesktopAction::Drag { button, .. } => {
+                self.input()?
+                    .drag(at(0), at(1), *button, DRAG_DURATION, &ctx)
+                    .await?;
+                Step::new(ActionMethod::PhysicalDrag)
+            }
+            DesktopAction::ScrollAt {
+                direction, amount, ..
+            } => self.scroll_at(at(0), *direction, *amount, &ctx).await?,
         };
 
         if !step.verified
@@ -832,7 +978,13 @@ impl Engine {
             executed: true,
             verified: step.verified,
             method: step.method,
-            target: r.map(Resolved::label).unwrap_or_default(),
+            // A position says the action went by coordinates, not by a UI element.
+            target: match (r, &pointer) {
+                (Some(r), Some(p)) => {
+                    format!("{} at {},{}", r.label(), p.points[0].x, p.points[0].y)
+                }
+                (r, _) => r.map(Resolved::label).unwrap_or_default(),
+            },
             reference: r.map(|r| r.reference.clone()),
             duration_ms: 0,
             after: None,
@@ -852,6 +1004,7 @@ impl Engine {
                     | ActionMethod::PhysicalClick
                     | ActionMethod::PhysicalKeyboard
                     | ActionMethod::PhysicalScroll
+                    | ActionMethod::PhysicalDrag
             );
         if mutating {
             if evidence_based && !step.verified {
@@ -1451,7 +1604,6 @@ impl Engine {
             step.after = after;
             return Ok(step);
         }
-        let input = self.input()?;
         let point =
             r.props
                 .bounds
@@ -1459,7 +1611,20 @@ impl Engine {
                 .ok_or_else(|| WinwrightError::InputFailed {
                     reason: format!("{} has no bounds to scroll over", r.label()),
                 })?;
-        // One step is one wheel notch (3 lines with Windows' default setting).
+        let mut step = self.scroll_at(point, direction, amount, ctx).await?;
+        step.warnings
+            .push("used the mouse wheel (no ScrollPattern)".into());
+        Ok(step)
+    }
+
+    /// Mouse wheel at `point`: one step is one notch (3 lines with Windows' default setting).
+    async fn scroll_at(
+        &self,
+        point: PhysicalPoint,
+        direction: ScrollDirection,
+        amount: u32,
+        ctx: &OperationContext,
+    ) -> WinwrightResult<Step> {
         let notches = i32::try_from(amount).unwrap_or(i32::MAX);
         let (x, y) = match direction {
             ScrollDirection::Up => (0, -notches),
@@ -1467,11 +1632,81 @@ impl Engine {
             ScrollDirection::Left => (-notches, 0),
             ScrollDirection::Right => (notches, 0),
         };
-        input.scroll(point, x, y, ctx).await?;
-        let mut step = Step::new(ActionMethod::PhysicalScroll);
-        step.warnings
-            .push("used the mouse wheel (no ScrollPattern)".into());
+        self.input()?.scroll(point, x, y, ctx).await?;
+        Ok(Step::new(ActionMethod::PhysicalScroll))
+    }
+
+    async fn move_mouse(
+        &self,
+        point: PhysicalPoint,
+        ctx: &OperationContext,
+    ) -> WinwrightResult<Step> {
+        self.input()?.move_to(point, ctx).await?;
+        let mut step = Step::new(ActionMethod::PhysicalMove);
+        step.verified = self.windows.cursor_position().is_ok_and(|p| p == point);
+        if !step.verified {
+            step.warnings
+                .push("the pointer is not where it was sent".into());
+        }
         Ok(step)
+    }
+
+    /// The screen points of a mouse action and what lies under them. The element under the
+    /// first point, with a ref, is the action's target; [`Pointer::beneath`] is what a click
+    /// there acts on, or for a drag the element at the drop point.
+    async fn resolve_pointer(
+        &self,
+        session: &Session,
+        ends: &[&ScreenPoint],
+        ctx: &OperationContext,
+    ) -> WinwrightResult<(Resolved, Pointer)> {
+        let points = ends
+            .iter()
+            .map(|p| self.screen_point(p))
+            .collect::<WinwrightResult<Vec<_>>>()?;
+        let hit = self
+            .uia
+            .inspect(InspectTarget::Point(points[0]), ctx)
+            .await?;
+        let (reference, window) = self.remember(session, &hit, None).await;
+        let beneath = match points.get(1) {
+            Some(&drop) => {
+                let dropped = self.uia.inspect(InspectTarget::Point(drop), ctx).await?;
+                self.release(vec![dropped.key]).await;
+                dropped.props
+            }
+            None => clicked_element(&hit.props, &hit.ancestors).clone(),
+        };
+        let target = Resolved {
+            reference,
+            key: hit.key,
+            props: hit.props,
+            window,
+        };
+        Ok((target, Pointer { points, beneath }))
+    }
+
+    /// A mouse point in screen pixels. One relative to a window must fall inside it.
+    fn screen_point(&self, p: &ScreenPoint) -> WinwrightResult<PhysicalPoint> {
+        let Some(selector) = &p.window else {
+            return Ok(PhysicalPoint { x: p.x, y: p.y });
+        };
+        let bounds = self.find_window(selector)?.bounds;
+        let point = PhysicalPoint {
+            x: bounds.left.saturating_add(p.x),
+            y: bounds.top.saturating_add(p.y),
+        };
+        if p.x < 0 || p.y < 0 || !bounds.contains(point) {
+            return Err(WinwrightError::invalid(format!(
+                "{},{} is outside window {} ({}x{} pixels)",
+                p.x,
+                p.y,
+                selector.describe(),
+                bounds.width(),
+                bounds.height()
+            )));
+        }
+        Ok(point)
     }
 
     async fn press(
@@ -1947,6 +2182,46 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_click_by_position_acts_on_the_nearest_clickable_element() {
+        let props = |role, name: &str| UiProps {
+            role,
+            name: name.to_owned(),
+            ..UiProps::default()
+        };
+        let window = props(ControlRole::Window, "Files");
+        let delete = props(ControlRole::Button, "Delete");
+        let icon = props(ControlRole::Image, "");
+        // An icon inside a button is the button.
+        let ancestors = [window.clone(), delete.clone()];
+        assert_eq!(clicked_element(&icon, &ancestors).name, "Delete");
+        // A button hit directly is itself.
+        assert_eq!(
+            clicked_element(&delete, std::slice::from_ref(&window)).name,
+            "Delete"
+        );
+        // Nothing clickable around a canvas: the canvas itself.
+        let canvas = props(ControlRole::Pane, "Canvas");
+        assert_eq!(clicked_element(&canvas, &[window]).name, "Canvas");
+        // Patterns count, whatever the role.
+        let mut item = props(ControlRole::Custom, "Remove");
+        item.patterns.push(UiPattern::Invoke);
+        assert_eq!(clicked_element(&icon, &[item]).name, "Remove");
+    }
+
+    #[test]
+    fn dragging_files_is_destructive() {
+        assert_eq!(
+            drag_risk("explorer.exe", "notepad.exe"),
+            ActionRisk::Destructive
+        );
+        assert_eq!(
+            drag_risk("chrome.exe", "Explorer.EXE"),
+            ActionRisk::Destructive
+        );
+        assert_eq!(drag_risk("mspaint.exe", "mspaint.exe"), ActionRisk::Normal);
+    }
 
     #[test]
     fn text_splits_into_keystrokes() {

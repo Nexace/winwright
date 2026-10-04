@@ -37,7 +37,7 @@ const INSTRUCTIONS: &str = "Winwright operates Windows apps through UI Automatio
 2. Act by ref (desktop_click, desktop_fill, desktop_select, desktop_check, ...). Locators (role/name/label/window) also work when you have no ref.\n\
 3. Use desktop_wait_for instead of sleeping, then desktop_snapshot with diff=true to see only what changed.\n\
 4. Prefer app_launch and filesystem_operation over clicking through the shell. app_launch waits for the app's window and returns it: act in that window.\n\
-5. Use desktop_screenshot only when the tree lacks what you need.\n\
+5. Use desktop_screenshot only when the tree lacks what you need; desktop_mouse then acts on what it shows, by its pixels.\n\
 6. verified=false means the effect was not confirmed. Check it (desktop_read_text, or a snapshot) before repeating the action: never type the same text twice into a field blindly.\n\
 7. When you finish a task on the desktop, call memory_save once with a short report. When the person mentions earlier work, call memory_recall first.\n\
 Errors are JSON with a code and a hint. CONFIRMATION_REQUIRED means the user must approve: do not work around it. \
@@ -271,6 +271,16 @@ impl WinwrightMcp {
         or when button/doubleClick/forcePhysical ask for it."
     )]
     async fn desktop_click(&self, Parameters(input): Parameters<ClickInput>) -> ToolResult {
+        Ok(self.act(input.action()).await)
+    }
+
+    #[tool(
+        description = "Real mouse input at a point, for what has no UI tree (games, canvases, video) or to point \
+        something out: move the pointer, click, drag to toX/toY, or scroll the wheel. With `window`, x/y are pixels of that \
+        window's desktop_screenshot; without it, screen pixels. The element under the point is judged and confirmed like a \
+        click on it. Prefer desktop_click when the element has a ref."
+    )]
+    async fn desktop_mouse(&self, Parameters(input): Parameters<MouseInput>) -> ToolResult {
         Ok(self.act(input.action()).await)
     }
 
@@ -613,7 +623,7 @@ mod tests {
     #[test]
     fn tool_schemas_are_objects_that_name_every_described_field() {
         let tools = WinwrightMcp::tool_router().list_all();
-        assert_eq!(tools.len(), 25);
+        assert_eq!(tools.len(), 26);
         for tool in tools {
             let schema = serde_json::Value::Object(tool.input_schema.as_ref().clone());
             assert_eq!(schema["type"], "object", "{}", tool.name);

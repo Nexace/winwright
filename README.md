@@ -79,7 +79,9 @@ Antigravity (`~\.gemini\config\mcp_config.json`) and Claude Desktop
 Tools: `desktop_snapshot` (use `diff: true` after actions), `desktop_find`, `desktop_click`,
 `desktop_fill`, `desktop_type`, `desktop_press`, `desktop_select`, `desktop_check`,
 `desktop_expand`, `desktop_scroll`, `desktop_focus`, `desktop_read_text`, `desktop_wait_for`,
-`desktop_inspect`, `desktop_windows`, `window_control`, `desktop_screenshot`,
+`desktop_inspect`, `desktop_windows`, `window_control`, `desktop_screenshot`, `desktop_mouse`
+(move, click, drag or scroll at a point, for apps with no UI tree such as games; the element
+under the point is judged like a click on it),
 `overlay_highlight`, `overlay_clear`, `app_launch`, `process_list`, `filesystem_operation`,
 `shell_execute` (off by default), `memory_save`, `memory_recall`.
 

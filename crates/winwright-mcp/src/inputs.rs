@@ -4,7 +4,9 @@
 use schemars::JsonSchema;
 use serde::Deserialize;
 use winwright_contracts::WinwrightError;
-use winwright_contracts::action::{DesktopAction, ElementTarget, ScrollDirection, WindowAction};
+use winwright_contracts::action::{
+    DesktopAction, ElementTarget, ScreenPoint, ScrollDirection, WindowAction,
+};
 use winwright_contracts::capture::{ImageFormat, ScreenshotRequest, ScreenshotTarget};
 use winwright_contracts::geometry::{PhysicalPoint, PhysicalRect};
 use winwright_contracts::input::MouseButton;
@@ -235,21 +237,95 @@ pub struct ClickInput {
     pub force_physical: Option<bool>,
 }
 
+fn mouse_button(button: Option<ButtonInput>) -> MouseButton {
+    match button {
+        Some(ButtonInput::Right) => MouseButton::Right,
+        Some(ButtonInput::Middle) => MouseButton::Middle,
+        _ => MouseButton::Left,
+    }
+}
+
+fn click_count(double_click: Option<bool>) -> u32 {
+    if double_click == Some(true) { 2 } else { 1 }
+}
+
 impl ClickInput {
     pub fn action(&self) -> Result<DesktopAction> {
         Ok(DesktopAction::Click {
             target: self.target.required()?,
-            button: match self.button {
-                Some(ButtonInput::Right) => MouseButton::Right,
-                Some(ButtonInput::Middle) => MouseButton::Middle,
-                _ => MouseButton::Left,
-            },
-            click_count: if self.double_click == Some(true) {
-                2
-            } else {
-                1
-            },
+            button: mouse_button(self.button),
+            click_count: click_count(self.double_click),
             force_physical: self.force_physical.unwrap_or(false),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum MouseOp {
+    Move,
+    Click,
+    Drag,
+    Scroll,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct MouseInput {
+    /// move (only the pointer), click, drag (to toX/toY), or scroll (the wheel).
+    pub action: MouseOp,
+    /// Pixels from the left of `window` (the pixels of its desktop_screenshot), or of the
+    /// screen when no window is given.
+    pub x: i32,
+    /// Pixels from the top, like x.
+    pub y: i32,
+    /// Title (substring) of the window x/y are relative to.
+    pub window: Option<String>,
+    /// Drag end, in the same pixels as x/y.
+    pub to_x: Option<i32>,
+    pub to_y: Option<i32>,
+    /// Default left.
+    pub button: Option<ButtonInput>,
+    /// Double-click.
+    pub double_click: Option<bool>,
+    /// For scroll; default down.
+    pub direction: Option<ScrollDirection>,
+    /// For scroll: wheel notches, 3 lines each (default 3).
+    pub amount: Option<u32>,
+}
+
+impl MouseInput {
+    pub fn action(&self) -> Result<DesktopAction> {
+        let point = |x, y| ScreenPoint {
+            x,
+            y,
+            window: self.window.as_ref().map(|title| WindowSelector {
+                title: Some(title.clone()),
+                ..Default::default()
+            }),
+        };
+        let at = point(self.x, self.y);
+        let button = mouse_button(self.button);
+        Ok(match self.action {
+            MouseOp::Move => DesktopAction::MoveMouse { at },
+            MouseOp::Click => DesktopAction::ClickAt {
+                at,
+                button,
+                click_count: click_count(self.double_click),
+            },
+            MouseOp::Drag => match (self.to_x, self.to_y) {
+                (Some(x), Some(y)) => DesktopAction::Drag {
+                    from: at,
+                    to: point(x, y),
+                    button,
+                },
+                _ => return Err(WinwrightError::invalid("drag needs toX and toY")),
+            },
+            MouseOp::Scroll => DesktopAction::ScrollAt {
+                at,
+                direction: self.direction.unwrap_or(ScrollDirection::Down),
+                amount: self.amount.unwrap_or(3),
+            },
         })
     }
 }
@@ -712,6 +788,33 @@ mod tests {
         assert!(matches!(target.scope, SnapshotTarget::Window(_)));
         let bad: FocusInput = serde_json::from_str(r#"{}"#).unwrap();
         assert!(bad.target.required().is_err());
+    }
+
+    #[test]
+    fn mouse_input_maps_to_point_actions() {
+        let m: MouseInput = serde_json::from_str(
+            r#"{"action":"click","x":10,"y":20,"window":"Paint","doubleClick":true}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            m.action().unwrap(),
+            DesktopAction::ClickAt { ref at, click_count: 2, button: MouseButton::Left }
+                if at.x == 10 && at.window.as_ref().and_then(|w| w.title.as_deref()) == Some("Paint")
+        ));
+        let m: MouseInput = serde_json::from_str(r#"{"action":"drag","x":0,"y":0}"#).unwrap();
+        assert!(m.action().is_err(), "a drag needs its end");
+        let m: MouseInput =
+            serde_json::from_str(r#"{"action":"drag","x":0,"y":0,"toX":50,"toY":60}"#).unwrap();
+        assert!(matches!(m.action().unwrap(), DesktopAction::Drag { ref to, .. } if to.y == 60));
+        let m: MouseInput = serde_json::from_str(r#"{"action":"scroll","x":5,"y":5}"#).unwrap();
+        assert!(matches!(
+            m.action().unwrap(),
+            DesktopAction::ScrollAt {
+                direction: ScrollDirection::Down,
+                amount: 3,
+                ..
+            }
+        ));
     }
 
     #[test]

@@ -50,6 +50,17 @@ impl ElementTarget {
     }
 }
 
+/// A point for real mouse input: physical screen pixels, or pixels from the top-left corner of
+/// `window` (the same pixels as that window's screenshot).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ScreenPoint {
+    pub x: i32,
+    pub y: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<WindowSelector>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum ScrollDirection {
@@ -146,6 +157,33 @@ pub enum DesktopAction {
         #[serde(default = "default_max_chars")]
         max_chars: u32,
     },
+    /// Moves the mouse pointer to a point: to hover, or to show the person something.
+    MoveMouse {
+        at: ScreenPoint,
+    },
+    /// Real mouse clicks at a point, for what has no UI tree (games, canvases, remote screens).
+    #[serde(rename_all = "camelCase")]
+    ClickAt {
+        at: ScreenPoint,
+        #[serde(default)]
+        button: MouseButton,
+        #[serde(default = "one")]
+        click_count: u32,
+    },
+    /// Presses at `from`, moves to `to`, and releases there.
+    Drag {
+        from: ScreenPoint,
+        to: ScreenPoint,
+        #[serde(default)]
+        button: MouseButton,
+    },
+    /// Mouse wheel at a point: one step per 3-line notch.
+    ScrollAt {
+        at: ScreenPoint,
+        direction: ScrollDirection,
+        #[serde(default = "one")]
+        amount: u32,
+    },
 }
 
 impl std::fmt::Debug for DesktopAction {
@@ -178,6 +216,21 @@ impl DesktopAction {
             Self::ScrollIntoView { .. } => "scrollIntoView",
             Self::Press { .. } => "press",
             Self::ReadText { .. } => "readText",
+            Self::MoveMouse { .. } => "moveMouse",
+            Self::ClickAt { .. } => "clickAt",
+            Self::Drag { .. } => "drag",
+            Self::ScrollAt { .. } => "scrollAt",
+        }
+    }
+
+    /// The points of a mouse action, in order (a drag's start, then its end).
+    pub fn points(&self) -> Vec<&ScreenPoint> {
+        match self {
+            Self::MoveMouse { at } | Self::ClickAt { at, .. } | Self::ScrollAt { at, .. } => {
+                vec![at]
+            }
+            Self::Drag { from, to, .. } => vec![from, to],
+            _ => Vec::new(),
         }
     }
 
@@ -196,6 +249,10 @@ impl DesktopAction {
             | Self::ScrollIntoView { target }
             | Self::ReadText { target, .. } => Some(target),
             Self::TypeText { target, .. } | Self::Press { target, .. } => target.as_ref(),
+            Self::MoveMouse { .. }
+            | Self::ClickAt { .. }
+            | Self::Drag { .. }
+            | Self::ScrollAt { .. } => None,
         }
     }
 }
@@ -216,6 +273,8 @@ pub enum ActionMethod {
     PhysicalClick,
     PhysicalKeyboard,
     PhysicalScroll,
+    PhysicalMove,
+    PhysicalDrag,
     WindowApi,
     /// Nothing needed doing (e.g. `check` on an already-checked box).
     NoOp,
@@ -344,6 +403,26 @@ mod tests {
         let a: DesktopAction = serde_json::from_str(json).unwrap();
         assert_eq!(a.name(), "fill");
         assert!(a.target().unwrap().validate().is_ok());
+    }
+
+    #[test]
+    fn mouse_actions_take_screen_or_window_points() {
+        let json = r#"{"action":"clickAt","at":{"x":40,"y":12,"window":{"title":"Paint"}},"button":"right"}"#;
+        let a: DesktopAction = serde_json::from_str(json).unwrap();
+        assert!(matches!(
+            &a,
+            DesktopAction::ClickAt { at, button: MouseButton::Right, click_count: 1 }
+                if at.x == 40 && at.window.as_ref().and_then(|w| w.title.as_deref()) == Some("Paint")
+        ));
+        assert!(a.target().is_none());
+        assert_eq!(a.points().len(), 1);
+        let json = r#"{"action":"drag","from":{"x":-10,"y":5},"to":{"x":300,"y":200}}"#;
+        let a: DesktopAction = serde_json::from_str(json).unwrap();
+        assert_eq!(a.name(), "drag");
+        assert_eq!(a.points()[1].x, 300);
+        // A misspelled coordinate is an error, never a silent 0.
+        let json = r#"{"action":"moveMouse","at":{"x":1,"yy":2}}"#;
+        assert!(serde_json::from_str::<DesktopAction>(json).is_err());
     }
 
     #[test]
