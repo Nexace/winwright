@@ -78,10 +78,14 @@ Dropped: Phase 1b, Phase 9, Phase 12, local speech models (Whisper/Kokoro), Jev.
 - MCP loopback HTTP transport not built (stdio only).
 - Dialog context (M1) covers owned windows and `#32770` dialogs; in-window dialogs (WinUI
   ContentDialog, web modals) are judged by the button name only.
-- UI-driven execution: Enter in a terminal window, and Enter in the Run box / Start search /
-  Explorer address bar on a shell command line, is judged as Shell/PowerShell; Win+R and Win+X
-  as PowerShell. Still open: clicking OK in an already-open Run box, Start's "Run command"
-  result, terminals inside other apps (VS Code), Task Manager's "Run new task".
+- UI-driven execution: Enter in a terminal window or an editor's terminal (xterm.js, a field
+  named "Terminal ..."), Enter in the Run box / Start search / Explorer address bar / Task
+  Manager's "Run new task" on a shell command line, OK in the Run box or "Create new task" on
+  one, a Start result for a typed shell command, and opening a .bat/.cmd/WSH/.hta file in
+  Explorer are judged as Shell/PowerShell; Win+R and Win+X as PowerShell. Still open: scripts in
+  Explorer when extensions are hidden (the item name has none), terminals that expose no UIA
+  text field (JetBrains). Opening an empty shell window from Start or the taskbar is allowed:
+  it runs nothing until Enter.
 - Relaxed mode (2026-10-04): Sensitive is allowed; Destructive (now including spending and
   security phrases), file delete, process terminate and the shell still ask. The user's real
   config is `%APPDATA%\winwright\config.json` = `{"security":{"confirmationMode":"relaxed"}}`.

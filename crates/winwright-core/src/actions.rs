@@ -62,7 +62,7 @@ fn describe(
 use winwright_contracts::{WinwrightError, WinwrightResult};
 use winwright_security::{
     classify_activation, classify_submit, command_capability, console_capability, is_affirmative,
-    is_launcher, is_sensitive, redacted_value, stricter,
+    is_launcher, is_sensitive, is_terminal_field, opened_capability, redacted_value, stricter,
 };
 
 use crate::engine::Engine;
@@ -269,6 +269,14 @@ fn submitted_lines(value: Option<&str>, text: &str) -> Vec<String> {
     lines
 }
 
+/// What saying yes to a dialog does: the risk of what it asks, and the command it runs (the
+/// Run box).
+#[derive(Clone, Copy)]
+struct DialogAnswer {
+    risk: ActionRisk,
+    command: Option<Capability>,
+}
+
 /// Window edges beyond this are refused; real virtual desktops are far smaller.
 const MAX_WINDOW_COORD: i64 = 1 << 20;
 
@@ -319,15 +327,16 @@ impl Engine {
 
     /// Risk of what a dialog asks when the action says yes to it ("Delete 3 files?", then
     /// "Yes"): its title and text, never its other buttons. Only owned windows and standard
-    /// dialogs count, so unrelated text in a main window cannot make "OK" look risky. `None`
-    /// when the action does not answer a dialog.
+    /// dialogs count, so unrelated text in a main window cannot make "OK" look risky. In the
+    /// Run box and Task Manager's "Create new task", OK runs the typed command, so its fields
+    /// are judged as a command line. `None` when the action does not answer a dialog.
     async fn dialog_risk(
         &self,
         action: &DesktopAction,
         target: Option<&Resolved>,
         focused: Option<&UiProps>,
         ctx: &OperationContext,
-    ) -> Option<ActionRisk> {
+    ) -> Option<DialogAnswer> {
         let activates = match action {
             DesktopAction::Click { .. } => true,
             DesktopAction::Press { keys, .. } => {
@@ -345,6 +354,7 @@ impl Engine {
         };
         let window = window.filter(|w| w.owner_hwnd.is_some() || w.class_name == "#32770")?;
         let mut text = vec![window.title.clone()];
+        let mut fields = Vec::new();
         let request = UiTreeRequest {
             root: TreeRoot::Window(window.hwnd),
             max_depth: 6,
@@ -354,30 +364,50 @@ impl Engine {
         };
         // Without the tree the title still says a lot ("Delete File").
         if let Ok(tree) = self.uia.capture_tree(request, ctx).await {
-            fn walk(n: &UiNode, text: &mut Vec<String>, keys: &mut Vec<ElementKey>) {
+            fn walk(
+                n: &UiNode,
+                text: &mut Vec<String>,
+                fields: &mut Vec<String>,
+                keys: &mut Vec<ElementKey>,
+            ) {
                 keys.push(n.key);
-                if n.props.role == ControlRole::Text {
-                    text.push(n.props.name.clone());
+                match n.props.role {
+                    ControlRole::Text => text.push(n.props.name.clone()),
+                    ControlRole::Edit | ControlRole::ComboBox => {
+                        fields.extend(n.props.value.clone())
+                    }
+                    _ => {}
                 }
                 for c in &n.children {
-                    walk(c, text, keys);
+                    walk(c, text, fields, keys);
                 }
             }
             let mut keys = Vec::new();
-            walk(&tree.root, &mut text, &mut keys);
+            walk(&tree.root, &mut text, &mut fields, &mut keys);
             self.release(keys).await;
         }
-        Some(classify_activation(&text.join("\n"), ""))
+        let command = is_launcher(&window.process_name)
+            .then(|| {
+                fields
+                    .iter()
+                    .map(|f| command_capability(f))
+                    .fold(Capability::ProcessLaunch, stricter)
+            })
+            .filter(|c| matches!(c, Capability::Shell | Capability::PowerShell));
+        Some(DialogAnswer {
+            risk: classify_activation(&text.join("\n"), ""),
+            command,
+        })
     }
 
-    /// `focused` is the element keys without a target would reach; `dialog` is the risk of
-    /// what an affirmative button's dialog asks.
+    /// `focused` is the element keys without a target would reach; `dialog` is what an
+    /// affirmative button's dialog asks or runs.
     fn proposed(
         &self,
         action: &DesktopAction,
         target: Option<&Resolved>,
         focused: Option<&UiProps>,
-        dialog: Option<ActionRisk>,
+        dialog: Option<DialogAnswer>,
     ) -> ProposedAction {
         let summary = target
             .map(|r| TargetSummary {
@@ -410,14 +440,19 @@ impl Engine {
         let sensitive_target = target.is_some_and(|r| is_sensitive(&r.props));
         let receiver = target.map(|r| &r.props).or(focused);
         // Enter that runs a command line is shell execution, however the text got there: in a
-        // terminal, or in the Run box, Start search, or an address bar holding a shell command.
+        // terminal (its own window or one inside an editor), or in the Run box, Start search,
+        // or an address bar holding a shell command.
         let process = receiver.map(|p| self.windows.process_name(p.process_id));
+        let in_text = receiver.is_some_and(is_text_input);
         let runs = |lines: &[String]| -> Option<Capability> {
             let process = process.as_deref().filter(|_| !lines.is_empty())?;
             if let Some(shell) = console_capability(process) {
                 return Some(shell);
             }
-            if !(is_launcher(process) && receiver.is_some_and(is_text_input)) {
+            if in_text && receiver.is_some_and(|p| is_terminal_field(&p.name, &p.class_name)) {
+                return Some(Capability::PowerShell);
+            }
+            if !(is_launcher(process) && in_text) {
                 return None;
             }
             let command = lines
@@ -425,6 +460,13 @@ impl Engine {
                 .map(|l| command_capability(l))
                 .fold(Capability::ProcessLaunch, stricter);
             matches!(command, Capability::Shell | Capability::PowerShell).then_some(command)
+        };
+        // Opening an item can run a command too: a Start "Run command" result, a batch file.
+        let opens = || {
+            process
+                .as_deref()
+                .zip(receiver.filter(|_| !in_text))
+                .and_then(|(process, p)| opened_capability(process, &p.name))
         };
         let value = receiver.and_then(|p| p.value.as_deref());
         let (capability, risk) = match action {
@@ -448,7 +490,6 @@ impl Engine {
             ),
             DesktopAction::Press { keys, .. } => {
                 let has = |key| keys.contains(&key);
-                let in_text = receiver.is_some_and(is_text_input);
                 // Win chords open Run, the Start search and system menus, which start anything;
                 // Ctrl+Enter and Alt+Enter send in most mail and chat apps, whatever has focus.
                 let mut risk =
@@ -474,18 +515,21 @@ impl Engine {
                     Capability::PowerShell
                 } else if has(Key::Enter) {
                     runs(&[value.unwrap_or_default().to_owned()])
+                        .or_else(opens)
                         .unwrap_or(Capability::PhysicalInput)
+                } else if has(Key::Space) {
+                    opens().unwrap_or(Capability::PhysicalInput)
                 } else {
                     Capability::PhysicalInput
                 };
                 (capability, risk)
             }
             DesktopAction::Click { force_physical, .. } => (
-                if *force_physical {
+                opens().unwrap_or(if *force_physical {
                     Capability::PhysicalInput
                 } else {
                     Capability::Interact
-                },
+                }),
                 activation(),
             ),
             // The option is what gets selected or invoked (a "Delete" menu item, a "Buy" choice).
@@ -503,9 +547,11 @@ impl Engine {
         };
         ProposedAction {
             tool: format!("desktop_{}", action.name()),
-            capability,
+            capability: dialog
+                .and_then(|d| d.command)
+                .map_or(capability, |c| stricter(capability, c)),
             // No dialog context leaves the risk as it is (a read stays ReadOnly).
-            risk: dialog.map_or(risk, |d| risk.max(d)),
+            risk: dialog.map_or(risk, |d| risk.max(d.risk)),
             target: summary,
         }
     }

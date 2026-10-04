@@ -76,6 +76,8 @@ const OTHER_WINWRIGHT: u32 = 77;
 /// Windows Terminal and Explorer (the Run box), where Enter runs what was typed.
 const TERMINAL: u32 = 78;
 const EXPLORER: u32 = 79;
+/// Start search, whose results run a typed command.
+const SEARCH: u32 = 80;
 
 struct State {
     els: BTreeMap<i32, El>,
@@ -305,6 +307,7 @@ impl WindowBackend for Fake {
             OTHER_WINWRIGHT => "winwright.exe".into(),
             TERMINAL => "WindowsTerminal.exe".into(),
             EXPLORER => "explorer.exe".into(),
+            SEARCH => "SearchHost.exe".into(),
             _ => "fixture.exe".into(),
         }
     }
@@ -2832,6 +2835,81 @@ async fn commands_typed_into_terminals_and_the_run_box_are_shell_execution() {
         .await
         .unwrap_err();
     assert_eq!(err.code().as_str(), "CONFIRMATION_REQUIRED", "{err}");
+}
+
+#[tokio::test]
+async fn commands_run_from_editor_terminals_the_run_box_and_start_are_shell_execution() {
+    let fake = Fake::new();
+    {
+        let mut s = fake.s();
+        // A terminal inside an editor (VS Code names its field "Terminal 1, pwsh").
+        s.els.insert(
+            63,
+            el(
+                ControlRole::Edit,
+                "Terminal 1, pwsh",
+                "",
+                &[UiPattern::Value],
+            ),
+        );
+        // A Start search result and a batch file in Explorer.
+        for (rid, name) in [(64, "cmd /c del x, Run command"), (65, "cleanup.bat")] {
+            let mut item = el(ControlRole::ListItem, name, "", &[UiPattern::Invoke]);
+            item.pid = if rid == 64 { SEARCH } else { EXPLORER };
+            s.els.insert(rid, item);
+        }
+        s.els.get_mut(&1).unwrap().children.extend([63, 64, 65]);
+        // The dialog becomes the Run box: OK runs what its field holds.
+        s.els.insert(
+            33,
+            el(ControlRole::ComboBox, "Open:", "", &[UiPattern::Value]),
+        );
+        s.els.get_mut(&30).unwrap().children.push(33);
+    }
+    let input = Arc::new(FakeInput::default());
+    let mut config = Config::default();
+    config.security.confirmation_mode = winwright_contracts::config::ConfirmationMode::Relaxed;
+    let engine = Engine::new(config, fake.clone(), fake.clone()).with_input(input.clone());
+    let session = engine.session(&sid(), "test").unwrap();
+    let typing = |text: &str| DesktopAction::TypeText {
+        target: Some(by("Edit", "Terminal 1, pwsh")),
+        text: text.into(),
+    };
+    let blocked = async |action| {
+        let err = engine.execute(&session, action).await.unwrap_err();
+        assert_eq!(err.code().as_str(), "ACTION_BLOCKED", "{err}");
+    };
+    blocked(typing("Remove-Item x\n")).await;
+    blocked(click(by("ListItem", "cmd /c del x, Run command"))).await;
+    blocked(click(by("ListItem", "cleanup.bat"))).await;
+    assert!(input.log.lock().unwrap().is_empty(), "nothing was typed");
+    // Typing without Enter stays ordinary.
+    engine
+        .execute(&session, typing("Remove-Item x"))
+        .await
+        .unwrap();
+    engine
+        .execute(&session, click(by("Button", "Open Dialog")))
+        .await
+        .unwrap();
+    {
+        let mut s = fake.s();
+        let run = s.windows.iter_mut().find(|w| w.hwnd == DIALOG).unwrap();
+        run.class_name = "#32770".into();
+        run.process_name = "explorer.exe".into();
+        s.els.get_mut(&33).unwrap().value = Some("powershell -c Remove-Item x".into());
+    }
+    blocked(click(by("Button", "OK"))).await;
+    assert!(
+        !fake.s().executed.iter().any(|e| e.contains("OK")),
+        "OK was not pressed"
+    );
+    // An ordinary program in the Run box stays ordinary.
+    fake.s().els.get_mut(&33).unwrap().value = Some("notepad".into());
+    engine
+        .execute(&session, click(by("Button", "OK")))
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

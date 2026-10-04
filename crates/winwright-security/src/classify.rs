@@ -381,15 +381,28 @@ const TERMINALS: &[&str] = &[
     "wt",
 ];
 
-/// Where typed text plus Enter starts a program: the Run box and the address bar (Explorer) and
-/// Start search.
+/// Where typed text plus Enter starts a program: the Run box and the address bar (Explorer),
+/// Start search, and Task Manager's "Run new task".
 const LAUNCHERS: &[&str] = &[
     "explorer",
     "searchapp",
     "searchhost",
     "searchui",
     "startmenuexperiencehost",
+    "taskmgr",
 ];
+
+/// Start search: its results run what was typed ("Run command").
+const START_SEARCH: &[&str] = &[
+    "searchapp",
+    "searchhost",
+    "searchui",
+    "startmenuexperiencehost",
+];
+
+/// Scripts that run when opened (Explorer's default action): batch files and Windows Script
+/// Host and HTML Application scripts. `.ps1` opens in an editor by default.
+const SCRIPT_EXTENSIONS: &[&str] = &["bat", "cmd", "hta", "js", "jse", "vbe", "vbs", "wsf", "wsh"];
 
 fn process_stem(process: &str) -> String {
     let name = process.trim().to_ascii_lowercase();
@@ -409,6 +422,33 @@ pub fn console_capability(process: &str) -> Option<Capability> {
 /// Whether text typed into `process`'s fields can be run as a command by Enter.
 pub fn is_launcher(process: &str) -> bool {
     LAUNCHERS.contains(&process_stem(process).as_str())
+}
+
+/// Whether a text field is a terminal inside another app: xterm.js (VS Code, Cursor, terminals
+/// in web pages) or a field named as one ("Terminal 1, pwsh").
+pub fn is_terminal_field(name: &str, class_name: &str) -> bool {
+    class_name.to_ascii_lowercase().contains("xterm")
+        || words(name).first().is_some_and(|w| w == "terminal")
+}
+
+/// Capability that activating an item named `name` in `process` needs when that runs a
+/// command or script: a Start search result for a typed shell command ("cmd /c ..., Run
+/// command"), or a script file in Explorer. Opening a shell's own window runs nothing yet.
+pub fn opened_capability(process: &str, name: &str) -> Option<Capability> {
+    let stem = process_stem(process);
+    if START_SEARCH.contains(&stem.as_str()) {
+        let command = name.split(',').next().unwrap_or_default();
+        let capability = command_capability(command);
+        if matches!(capability, Capability::Shell | Capability::PowerShell) {
+            return Some(capability);
+        }
+    }
+    let script = name
+        .trim()
+        .trim_end_matches(['.', ' '])
+        .rsplit_once('.')
+        .is_some_and(|(_, ext)| SCRIPT_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()));
+    (stem == "explorer" && script).then_some(Capability::Shell)
 }
 
 #[cfg(test)]
@@ -524,7 +564,44 @@ mod tests {
         );
         assert_eq!(console_capability("notepad.exe"), None);
         assert!(is_launcher("explorer.exe") && is_launcher("SearchHost.exe"));
+        assert!(is_launcher("Taskmgr.exe"));
         assert!(!is_launcher("notepad.exe"));
+    }
+
+    #[test]
+    fn terminals_inside_other_apps_are_recognized() {
+        assert!(is_terminal_field(
+            "Terminal 1, pwsh",
+            "xterm-helper-textarea"
+        ));
+        assert!(is_terminal_field("", "xterm-helper-textarea"));
+        assert!(is_terminal_field("Terminal", ""));
+        assert!(!is_terminal_field("Search terminals", "TextBox"));
+        assert!(!is_terminal_field("Text Editor", "Edit"));
+    }
+
+    #[test]
+    fn opening_a_command_or_script_is_shell_execution() {
+        for (process, name, want) in [
+            (
+                "SearchHost.exe",
+                "powershell -c Remove-Item x, Run command",
+                Some(Capability::PowerShell),
+            ),
+            ("SearchHost.exe", "cmd /c del x", Some(Capability::Shell)),
+            ("explorer.exe", "cleanup.BAT", Some(Capability::Shell)),
+            ("explorer.exe", "setup.vbs. ", Some(Capability::Shell)),
+            // Opening a shell's window, or an ordinary file, runs nothing yet.
+            ("SearchHost.exe", "Windows PowerShell, App", None),
+            ("SearchHost.exe", "Notepad, App", None),
+            ("explorer.exe", "Terminal", None),
+            ("explorer.exe", "notes.txt", None),
+            ("explorer.exe", "run.ps1", None),
+            // A script name elsewhere is just text.
+            ("notepad.exe", "cleanup.bat", None),
+        ] {
+            assert_eq!(opened_capability(process, name), want, "{process} {name:?}");
+        }
     }
 
     #[test]
