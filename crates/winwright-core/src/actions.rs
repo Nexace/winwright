@@ -2404,19 +2404,19 @@ mod tests {
     #[test]
     fn typing_into_a_document_is_judged_by_its_text() {
         // Appended at the caret, or typed over a selection: arrived.
-        assert!(arrived("", "Hello, Amogh.", "Hello, Amogh."));
+        assert!(arrived("", "Hello, Ada.", "Hello, Ada."));
         assert!(arrived("Dear Ann,\n", "Dear Ann,\nHello", "Hello"));
-        assert!(arrived("garbled", "Hello, Amogh.\n", "Hello, Amogh."));
+        assert!(arrived("garbled", "Hello, Ada.\n", "Hello, Ada."));
         // Rich edit controls store line breaks as \r.
         let after = line_breaks_as_newlines("one\rtwo");
         assert!(arrived("", &after, "one\ntwo"));
         // Garbled, lost, or typed twice: not arrived.
-        assert!(!arrived("", "Hlelo, Amgoh.", "Hello, Amogh."));
-        assert!(!arrived("", "", "Hello, Amogh."));
+        assert!(!arrived("", "Hlelo, Aad.", "Hello, Ada."));
+        assert!(!arrived("", "", "Hello, Ada."));
         assert!(!arrived(
-            "Hello, Amogh.",
-            "Hello, Amogh.Hello, Amogh.Hello, Amogh.",
-            "Hello, Amogh."
+            "Hello, Ada.",
+            "Hello, Ada.Hello, Ada.Hello, Ada.",
+            "Hello, Ada."
         ));
     }
 }

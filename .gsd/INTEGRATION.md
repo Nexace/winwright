@@ -26,7 +26,7 @@ routing rule below picks one.
 - `memory_save` {title, summary, outcome?} writes `<stamp>-<slug>.md` to `%USERPROFILE%\.winwright\reports`, never overwriting. AppData is avoided because packaged apps see it redirected. Front matter: date, outcome, outsideContent, source (the MCP client's name). The body lists the Winwright tools run since the last save. Typed text, screenshots, redacted values and file contents never go in.
 - `memory_recall` {query?, limit?} returns the newest matching reports inside a `<memory>` block labelled as data, not instructions.
 - Every app is told to save one report after each desktop task, and to recall before relying on earlier work.
-- Notion copy: each report also becomes a page under one parent page, through Notion's REST API (WinHTTP, no HTTP crates). Settings `WINWRIGHT_NOTION_TOKEN` and `WINWRIGHT_NOTION_PARENT`, falling back to the user's current `JARVIS_NOTION_*` names. Off when unset.
+- Notion copy: each report also becomes a page under one parent page, through Notion's REST API (WinHTTP, no HTTP crates). Settings `WINWRIGHT_NOTION_TOKEN` and `WINWRIGHT_NOTION_PARENT`, falling back to the older `JARVIS_NOTION_*` names. Off when unset.
 - `WINWRIGHT_MEMORY=0` turns memory off; `WINWRIGHT_REPORTS_DIR` moves the folder. Winwright's own file tools refuse that folder.
 
 ## Outside-content (taint) rule

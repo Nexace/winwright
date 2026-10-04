@@ -609,7 +609,7 @@ mod tests {
         pw.props.is_password = true;
         pw.props.value = Some("hunter2".into());
         let mut user = b.node(ControlRole::Edit, "User", vec![]);
-        user.props.value = Some("amogh".into());
+        user.props.value = Some("ada".into());
         let mut check = b.node(ControlRole::CheckBox, "Remember me", vec![]);
         check.props.toggle_state = Some(ToggleState::On);
         let mut ok = b.node(ControlRole::Button, "OK", vec![]);
@@ -619,7 +619,7 @@ mod tests {
         let (text, _) = compress(&t, &SnapshotRequest::default(), &mut refs);
         assert!(!text.contains("hunter2"));
         assert!(text.contains("EDIT \"Password\" value=\"[REDACTED]\" sensitive=true [e2]"));
-        assert!(text.contains("EDIT \"User\" value=\"amogh\" [e3]"));
+        assert!(text.contains("EDIT \"User\" value=\"ada\" [e3]"));
         assert!(text.contains("CHECKBOX \"Remember me\" checked [e4]"));
         assert!(text.contains("BUTTON \"OK\" disabled [e5]"));
     }

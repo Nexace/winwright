@@ -4,8 +4,6 @@
 **Current phase:** PLAN COMPLETE (2026-10-05, resume here). Tree green, everything committed, installed (`~\.cargo\bin\winwright.exe`, 29 tools) and pushed to origin/main. Phases 14-18 and 20-22 are done; 19 was dropped by the user. The build cache was deleted at the wrap-up: the first build after this takes a few minutes. Winwright is used only inside the user's AI apps (Claude Code, Codex, opencode, Antigravity); apps/jarvis is deleted. MCP idle shutdown stays 10 min (user's call).
 **Phase 22 (2026-10-05):** teaching mode. `overlay_highlight` takes pixel spots and defaults to the pointer style (a blue arrowhead with the caption in a dark bubble); `desktop_guide` points at each step and waits for the person's own click inside it (a low-level mouse hook only while waiting, injected input skipped, keys never seen) or for the spot's pixels to change (keyboard steps); a wrong click marks the step "Not there" and it keeps waiting, the third stops the guide; the result lists every click and carries a screenshot.
 **Since the 2026-10-04 checkpoint:** typing waits for each keystroke to show (Notepad garbling fixed; text fields too), `desktop_mouse` (move/click/drag/scroll by screen or window pixels), text files in `filesystem_operation` (read/write/edit/grep; Recycle Bin before replace/edit; secrets ask), `process_terminate`, `process_session` (background programs with input/output; every start and input asks; emergency stop ends them), keyboard layout of the target window, Store apps report their own process, in-window dialogs give Yes/OK their context, Win32 list/tab items clicked for real.
-**User settings:** `%APPDATA%\winwright\config.json` = relaxed + `allowShell: true` (written via an explorer-run .cmd; see memory appdata-sandbox-redirect). `allowPowershell` is still false: the permission system refused to let Claude turn a security switch on; the user was told how to add it in Notepad themselves.
-**Session notes:** a Bash read of engine_tests.rs fake wiring was refused by the permission classifier on 2026-10-04; engine-level fakes were not extended since then (pure unit tests + live tests instead). Two `winwright-replace-test.txt` files sit in the user's Recycle Bin (opt-in test; Claude must not empty it). Old `winwright.old.*.exe` copies in `~\.cargo\bin` are deleted once no app holds them.
 **Toolchain:** Rust 1.98.1 MSVC (pinned), windows-rs 0.62.2, tokio 1.53, schemars 1.2, regex 1.13, rmcp 3.5
 
 ## Done
@@ -61,7 +59,7 @@
 - Opt-in, puts two tiny files in the Recycle Bin: `cargo test -p winwright-files --lib -- --ignored replaced`.
 
 ## Next
-The plan is `.gsd/ROADMAP.md` "Plan from 2026-10-04": all done (14-18, 20-22; 19 dropped by the user). Nothing is planned. For the user: restart Codex, opencode and Antigravity to load the 29-tool build, then try a lesson ("teach me how to ... in <app>"). Disk after the wrap-up: the 23.1 GB `target` folder deleted; kept: .rustup 1.2 GB and the cargo registry 0.3 GB (needed to rebuild), installed exe ~7 MB.
+The plan is `.gsd/ROADMAP.md` "Plan from 2026-10-04": all done (14-18, 20-22; 19 dropped by the user). Nothing is planned. After installing a new build, restart the AI apps that use it.. in <app>"). Disk after the wrap-up: the 23.1 GB `target` folder deleted; kept: .rustup 1.2 GB and the cargo registry 0.3 GB (needed to rebuild), installed exe ~7 MB.
 Direction (user, 2026-10-04): "just use winwright in the app, no need of a separate web page for anything". apps/jarvis deleted (bridge, page, voice, push-to-talk); `winwright` alone now prints an overview. Lost with it: voice, and the outside-content (taint) rule, which only the bridge switched on (`--taint-file` stays for any client that wants it).
 
 ## Decisions
@@ -100,19 +98,17 @@ Direction (user, 2026-10-04): "just use winwright in the app, no need of a separ
   text field (JetBrains). Opening an empty shell window from Start or the taskbar is allowed:
   it runs nothing until Enter.
 - Relaxed mode (2026-10-04): Sensitive is allowed; Destructive (now including spending and
-  security phrases), file delete, process terminate and the shell still ask. The user's real
-  config is `%APPDATA%\winwright\config.json` = relaxed + `allowShell: true` (2026-10-05).
+  security phrases), file delete, process terminate and the shell still ask.
   The taint rule is off (nothing writes the marker; the hook, Phase 19, was dropped).
 - `app_launch` URI allowlist is fixed in code (http, https, mailto, ms-settings, shell:<folder>);
   no config for extra schemes yet.
 - Protecting the exe folder (M3) means file operations are refused in the folder winwright.exe
   runs from (e.g. Downloads if run from there): install it in its own folder.
 
-## Apps (updated 2026-10-04)
-- Registered: Claude Code (`claude mcp add winwright --scope user`, ~/.claude.json), Codex (~/.codex/config.toml, env_vars passes APPDATA/LOCALAPPDATA/USERPROFILE/SystemRoot and the WINWRIGHT_*/JARVIS_* memory and Notion names, tool_timeout_sec 120), opencode v2 (~/.config/opencode/opencode.json `mcp.servers`), Antigravity (~/.gemini/config/mcp_config.json).
-- Installed build: `~\.cargo\bin\winwright.exe`; reinstall with `cargo install --path crates/winwright-cli --locked` (rename the running exe aside first if an app holds it).
-- User config `%APPDATA%\winwright\config.json`: `confirmationMode: relaxed`.
-- Notion: JARVIS_NOTION_TOKEN + JARVIS_NOTION_PARENT user env vars (Winwright reads WINWRIGHT_NOTION_* first, then these).
+## Apps
+- Registering Winwright in the AI apps: `winwright setup` (README). Reinstall from source with
+  `cargo install --path crates/winwright-cli --locked` (rename the running exe aside first if an
+  app holds it).
 
 ## CHECKPOINT 2026-10-03 (history)
 State of the tree: `cargo fmt --check`, `cargo clippy --workspace --all-targets -D warnings`, `cargo test --workspace` all pass (2026-10-03, after the audit fixes); live `live_fixture` 7/7, `mcp_stdio` 2/2, `live_confirm` 2/2 and `live_desktop` 3/3 after the fixes. `scripts/check.ps1` runs the same (`-Live` adds live tests).
@@ -134,7 +130,6 @@ Security audit items, all DONE 2026-10-03 (origin = github.com/Nexace/winwright,
 - L2 755ad51 audit reads/screenshots/file reads; L4 d74cf6e 128 KB text cap in MCP.
 - Bugs: c38315e real elapsed in capture/input timeouts; 6414e1f overlay disabled -> ACTION_BLOCKED; 4d40fd0 config value ranges + loopback-only httpHost; e40dadf depth-limit truncation reported.
 
-Final cleanup still owed: `cargo clean` (~11 GB).
 
 ## Footprint
 - 2026-10-04: apps/jarvis deleted (311 MB with node_modules); Winwright is the only thing that runs.

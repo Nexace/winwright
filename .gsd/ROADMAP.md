@@ -47,9 +47,5 @@ Claude in Chrome). JARVIS (`apps/jarvis`, `winwright assistant`, push-to-talk) w
 Not planned: mixed-DPI testing (one monitor), a config list for extra URI schemes (add one when a
 real need appears), local speech models, Jev, ElevenLabs.
 
-For the user (outside the code): restart Codex, opencode and Antigravity for the new build;
-optionally delete the "Winwright memory test" Notion page and the unused `ELEVENLABS_API_KEY`
-user env var.
-
 Standing rules: no live desktop test while the user is busy at the PC without asking; push only when
 asked; secrets never pass through chat; keep disk and RAM use minimal; one PowerShell command per call.
