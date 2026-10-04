@@ -9,10 +9,11 @@ use winwright_contracts::overlay::{HighlightRequest, HighlightResult, OverlayId,
 use winwright_contracts::security::{ActionRisk, Capability, ProposedAction, TargetSummary};
 use winwright_contracts::system::{
     ExecRequest, ExecResult, FileOperation, FileResult, LaunchRequest, LaunchResult, ProcessInfo,
+    WriteMode,
 };
 use winwright_contracts::window::WindowInfo;
 use winwright_contracts::{WinwrightError, WinwrightResult};
-use winwright_security::{program_capability, stricter, transfer_risk};
+use winwright_security::{is_secret_path, program_capability, stricter, transfer_risk};
 
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
@@ -63,8 +64,86 @@ fn describe_file_op(op: &FileOperation) -> String {
             format!("Search {} for {pattern}", root.display())
         }
         FileOperation::KnownFolder { name } => format!("Resolve folder {name}"),
+        FileOperation::Read { path, .. } => format!("Read {}", path.display()),
+        FileOperation::Write {
+            path,
+            content,
+            mode,
+        } => {
+            let chars = content.chars().count();
+            match mode {
+                WriteMode::Create => format!("Create {} ({chars} characters)", path.display()),
+                WriteMode::Overwrite => format!(
+                    "Replace {} with {chars} characters (the old file goes to the Recycle Bin)",
+                    path.display()
+                ),
+                WriteMode::Append => format!("Add {chars} characters to {}", path.display()),
+            }
+        }
+        FileOperation::Edit {
+            path, old, count, ..
+        } => format!(
+            "Edit {}: replace {} characters{} (the old version goes to the Recycle Bin)",
+            path.display(),
+            old.chars().count(),
+            if *count > 1 {
+                format!(" in {count} places")
+            } else {
+                String::new()
+            }
+        ),
+        FileOperation::Grep { root, pattern, .. } => {
+            format!(
+                "Search the text of files in {} for {pattern}",
+                root.display()
+            )
+        }
     }
 }
+/// What a file operation needs and how risky it is.
+fn file_risk(op: &FileOperation) -> (Capability, ActionRisk) {
+    match op {
+        // A secret shown to the model cannot be taken back: always ask.
+        FileOperation::Read { path, .. } | FileOperation::Grep { root: path, .. }
+            if is_secret_path(path) =>
+        {
+            (Capability::FileRead, ActionRisk::Destructive)
+        }
+        FileOperation::Write { path, .. } | FileOperation::Edit { path, .. }
+            if is_secret_path(path) =>
+        {
+            (Capability::FileWrite, ActionRisk::Destructive)
+        }
+        FileOperation::List { .. }
+        | FileOperation::Metadata { .. }
+        | FileOperation::Search { .. }
+        | FileOperation::KnownFolder { .. }
+        | FileOperation::Read { .. }
+        | FileOperation::Grep { .. } => (Capability::FileRead, ActionRisk::ReadOnly),
+        // A new file changes nothing that exists.
+        FileOperation::Write {
+            mode: WriteMode::Create,
+            ..
+        } => (Capability::FileWrite, ActionRisk::Normal),
+        // The old version goes to the Recycle Bin, so this can be undone.
+        FileOperation::Write { .. } | FileOperation::Edit { .. } => {
+            (Capability::FileWrite, ActionRisk::Sensitive)
+        }
+        FileOperation::Copy { overwrite, .. } | FileOperation::Move { overwrite, .. }
+            if *overwrite =>
+        {
+            (Capability::FileWrite, ActionRisk::Destructive)
+        }
+        FileOperation::Copy { from, to, .. } => (Capability::FileWrite, transfer_risk(from, to)),
+        // Moved or renamed things vanish from where the user (and their apps) expect them.
+        FileOperation::Move { .. } | FileOperation::Rename { .. } => {
+            (Capability::FileWrite, ActionRisk::Sensitive)
+        }
+        FileOperation::CreateDirectory { .. } => (Capability::FileWrite, ActionRisk::Normal),
+        FileOperation::Delete { .. } => (Capability::FileDelete, ActionRisk::Destructive),
+    }
+}
+
 const DEFAULT_OVERLAY_COLOR: u32 = 0x00E0_4A2A;
 
 /// Prompts show at most this many characters of arguments.
@@ -388,26 +467,7 @@ impl Engine {
         session: &Session,
         op: FileOperation,
     ) -> WinwrightResult<FileResult> {
-        let (capability, risk) = match &op {
-            FileOperation::List { .. }
-            | FileOperation::Metadata { .. }
-            | FileOperation::Search { .. }
-            | FileOperation::KnownFolder { .. } => (Capability::FileRead, ActionRisk::ReadOnly),
-            FileOperation::Copy { overwrite, .. } | FileOperation::Move { overwrite, .. }
-                if *overwrite =>
-            {
-                (Capability::FileWrite, ActionRisk::Destructive)
-            }
-            FileOperation::Copy { from, to, .. } => {
-                (Capability::FileWrite, transfer_risk(from, to))
-            }
-            // Moved or renamed things vanish from where the user (and their apps) expect them.
-            FileOperation::Move { .. } | FileOperation::Rename { .. } => {
-                (Capability::FileWrite, ActionRisk::Sensitive)
-            }
-            FileOperation::CreateDirectory { .. } => (Capability::FileWrite, ActionRisk::Normal),
-            FileOperation::Delete { .. } => (Capability::FileDelete, ActionRisk::Destructive),
-        };
+        let (capability, risk) = file_risk(&op);
         let summary = describe_file_op(&op);
         let action = proposed(
             "filesystem_operation",
@@ -535,5 +595,63 @@ impl Engine {
     pub fn rearm(&self) {
         self.sessions.rearm();
         self.taint.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn op(json: &str) -> FileOperation {
+        serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn text_file_risks() {
+        let cases = [
+            (
+                r#"{"op":"read","path":"C:\\code\\main.rs"}"#,
+                ActionRisk::ReadOnly,
+            ),
+            (
+                r#"{"op":"grep","root":"C:\\code","pattern":"fn"}"#,
+                ActionRisk::ReadOnly,
+            ),
+            (
+                r#"{"op":"read","path":"C:\\code\\.env"}"#,
+                ActionRisk::Destructive,
+            ),
+            (
+                r#"{"op":"grep","root":"C:\\Users\\a\\.ssh","pattern":"x"}"#,
+                ActionRisk::Destructive,
+            ),
+            (
+                r#"{"op":"write","path":"C:\\code\\new.txt","content":"x"}"#,
+                ActionRisk::Normal,
+            ),
+            (
+                r#"{"op":"write","path":"C:\\code\\a.txt","content":"x","mode":"overwrite"}"#,
+                ActionRisk::Sensitive,
+            ),
+            (
+                r#"{"op":"write","path":"C:\\code\\a.txt","content":"x","mode":"append"}"#,
+                ActionRisk::Sensitive,
+            ),
+            (
+                r#"{"op":"edit","path":"C:\\code\\a.txt","old":"a","new":"b"}"#,
+                ActionRisk::Sensitive,
+            ),
+            (
+                r#"{"op":"write","path":"C:\\Users\\a\\.ssh\\authorized_keys","content":"k"}"#,
+                ActionRisk::Destructive,
+            ),
+            (
+                r#"{"op":"edit","path":"C:\\code\\.env.local","old":"a","new":"b"}"#,
+                ActionRisk::Destructive,
+            ),
+        ];
+        for (json, want) in cases {
+            assert_eq!(file_risk(&op(json)).1, want, "{json}");
+        }
     }
 }

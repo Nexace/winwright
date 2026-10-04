@@ -24,6 +24,7 @@ use crate::path::{
     resolve_stored_entry, validate_name,
 };
 use crate::shell::{KNOWN_FOLDER_NAMES, folder_id, known_folder_path, recycle};
+use crate::text;
 use crate::{io_platform, platform, wide};
 
 pub(crate) const MAX_LIST_ENTRIES: usize = 5_000;
@@ -63,6 +64,36 @@ pub(crate) fn run(
             max_results,
         } => search(&root, &pattern, max_results, ctx),
         FileOperation::KnownFolder { name } => known_folder(&name),
+        FileOperation::Read {
+            path,
+            offset,
+            length,
+        } => text::read(&path, offset, length),
+        FileOperation::Write {
+            path,
+            content,
+            mode,
+        } => text::write(&path, &content, mode, protected),
+        FileOperation::Edit {
+            path,
+            old,
+            new,
+            count,
+        } => text::edit(&path, &old, &new, count, protected),
+        FileOperation::Grep {
+            root,
+            pattern,
+            glob,
+            ignore_case,
+            max_results,
+        } => text::grep(
+            &root,
+            &pattern,
+            glob.as_deref(),
+            ignore_case,
+            max_results,
+            ctx,
+        ),
     }
 }
 
@@ -95,11 +126,11 @@ pub(crate) fn sort_entries(entries: &mut [FileEntry]) {
     entries.sort_by_cached_key(|e| (!e.is_dir, e.name.to_lowercase(), e.name.clone()));
 }
 
-fn is_reparse_point(meta: &Metadata) -> bool {
+pub(crate) fn is_reparse_point(meta: &Metadata) -> bool {
     meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0
 }
 
-fn is_directory(meta: &Metadata) -> bool {
+pub(crate) fn is_directory(meta: &Metadata) -> bool {
     meta.file_attributes() & FILE_ATTRIBUTE_DIRECTORY.0 != 0
 }
 
@@ -142,7 +173,10 @@ fn metadata(path: &Path) -> WinwrightResult<FileResult> {
 
 /// An existing entry about to be mutated in place (moved, renamed, recycled): the entry itself
 /// and, for links, their target must both be outside protected locations.
-fn mutable_entry(path: &Path, protected: &Protected) -> WinwrightResult<(PathBuf, Metadata)> {
+pub(crate) fn mutable_entry(
+    path: &Path,
+    protected: &Protected,
+) -> WinwrightResult<(PathBuf, Metadata)> {
     let entry = resolve_stored_entry(path)?;
     protected.check(&entry)?;
     let meta = fs::symlink_metadata(&entry).map_err(|e| missing(&entry, &e))?;
@@ -367,19 +401,51 @@ fn search(
     let limit = max_results.min(MAX_SEARCH_RESULTS);
     let glob = Glob::new(pattern)?;
     let root = resolve_existing(root)?;
+    let mut results = Vec::new();
+    let mut full = false;
+    let cut = walk(root, ctx, |path, meta| {
+        if glob.matches(&path.file_name().unwrap_or_default().to_string_lossy()) {
+            if results.len() == limit {
+                full = true;
+                return Walk::Stop;
+            }
+            results.push(file_entry(path, meta));
+        }
+        Walk::Next
+    })?;
+    Ok(FileResult::Entries {
+        entries: results,
+        truncated: cut || full,
+    })
+}
+
+/// What a walk does after visiting an entry.
+pub(crate) enum Walk {
+    Next,
+    /// Do not look inside this entry.
+    SkipFolder,
+    Stop,
+}
+
+/// Visits every entry under the folder `root`, breadth first, at most [`MAX_SEARCH_DEPTH`]
+/// folders deep. Links and junctions are never followed, so the walk cannot loop; unreadable
+/// folders (access denied, vanished) are skipped. Returns whether the walk was cut short: by
+/// [`Walk::Stop`], the deadline, or the depth limit.
+pub(crate) fn walk(
+    root: PathBuf,
+    ctx: &OperationContext,
+    mut visit: impl FnMut(&Path, &Metadata) -> Walk,
+) -> WinwrightResult<bool> {
     if !fs::metadata(&root).is_ok_and(|meta| meta.is_dir()) {
         return Err(WinwrightError::invalid(format!(
             "{} is not a folder",
             display(&root).display()
         )));
     }
-
-    let mut results = Vec::new();
-    let mut truncated = false;
+    let mut cut = false;
     let mut visited = 0usize;
     let mut queue = VecDeque::from([(root, 0usize)]);
-    'walk: while let Some((dir, depth)) = queue.pop_front() {
-        // Unreadable folders (access denied, vanished) are skipped, not fatal.
+    while let Some((dir, depth)) = queue.pop_front() {
         let Ok(items) = fs::read_dir(&dir) else {
             continue;
         };
@@ -390,33 +456,27 @@ fn search(
                     return Err(WinwrightError::Cancelled);
                 }
                 if ctx.remaining().is_zero() {
-                    truncated = true;
-                    break 'walk;
+                    return Ok(true);
                 }
             }
             let Ok(item) = item else { continue };
             let Ok(meta) = item.metadata() else { continue };
-            if glob.matches(&item.file_name().to_string_lossy()) {
-                if results.len() == limit {
-                    truncated = true;
-                    break 'walk;
-                }
-                results.push(file_entry(&item.path(), &meta));
+            let path = item.path();
+            match visit(&path, &meta) {
+                Walk::Stop => return Ok(true),
+                Walk::SkipFolder => continue,
+                Walk::Next => {}
             }
-            // Links and junctions are never followed, so the walk cannot loop.
             if is_directory(&meta) && !is_reparse_point(&meta) {
                 if depth < MAX_SEARCH_DEPTH {
-                    queue.push_back((item.path(), depth + 1));
+                    queue.push_back((path, depth + 1));
                 } else {
-                    truncated = true;
+                    cut = true;
                 }
             }
         }
     }
-    Ok(FileResult::Entries {
-        entries: results,
-        truncated,
-    })
+    Ok(cut)
 }
 
 fn known_folder(name: &str) -> WinwrightResult<FileResult> {
@@ -442,16 +502,22 @@ fn known_folder(name: &str) -> WinwrightResult<FileResult> {
 
 fn delete(path: &Path, protected: &Protected) -> WinwrightResult<FileResult> {
     let (entry, _) = mutable_entry(path, protected)?;
-    ensure_recycle_bin(&entry)?;
-    let shown = display(&entry);
+    recycle_entry(&entry)?;
+    Ok(FileResult::Done)
+}
+
+/// Moves `entry` to the Recycle Bin and checks it is gone. Never deletes permanently.
+pub(crate) fn recycle_entry(entry: &Path) -> WinwrightResult<()> {
+    ensure_recycle_bin(entry)?;
+    let shown = display(entry);
     recycle(&shown)?;
-    if fs::symlink_metadata(&entry).is_ok() {
+    if fs::symlink_metadata(entry).is_ok() {
         return Err(WinwrightError::ActionOutcomeUnknown {
-            operation: "delete".to_owned(),
+            operation: "recycle".to_owned(),
             reason: format!("{} still exists after recycling", shown.display()),
         });
     }
-    Ok(FileResult::Done)
+    Ok(())
 }
 
 /// Only fixed local drives have a Recycle Bin by default; elsewhere the shell would delete

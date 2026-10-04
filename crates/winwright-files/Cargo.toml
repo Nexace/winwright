@@ -8,6 +8,8 @@ publish.workspace = true
 
 [dependencies]
 winwright-contracts.workspace = true
+winwright-security.workspace = true
+regex.workspace = true
 tokio = { workspace = true, features = ["rt"] }
 tracing.workspace = true
 windows = { workspace = true, features = [

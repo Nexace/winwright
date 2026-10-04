@@ -6,12 +6,14 @@
 //! - writes, moves, renames, deletes, and creates never touch protected locations
 //!   (see [`LocalFiles::protected_locations`]);
 //! - deletion only ever moves items to the Recycle Bin, never deletes permanently;
-//! - copies, moves, and renames never replace an existing item unless `overwrite` says so.
+//! - copies, moves, and renames never replace an existing item unless `overwrite` says so;
+//! - a text file that is replaced or edited goes to the Recycle Bin first.
 
 mod glob;
 mod ops;
 mod path;
 mod shell;
+mod text;
 
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
@@ -92,6 +94,10 @@ fn operation_name(op: &FileOperation) -> &'static str {
         FileOperation::CreateDirectory { .. } => "createDirectory",
         FileOperation::Search { .. } => "search",
         FileOperation::KnownFolder { .. } => "knownFolder",
+        FileOperation::Read { .. } => "read",
+        FileOperation::Write { .. } => "write",
+        FileOperation::Edit { .. } => "edit",
+        FileOperation::Grep { .. } => "grep",
     }
 }
 

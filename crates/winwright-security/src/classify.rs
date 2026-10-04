@@ -245,7 +245,21 @@ const SECRET_EXTENSIONS: &[&str] = &[
 /// (keys, password databases, browser and app data), need a person's yes wherever they go.
 pub fn transfer_risk(from: &Path, to: &Path) -> ActionRisk {
     let same_volume = volume(from).is_some_and(|v| volume(to) == Some(v));
-    let parts: Vec<String> = from
+    let depth = from
+        .components()
+        .filter(|c| matches!(c, Component::Normal(_)))
+        .count();
+    if !same_volume || is_secret_path(from) || depth <= 2 {
+        ActionRisk::Sensitive
+    } else {
+        ActionRisk::Normal
+    }
+}
+
+/// Whether `path` is, or lies inside, something that holds secrets: keys, password databases,
+/// `.env` files, browser and app data, SSH and cloud credentials.
+pub fn is_secret_path(path: &Path) -> bool {
+    let parts: Vec<String> = path
         .components()
         .filter_map(|c| match c {
             Component::Normal(part) => Some(part.to_string_lossy().to_lowercase()),
@@ -257,15 +271,10 @@ pub fn transfer_risk(from: &Path, to: &Path) -> ActionRisk {
         .rsplit_once('.')
         .map(|(_, ext)| ext)
         .unwrap_or_default();
-    let secret = parts.iter().any(|p| SECRET_FOLDERS.contains(&p.as_str()))
+    parts.iter().any(|p| SECRET_FOLDERS.contains(&p.as_str()))
         || SECRET_FILES.contains(&file)
         || file.starts_with(".env.")
-        || SECRET_EXTENSIONS.contains(&extension);
-    if !same_volume || secret || parts.len() <= 2 {
-        ActionRisk::Sensitive
-    } else {
-        ActionRisk::Normal
-    }
+        || SECRET_EXTENSIONS.contains(&extension)
 }
 
 /// The drive letter of a local drive path; `None` for shares, device paths, and the rest.
@@ -601,6 +610,26 @@ mod tests {
             ("notepad.exe", "cleanup.bat", None),
         ] {
             assert_eq!(opened_capability(process, name), want, "{process} {name:?}");
+        }
+    }
+
+    #[test]
+    fn secret_paths_are_recognized() {
+        for p in [
+            r"C:\Users\me\.ssh\config",
+            r"C:\Users\me\code\.env",
+            r"C:\Users\me\code\.env.local",
+            r"D:\vault.kdbx",
+            r"C:\Users\me\AppData\Roaming\app\token.json",
+        ] {
+            assert!(is_secret_path(Path::new(p)), "{p}");
+        }
+        for p in [
+            r"C:\Users\me\Documents\notes.txt",
+            r"C:\Users\me\code\environment.md",
+            r"C:\Users\me\code\src\main.rs",
+        ] {
+            assert!(!is_secret_path(Path::new(p)), "{p}");
         }
     }
 

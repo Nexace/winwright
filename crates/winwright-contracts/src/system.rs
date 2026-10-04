@@ -138,10 +138,77 @@ pub enum FileOperation {
     KnownFolder {
         name: String,
     },
+    /// Lines of a text file: from line `offset` (0-based; negative counts from the end), at
+    /// most `length` of them.
+    Read {
+        path: PathBuf,
+        #[serde(default)]
+        offset: i64,
+        #[serde(default = "default_read_lines")]
+        length: usize,
+    },
+    /// Creates a text file (UTF-8), or with `mode` replaces or appends to one. A replaced file
+    /// goes to the Recycle Bin first.
+    Write {
+        path: PathBuf,
+        content: String,
+        #[serde(default)]
+        mode: WriteMode,
+    },
+    /// Replaces `old` with `new` in a text file. `old` must occur exactly `count` times
+    /// (default 1); the previous version goes to the Recycle Bin.
+    Edit {
+        path: PathBuf,
+        old: String,
+        new: String,
+        #[serde(default = "one")]
+        count: usize,
+    },
+    /// Lines matching a regular expression in the text files under `root` (only names matching
+    /// `glob` when given). Secret files and folders are skipped.
+    Grep {
+        root: PathBuf,
+        pattern: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        glob: Option<String>,
+        #[serde(default)]
+        ignore_case: bool,
+        #[serde(default = "default_search_limit", alias = "max_results")]
+        max_results: usize,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum WriteMode {
+    /// A new file; fails if one exists.
+    #[default]
+    Create,
+    /// Replace the file (the old one goes to the Recycle Bin), or create it.
+    Overwrite,
+    /// Add to the end of the file, or create it.
+    Append,
 }
 
 fn default_search_limit() -> usize {
     200
+}
+fn default_read_lines() -> usize {
+    1_000
+}
+fn one() -> usize {
+    1
+}
+
+/// One line found by `grep`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TextMatch {
+    pub path: PathBuf,
+    /// 1-based.
+    pub line: usize,
+    /// The line, cut to a few hundred characters.
+    pub text: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -174,6 +241,19 @@ pub enum FileResult {
         path: PathBuf,
     },
     Done,
+    /// Lines `first_line`.. (0-based) of a file of `total_lines` lines.
+    #[serde(rename_all = "camelCase")]
+    Text {
+        path: PathBuf,
+        text: String,
+        first_line: usize,
+        total_lines: usize,
+        truncated: bool,
+    },
+    Matches {
+        matches: Vec<TextMatch>,
+        truncated: bool,
+    },
 }
 
 pub trait ProcessService: Send + Sync {
@@ -246,8 +326,31 @@ mod tests {
             serde_json::from_str::<FileOperation>(r#"{"op":"list","path":"docs","hidden":true}"#)
                 .is_err()
         );
+        let op: FileOperation =
+            serde_json::from_str(r#"{"op":"write","path":"a.txt","content":"hi","mode":"append"}"#)
+                .unwrap();
+        assert!(matches!(
+            op,
+            FileOperation::Write {
+                mode: WriteMode::Append,
+                ..
+            }
+        ));
+        let op: FileOperation =
+            serde_json::from_str(r#"{"op":"edit","path":"a.txt","old":"x","new":"y"}"#).unwrap();
+        assert!(matches!(op, FileOperation::Edit { count: 1, .. }));
+        let op: FileOperation =
+            serde_json::from_str(r#"{"op":"read","path":"a.txt","offset":-20}"#).unwrap();
+        assert!(matches!(
+            op,
+            FileOperation::Read {
+                offset: -20,
+                length: 1_000,
+                ..
+            }
+        ));
         let schema = serde_json::to_string(&schemars::schema_for!(FileOperation)).unwrap();
-        for field in ["includeHidden", "newName", "maxResults"] {
+        for field in ["includeHidden", "newName", "maxResults", "ignoreCase"] {
             assert!(schema.contains(field), "{field} missing from {schema}");
         }
     }

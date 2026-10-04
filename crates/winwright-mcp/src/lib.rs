@@ -24,6 +24,7 @@ use winwright_contracts::input::parse_chord;
 use winwright_contracts::locator::FindResult;
 use winwright_contracts::memory::{MemoryRecallRequest, MemorySaveRequest};
 use winwright_contracts::snapshot::DesktopSnapshot;
+use winwright_contracts::system::FileResult;
 use winwright_contracts::window::WindowInfo;
 use winwright_core::Engine;
 use winwright_core::session::Session;
@@ -123,6 +124,31 @@ fn render_found(f: &FindResult) -> String {
 }
 
 /// `hwnd` is printed in decimal: window_control takes it back as a JSON number.
+/// A file's lines as plain text under a one-line header (JSON would escape every line break);
+/// other results as JSON.
+fn render_file(result: FileResult) -> CallToolResult {
+    let FileResult::Text {
+        path,
+        text: lines,
+        first_line,
+        total_lines,
+        truncated,
+    } = result
+    else {
+        return json(&result);
+    };
+    let more = if truncated {
+        "; more lines follow (read again with a larger offset)"
+    } else {
+        ""
+    };
+    text(format!(
+        "{} from line {} of {total_lines}{more}\n{lines}",
+        path.display(),
+        first_line + 1
+    ))
+}
+
 fn render_windows(windows: &[WindowInfo]) -> String {
     windows
         .iter()
@@ -509,7 +535,9 @@ impl WinwrightMcp {
 
     #[tool(
         description = "File operations without touching Explorer: list, metadata, copy, move, rename, delete (Recycle Bin, needs user confirmation), \
-        createDirectory, search, knownFolder (Desktop, Documents, Downloads, ...)."
+        createDirectory, search (file names), knownFolder (Desktop, Documents, Downloads, ...); and text files: read (lines by offset/length), \
+        write (create, or mode overwrite/append), edit (replace exact `old` text with `new`), grep (lines matching a regex). \
+        A replaced or edited file goes to the Recycle Bin first. Secret files (keys, .env, password databases, app data) need the user's yes."
     )]
     async fn filesystem_operation(&self, Parameters(input): Parameters<FileInput>) -> ToolResult {
         Ok(
@@ -518,7 +546,7 @@ impl WinwrightMcp {
                 .file_operation(&self.sess(), input.operation)
                 .await
             {
-                Ok(r) => json(&r),
+                Ok(r) => render_file(r),
                 Err(e) => fail(e),
             },
         )

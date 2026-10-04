@@ -1155,12 +1155,14 @@ dependencies = [
 name = "winwright-files"
 version = "0.1.0"
 dependencies = [
+ "regex",
  "tokio",
  "tokio-util",
  "tracing",
  "windows",
  "windows-core",
  "winwright-contracts",
+ "winwright-security",
 ]
 
 [[package]]
