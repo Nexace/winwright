@@ -21,7 +21,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_EX_TRANSPARENT, WS_POPUP,
 };
 use windows::core::{PCWSTR, w};
-use winwright_contracts::geometry::PhysicalRect;
+use winwright_contracts::geometry::{PhysicalPoint, PhysicalRect};
 use winwright_contracts::overlay::OverlayRequest;
 use winwright_contracts::{WinwrightError, WinwrightResult};
 
@@ -257,12 +257,25 @@ struct Text<'a> {
     rgb: u32,
 }
 
+/// A new overlay window; a pointer starts `offset` away from where it lands.
+pub struct Created {
+    pub hwnd: HWND,
+    /// Its final top-left corner.
+    pub at: (i32, i32),
+    pub offset: (i32, i32),
+}
+
+/// A pointer closer than this to where it lands just appears there.
+const MIN_GLIDE: i32 = 8;
+
 /// Renders `request` into a new, shown overlay window. `None` when no part of it lies on a
-/// monitor (for example the rect of a minimized window).
+/// monitor (for example the rect of a minimized window). A pointer is first shown with its
+/// tip on `glide_from`, ready to glide to the target.
 pub fn create_overlay(
     hinstance: HINSTANCE,
     request: &OverlayRequest,
-) -> WinwrightResult<Option<HWND>> {
+    glide_from: Option<PhysicalPoint>,
+) -> WinwrightResult<Option<Created>> {
     let geometry = monitor_geometry(request.rect)?;
     let metrics = Metrics::for_dpi(geometry.dpi);
     let dc = MemoryDc::new()?;
@@ -364,12 +377,34 @@ pub fn create_overlay(
         )
     }
     .map_err(|e| platform("CreateWindowExW(overlay)", &e))?;
-    if let Err(err) = present(hwnd, dc.0, layout.window) {
+    let offset = match (glide_from, layout.pointer) {
+        (Some(from), Some(p)) => {
+            let tip = (layout.window.left + p.tip.x, layout.window.top + p.tip.y);
+            let d = (from.x - tip.0, from.y - tip.1);
+            if d.0.abs() + d.1.abs() < MIN_GLIDE {
+                (0, 0)
+            } else {
+                d
+            }
+        }
+        _ => (0, 0),
+    };
+    let start = PhysicalRect::new(
+        layout.window.left + offset.0,
+        layout.window.top + offset.1,
+        layout.window.right + offset.0,
+        layout.window.bottom + offset.1,
+    );
+    if let Err(err) = present(hwnd, dc.0, start) {
         // SAFETY: we just created `hwnd` on this thread and nothing else references it.
         let _ = unsafe { DestroyWindow(hwnd) };
         return Err(err);
     }
-    Ok(Some(hwnd))
+    Ok(Some(Created {
+        hwnd,
+        at: (layout.window.left, layout.window.top),
+        offset,
+    }))
 }
 
 /// Pushes the premultiplied DIB to the layered window, then shows it topmost without

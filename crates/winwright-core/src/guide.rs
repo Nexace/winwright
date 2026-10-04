@@ -26,8 +26,8 @@ const MAX_GUIDE_MS: u64 = 300_000;
 const MAX_SPOT_SIDE: u32 = 4_000;
 /// A release further than this from its press makes the click a drag.
 const DRAG_PIXELS: i32 = 6;
-/// A change step captures its area once the pointer is drawn, then this often.
-const CHANGE_SETTLE: Duration = Duration::from_millis(300);
+/// A change step captures its area once the pointer has glided in and settled, then this often.
+const CHANGE_SETTLE: Duration = Duration::from_millis(600);
 const CHANGE_POLL: Duration = Duration::from_millis(400);
 /// Clicks elsewhere a step takes before the guide stops for help.
 const MAX_MISSES: u32 = 3;

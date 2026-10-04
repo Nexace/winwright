@@ -9,10 +9,11 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError};
+use std::time::Instant;
 
 use windows::Win32::Foundation::{
     ERROR_CLASS_ALREADY_EXISTS, ERROR_HOTKEY_ALREADY_REGISTERED, GetLastError, HINSTANCE, HWND,
-    LPARAM, LRESULT, WPARAM,
+    LPARAM, LRESULT, POINT, WPARAM,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{
@@ -22,12 +23,14 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     HOT_KEY_MODIFIERS, MOD_NOREPEAT, RegisterHotKey, UnregisterHotKey, VkKeyScanW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, HTTRANSPARENT,
-    HWND_MESSAGE, KillTimer, MA_NOACTIVATE, MSG, PostMessageW, PostQuitMessage, RegisterClassExW,
-    SetTimer, USER_TIMER_MAXIMUM, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_HOTKEY,
-    WM_MOUSEACTIVATE, WM_NCHITTEST, WM_TIMER, WNDCLASSEXW, WNDPROC,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos, GetMessageW,
+    HTTRANSPARENT, HWND_MESSAGE, KillTimer, MA_NOACTIVATE, MSG, PostMessageW, PostQuitMessage,
+    RegisterClassExW, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetTimer, SetWindowPos,
+    USER_TIMER_MAXIMUM, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_HOTKEY, WM_MOUSEACTIVATE,
+    WM_NCHITTEST, WM_TIMER, WNDCLASSEXW, WNDPROC,
 };
 use windows::core::{HRESULT, PCWSTR, w};
+use winwright_contracts::geometry::PhysicalPoint;
 use winwright_contracts::input::Key;
 use winwright_contracts::overlay::{OverlayId, OverlayRequest};
 use winwright_contracts::{WinwrightError, WinwrightResult};
@@ -101,7 +104,20 @@ pub struct Signals {
 struct Overlay {
     hwnd: HWND,
     timer: bool,
+    glide: Option<Glide>,
 }
+
+/// A pointer moving from the cursor to its target, one frame per glide timer tick.
+struct Glide {
+    at: (i32, i32),
+    offset: (i32, i32),
+    start: Instant,
+}
+
+/// Glide timers carry this bit; auto-hide timers are the bare overlay id.
+const GLIDE_TIMER: u64 = 1 << 40;
+const GLIDE_FRAME_MS: u32 = 15;
+const GLIDE_MS: f32 = 280.0;
 
 struct Hotkey {
     chord: Chord,
@@ -310,6 +326,10 @@ fn on_wake(host: HWND) {
 }
 
 fn on_timer(host: HWND, id: u64) {
+    if id & GLIDE_TIMER != 0 {
+        with_state(|state| state.glide_frame(id & !GLIDE_TIMER));
+        return;
+    }
     // SAFETY: stops the (periodic) timer on this thread's host window; auto-hide is one-shot.
     let _ = unsafe { KillTimer(Some(host), id as usize) };
     with_state(|state| state.remove(id));
@@ -340,6 +360,22 @@ fn teardown(post_quit: bool) {
         // SAFETY: no pointers; ends this thread's message loop.
         unsafe { PostQuitMessage(0) };
     }
+}
+
+/// Moves an overlay without resizing, reordering or activating it.
+fn move_to(hwnd: HWND, (x, y): (i32, i32)) {
+    // SAFETY: `hwnd` is an overlay window of this thread.
+    let _ = unsafe {
+        SetWindowPos(
+            hwnd,
+            None,
+            x,
+            y,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        )
+    };
 }
 
 /// `VkKeyScanW` low byte for the UI thread's keyboard layout.
@@ -432,8 +468,17 @@ impl UiState {
     }
 
     fn show(&mut self, id: OverlayId, request: &OverlayRequest) {
-        let hwnd = match render::create_overlay(self.hinstance, request) {
-            Ok(Some(hwnd)) => hwnd,
+        // A pointer glides in from the mouse cursor, as if handed over by it.
+        let mut cursor = POINT::default();
+        // SAFETY: `cursor` is a valid out-parameter; physical pixels on this PMv2 thread.
+        let from = unsafe { GetCursorPos(&mut cursor) }
+            .is_ok()
+            .then_some(PhysicalPoint {
+                x: cursor.x,
+                y: cursor.y,
+            });
+        let created = match render::create_overlay(self.hinstance, request, from) {
+            Ok(Some(created)) => created,
             Ok(None) => {
                 tracing::debug!(id = id.0, "overlay has no on-screen area; nothing shown");
                 return;
@@ -453,7 +498,34 @@ impl UiState {
             }
             ok
         });
-        self.overlays.insert(id.0, Overlay { hwnd, timer });
+        let glide = (created.offset != (0, 0))
+            // SAFETY: as above; WM_TIMER carries the tagged id.
+            .then(|| unsafe {
+                SetTimer(
+                    Some(self.host),
+                    (GLIDE_TIMER | id.0) as usize,
+                    GLIDE_FRAME_MS,
+                    None,
+                )
+            })
+            .filter(|&ok| ok != 0)
+            .map(|_| Glide {
+                at: created.at,
+                offset: created.offset,
+                start: Instant::now(),
+            });
+        if glide.is_none() && created.offset != (0, 0) {
+            // No timer: land at once rather than stay off target.
+            move_to(created.hwnd, created.at);
+        }
+        self.overlays.insert(
+            id.0,
+            Overlay {
+                hwnd: created.hwnd,
+                timer,
+                glide,
+            },
+        );
         while self.overlays.len() > MAX_OVERLAYS {
             let Some((&oldest, _)) = self.overlays.first_key_value() else {
                 break;
@@ -466,12 +538,37 @@ impl UiState {
         let Some(overlay) = self.overlays.remove(&id) else {
             return;
         };
-        // SAFETY: the timer and window were created by this thread and are destroyed once.
+        // SAFETY: the timers and window were created by this thread and are destroyed once.
         unsafe {
             if overlay.timer {
                 let _ = KillTimer(Some(self.host), id as usize);
             }
+            if overlay.glide.is_some() {
+                let _ = KillTimer(Some(self.host), (GLIDE_TIMER | id) as usize);
+            }
             let _ = DestroyWindow(overlay.hwnd);
+        }
+    }
+
+    /// Moves a gliding pointer one frame on; at the end it rests on its target.
+    fn glide_frame(&mut self, id: u64) {
+        let host = self.host;
+        let stop = || {
+            // SAFETY: the glide timer of `id` on this thread's host window.
+            let _ = unsafe { KillTimer(Some(host), (GLIDE_TIMER | id) as usize) };
+        };
+        let Some(overlay) = self.overlays.get_mut(&id) else {
+            return stop();
+        };
+        let Some(glide) = &overlay.glide else {
+            return stop();
+        };
+        let progress = glide.start.elapsed().as_secs_f32() * 1000.0 / GLIDE_MS;
+        let (dx, dy) = crate::layout::glide_offset(glide.offset, progress);
+        move_to(overlay.hwnd, (glide.at.0 + dx, glide.at.1 + dy));
+        if progress >= 1.0 {
+            overlay.glide = None;
+            stop();
         }
     }
 

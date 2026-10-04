@@ -307,6 +307,16 @@ pub fn place_pointer(tip: PhysicalPoint, m: &Metrics) -> Pointer {
     }
 }
 
+/// Where a gliding pointer is, as an offset from where it lands: `start` at `progress` 0,
+/// none at 1, easing out (fast, then settling).
+pub fn glide_offset(start: (i32, i32), progress: f32) -> (i32, i32) {
+    let left = (1.0 - progress.clamp(0.0, 1.0)).powi(3);
+    (
+        (start.0 as f32 * left).round() as i32,
+        (start.1 as f32 * left).round() as i32,
+    )
+}
+
 /// The caption bubble just past the pointer's tail, below and right of the tip; left of the
 /// tip or above it where the work area ends, and always inside it.
 pub fn place_bubble(
@@ -789,6 +799,16 @@ mod tests {
         assert_eq!(badge, PhysicalRect::new(604, 457, 628, 481));
         assert_eq!(text.left, badge.right + 6);
         assert!(contains_rect(bubble, badge) && contains_rect(bubble, text));
+    }
+
+    #[test]
+    fn a_glide_starts_at_the_cursor_and_settles_on_the_target() {
+        assert_eq!(glide_offset((-300, 120), 0.0), (-300, 120));
+        assert_eq!(glide_offset((-300, 120), 1.0), (0, 0));
+        assert_eq!(glide_offset((-300, 120), 2.0), (0, 0));
+        // Ease-out: most of the way covered by the halfway point.
+        let half = glide_offset((-300, 120), 0.5);
+        assert_eq!(half, (-38, 15));
     }
 
     #[test]
