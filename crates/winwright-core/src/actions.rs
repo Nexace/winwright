@@ -344,6 +344,14 @@ fn dialog_around<'a>(
         .find_map(|c| dialog_around(c, runtime_id, around))
 }
 
+/// Win32 list boxes and tab controls change their selection through UI Automation without
+/// telling their app (no LBN_SELCHANGE or TCN_SELCHANGE), so the app never reacts: their items
+/// are clicked for real, as a person would. Drop-down lists keep their own path.
+fn selects_by_click(p: &UiProps) -> bool {
+    p.framework_id.eq_ignore_ascii_case("Win32")
+        && matches!(p.role, ControlRole::ListItem | ControlRole::TabItem)
+}
+
 /// Where a mouse action lands, past the element under its first point.
 struct Pointer {
     /// Screen points in order: one, or a drag's start and end.
@@ -1189,15 +1197,7 @@ impl Engine {
             return Ok(step);
         }
         if p.has_pattern(UiPattern::SelectionItem) {
-            let out = self.pattern(r, UiPatternAction::Select, ctx).await?;
-            let mut step = Step::new(ActionMethod::SelectionItemPattern);
-            step.verified = out
-                .props_after
-                .as_ref()
-                .is_some_and(|a| a.selected == Some(true));
-            step.after = out.props_after;
-            step.expect = Some(Expect::Selected);
-            return Ok(step);
+            return self.select_item(r, ctx).await;
         }
         if p.has_pattern(UiPattern::Toggle)
             && matches!(
@@ -1841,6 +1841,26 @@ impl Engine {
     }
 
     /// Selects an item: the target itself, or `option` inside a combo box / list / tab / tree.
+    /// Selects an item: by SelectionItemPattern, or with a real click where that would not tell
+    /// the app (see [`selects_by_click`]).
+    async fn select_item(&self, r: &Resolved, ctx: &OperationContext) -> WinwrightResult<Step> {
+        if selects_by_click(&r.props) && self.input.is_some() {
+            let mut step = self.physical_click(r, MouseButton::Left, 1, ctx).await?;
+            step.warnings.clear();
+            step.expect = Some(Expect::Selected);
+            return Ok(step);
+        }
+        let out = self.pattern(r, UiPatternAction::Select, ctx).await?;
+        let mut step = Step::new(ActionMethod::SelectionItemPattern);
+        step.verified = out
+            .props_after
+            .as_ref()
+            .is_some_and(|a| a.selected == Some(true));
+        step.after = out.props_after;
+        step.expect = Some(Expect::Selected);
+        Ok(step)
+    }
+
     async fn select(
         &self,
         session: &Session,
@@ -1851,15 +1871,7 @@ impl Engine {
         ensure_enabled(r)?;
         let Some(option) = option else {
             require(r, UiPattern::SelectionItem)?;
-            let out = self.pattern(r, UiPatternAction::Select, ctx).await?;
-            let mut step = Step::new(ActionMethod::SelectionItemPattern);
-            step.verified = out
-                .props_after
-                .as_ref()
-                .is_some_and(|a| a.selected == Some(true));
-            step.after = out.props_after;
-            step.expect = Some(Expect::Selected);
-            return Ok(step);
+            return self.select_item(r, ctx).await;
         };
         if option.trim().is_empty() {
             // An empty option would "contain"-match every item.
@@ -1924,6 +1936,20 @@ impl Engine {
                     let _ = self
                         .pattern(&item, UiPatternAction::ScrollIntoView, ctx)
                         .await;
+                }
+                if !is_combo && selects_by_click(&item.props) && self.input.is_some() {
+                    let clicked = self.select_item(&item, ctx).await;
+                    let selected = match &clicked {
+                        Ok(_) => self
+                            .poll_until(&item, ctx, |p| p.selected == Some(true))
+                            .await
+                            .is_some(),
+                        Err(_) => false,
+                    };
+                    self.release(vec![item.key]).await;
+                    let mut step = clicked?;
+                    step.verified = selected;
+                    return Ok((step, item.props.name.trim().to_owned()));
                 }
                 let (action, method) = if item.props.has_pattern(UiPattern::SelectionItem) {
                     (UiPatternAction::Select, ActionMethod::SelectionItemPattern)
@@ -2336,6 +2362,21 @@ mod tests {
         assert!(dialog_around(&tree, &[2], None).is_none());
         assert!(dialog_around(&tree, &[99], None).is_none());
         assert!(dialog_around(&tree, &[], None).is_none());
+    }
+
+    #[test]
+    fn win32_list_and_tab_items_are_selected_by_click() {
+        let item = |role, framework: &str| UiProps {
+            role,
+            framework_id: framework.to_owned(),
+            ..UiProps::default()
+        };
+        assert!(selects_by_click(&item(ControlRole::ListItem, "Win32")));
+        assert!(selects_by_click(&item(ControlRole::TabItem, "Win32")));
+        // Other frameworks tell their app themselves; tree items notify too.
+        assert!(!selects_by_click(&item(ControlRole::ListItem, "XAML")));
+        assert!(!selects_by_click(&item(ControlRole::ListItem, "WPF")));
+        assert!(!selects_by_click(&item(ControlRole::TreeItem, "Win32")));
     }
 
     #[test]
