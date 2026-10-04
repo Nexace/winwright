@@ -53,7 +53,7 @@
   (shows the confirm dialog twice, ~5 s; do not click it). `... manual_` asks a person to click Allow.
 
 ## Next
-The plan is `.gsd/ROADMAP.md` "Plan from 2026-10-04" (Phases 14-20, rebuilt from both earlier chats on 2026-10-04). Phase 14 (command-gate gaps) is done (df7b5e0) and 15 (docs apps-only) is done; next 16 acceptance in the real apps with the user, 17 vision/coordinates + drag, 18 known-gap fixes, 19 opt-in outside-content hook (ask the user), 20 wrap-up (push only when asked, cargo clean).
+The plan is `.gsd/ROADMAP.md` "Plan from 2026-10-04" (Phases 14-20, rebuilt from both earlier chats on 2026-10-04). Phase 14 (command-gate gaps) is done (df7b5e0), 15 (docs apps-only) is done, 16 passed in Claude Code (typing fix 424a4f3, installed; the user checks Codex/opencode/Antigravity after restarting them); next 17 cursor/coordinates + drag (the user asked to move the cursor), then 21 Desktop Commander's features, 18 known-gap fixes, 19 opt-in outside-content hook (ask the user), 20 wrap-up (push only when asked, cargo clean).
 Direction (user, 2026-10-04): "just use winwright in the app, no need of a separate web page for anything". apps/jarvis deleted (bridge, page, voice, push-to-talk); `winwright` alone now prints an overview. Lost with it: voice, and the outside-content (taint) rule, which only the bridge switched on (`--taint-file` stays for any client that wants it).
 
 ## Decisions
