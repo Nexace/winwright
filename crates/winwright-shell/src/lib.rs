@@ -9,23 +9,32 @@ mod exec;
 mod handle;
 mod launch;
 mod processes;
+mod sessions;
 
 pub use processes::UNKNOWN_SESSION;
 
+use std::sync::Arc;
+use std::time::Duration;
+
 use winwright_contracts::backend::{BackendFuture, OperationContext};
 use winwright_contracts::system::{
-    ExecRequest, ExecResult, LaunchRequest, LaunchResult, ProcessInfo, ProcessService,
+    ExecRequest, ExecResult, LaunchRequest, LaunchResult, ProcessInfo, ProcessService, SessionInfo,
+    SessionOutput, SessionStart,
 };
 use winwright_contracts::{WinwrightError, WinwrightResult};
 
+use crate::sessions::Sessions;
+
 /// [`ProcessService`] backed by `CreateProcessW`, `ShellExecuteExW`, Toolhelp snapshots, and
-/// Tokio child processes.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct SystemProcesses;
+/// Tokio child processes, with background sessions that end with it.
+#[derive(Clone, Debug, Default)]
+pub struct SystemProcesses {
+    sessions: Arc<Sessions>,
+}
 
 impl SystemProcesses {
     pub fn new() -> Self {
-        Self
+        Self::default()
     }
 }
 
@@ -79,6 +88,30 @@ impl ProcessService for SystemProcesses {
     fn terminate(&self, pid: u32, name: &str) -> WinwrightResult<()> {
         tracing::info!(pid, "terminate");
         processes::terminate(pid, name)
+    }
+
+    fn session_start(&self, request: SessionStart) -> WinwrightResult<SessionInfo> {
+        self.sessions.start(&request)
+    }
+
+    fn session_input<'a>(&'a self, id: u32, text: String) -> BackendFuture<'a, ()> {
+        Box::pin(async move { self.sessions.input(id, &text).await })
+    }
+
+    fn session_read<'a>(&'a self, id: u32, wait: Duration) -> BackendFuture<'a, SessionOutput> {
+        Box::pin(self.sessions.read(id, wait))
+    }
+
+    fn session_list(&self) -> Vec<SessionInfo> {
+        self.sessions.list()
+    }
+
+    fn session_stop(&self, id: u32) -> WinwrightResult<SessionInfo> {
+        self.sessions.stop(id)
+    }
+
+    fn stop_all_sessions(&self) {
+        self.sessions.stop_all();
     }
 }
 

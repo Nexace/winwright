@@ -24,7 +24,7 @@ use winwright_contracts::input::parse_chord;
 use winwright_contracts::locator::FindResult;
 use winwright_contracts::memory::{MemoryRecallRequest, MemorySaveRequest};
 use winwright_contracts::snapshot::DesktopSnapshot;
-use winwright_contracts::system::FileResult;
+use winwright_contracts::system::{FileResult, SessionInfo, SessionOutput};
 use winwright_contracts::window::WindowInfo;
 use winwright_core::Engine;
 use winwright_core::session::Session;
@@ -124,6 +124,20 @@ fn render_found(f: &FindResult) -> String {
 }
 
 /// `hwnd` is printed in decimal: window_control takes it back as a JSON number.
+/// `session 3: cmd.exe (process 1234) running`, or `... exited with code 0`.
+fn session_line(s: &SessionInfo) -> String {
+    let process = s
+        .process_id
+        .map(|pid| format!(" (process {pid})"))
+        .unwrap_or_default();
+    let state = match (s.running, s.exit_code) {
+        (true, _) => "running".to_owned(),
+        (false, Some(code)) => format!("exited with code {code}"),
+        (false, None) => "ended".to_owned(),
+    };
+    format!("session {}: {}{process} {state}", s.id, s.program)
+}
+
 /// A file's lines as plain text under a one-line header (JSON would escape every line break);
 /// other results as JSON.
 fn render_file(result: FileResult) -> CallToolResult {
@@ -548,6 +562,71 @@ impl WinwrightMcp {
     }
 
     #[tool(
+        description = "Run a program in the background as a session: a build, a dev server, a REPL, cmd. \
+        action start (program, args, workingDir) returns its id and first output; input sends a line (text; Enter added \
+        unless enter=false) and returns what it printed; read returns new output; list shows sessions; stop ends one and \
+        its child processes. Starting and every input ask the user first, like shell_execute (the shell must be enabled \
+        in Winwright's settings). Reads wait up to waitMs for output to settle."
+    )]
+    async fn process_session(&self, Parameters(input): Parameters<SessionInput>) -> ToolResult {
+        let sess = self.sess();
+        let engine = &self.engine;
+        let result = match input.action {
+            SessionAction::List => {
+                return Ok(match engine.session_list() {
+                    Ok(list) if list.is_empty() => text("no sessions"),
+                    Ok(list) => text(list.iter().map(session_line).collect::<Vec<_>>().join("\n")),
+                    Err(e) => fail(e),
+                });
+            }
+            SessionAction::Start => {
+                async {
+                    let started = engine.session_start(&sess, input.start()?).await?;
+                    engine.session_read(&sess, started.id, input.wait()).await
+                }
+                .await
+            }
+            SessionAction::Input => {
+                async {
+                    let id = input.id()?;
+                    engine.session_input(&sess, id, input.input()?).await?;
+                    engine.session_read(&sess, id, input.wait()).await
+                }
+                .await
+            }
+            SessionAction::Read => {
+                async { engine.session_read(&sess, input.id()?, input.wait()).await }.await
+            }
+            SessionAction::Stop => {
+                async {
+                    let stopped = engine.session_stop(&sess, input.id()?).await?;
+                    Ok(SessionOutput {
+                        session: stopped,
+                        output: String::new(),
+                        dropped: false,
+                    })
+                }
+                .await
+            }
+        };
+        Ok(match result {
+            Ok(out) => {
+                let dropped = if out.dropped {
+                    "\n(older output was dropped)"
+                } else {
+                    ""
+                };
+                text(format!(
+                    "{}{dropped}\n{}",
+                    session_line(&out.session),
+                    out.output
+                ))
+            }
+            Err(e) => fail(e),
+        })
+    }
+
+    #[tool(
         description = "File operations without touching Explorer: list, metadata, copy, move, rename, delete (Recycle Bin, needs user confirmation), \
         createDirectory, search (file names), knownFolder (Desktop, Documents, Downloads, ...); and text files: read (lines by offset/length), \
         write (create, or mode overwrite/append), edit (replace exact `old` text with `new`), grep (lines matching a regex). \
@@ -665,7 +744,7 @@ mod tests {
     #[test]
     fn tool_schemas_are_objects_that_name_every_described_field() {
         let tools = WinwrightMcp::tool_router().list_all();
-        assert_eq!(tools.len(), 27);
+        assert_eq!(tools.len(), 28);
         for tool in tools {
             let schema = serde_json::Value::Object(tool.input_schema.as_ref().clone());
             assert_eq!(schema["type"], "object", "{}", tool.name);

@@ -33,7 +33,7 @@ pub(crate) const MAX_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
 const EXIT_GRACE: Duration = Duration::from_secs(2);
 /// After a kill, how long to wait for the pipes to close.
 const KILL_GRACE: Duration = Duration::from_millis(500);
-const READ_CHUNK: usize = 8 * 1024;
+pub(crate) const READ_CHUNK: usize = 8 * 1024;
 
 enum Ending {
     Exited(ExitStatus),
@@ -189,13 +189,13 @@ fn validate(request: &ExecRequest) -> WinwrightResult<()> {
 }
 
 /// File name only: full paths can reveal user names, and arguments are never logged.
-fn program_label(program: &str) -> String {
+pub(crate) fn program_label(program: &str) -> String {
     Path::new(program)
         .file_name()
         .map_or_else(|| program.to_owned(), |n| n.to_string_lossy().into_owned())
 }
 
-fn spawn_error(program: &str, err: &std::io::Error) -> WinwrightError {
+pub(crate) fn spawn_error(program: &str, err: &std::io::Error) -> WinwrightError {
     if err.kind() == std::io::ErrorKind::NotFound {
         WinwrightError::invalid(format!("program {program} was not found"))
     } else if err.raw_os_error() == Some(ERROR_ELEVATION_REQUIRED.0 as i32) {
@@ -304,7 +304,7 @@ impl Capture {
 }
 
 /// Length of an incomplete UTF-8 sequence at the end of `bytes` (0 when it ends cleanly).
-fn incomplete_utf8_tail(bytes: &[u8]) -> usize {
+pub(crate) fn incomplete_utf8_tail(bytes: &[u8]) -> usize {
     for back in 1..=bytes.len().min(4) {
         let byte = bytes[bytes.len() - back];
         if byte & 0xC0 == 0x80 {
@@ -322,11 +322,11 @@ fn incomplete_utf8_tail(bytes: &[u8]) -> usize {
 }
 
 /// Job object that kills every process in it when terminated or when its handle closes.
-struct KillOnCloseJob(OwnedHandle);
+pub(crate) struct KillOnCloseJob(OwnedHandle);
 
 impl KillOnCloseJob {
     /// Best effort: without a job, timeouts still kill the direct child.
-    fn assign(child: &Child) -> Option<Self> {
+    pub(crate) fn assign(child: &Child) -> Option<Self> {
         let process = HANDLE(child.raw_handle()?);
         // SAFETY: no security attributes and an unnamed job; the handle is owned below.
         let raw = unsafe { CreateJobObjectW(None, PCWSTR::null()) }.ok()?;
@@ -356,7 +356,7 @@ impl KillOnCloseJob {
         }
     }
 
-    fn terminate(&self) {
+    pub(crate) fn terminate(&self) {
         // SAFETY: the job handle is live for `self`'s lifetime.
         let _ = unsafe { TerminateJobObject(self.0.0, 1) };
     }

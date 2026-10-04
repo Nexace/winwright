@@ -3,6 +3,7 @@
 
 use schemars::JsonSchema;
 use serde::Deserialize;
+use std::path::PathBuf;
 use winwright_contracts::WinwrightError;
 use winwright_contracts::action::{
     DesktopAction, ElementTarget, ScreenPoint, ScrollDirection, WindowAction,
@@ -13,7 +14,8 @@ use winwright_contracts::input::MouseButton;
 use winwright_contracts::locator::{ElementLocator, FindRequest, MatchMode};
 use winwright_contracts::overlay::{HighlightRequest, OverlayStyle};
 use winwright_contracts::snapshot::{SnapshotRequest, SnapshotTarget};
-use winwright_contracts::system::{ExecRequest, FileOperation, LaunchRequest};
+
+use winwright_contracts::system::{ExecRequest, FileOperation, LaunchRequest, SessionStart};
 use winwright_contracts::wait::{WaitRequest, WaitState};
 use winwright_contracts::window::WindowSelector;
 use winwright_core::InspectRequest;
@@ -718,6 +720,71 @@ impl HighlightInput {
 pub struct TerminateInput {
     /// Process id from process_list.
     pub pid: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum SessionAction {
+    Start,
+    Input,
+    Read,
+    List,
+    Stop,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionInput {
+    /// start a program, send it input, read its new output, list sessions, or stop one.
+    pub action: SessionAction,
+    /// For start: the program (cmd.exe, git, a full path; found in System32, Windows or PATH).
+    pub program: Option<String>,
+    /// For start: its arguments.
+    pub args: Option<Vec<String>>,
+    /// For start: the folder it runs in.
+    pub working_dir: Option<String>,
+    /// For input, read and stop: the session id that start returned.
+    pub id: Option<u32>,
+    /// For input: the text to send.
+    pub text: Option<String>,
+    /// For input: press Enter after the text (default true).
+    pub enter: Option<bool>,
+    /// For start, input and read: how long to wait for output, in ms (default 2000, max 30000).
+    pub wait_ms: Option<u64>,
+}
+
+impl SessionInput {
+    pub fn id(&self) -> Result<u32> {
+        self.id
+            .ok_or_else(|| WinwrightError::invalid("give the session id from start"))
+    }
+
+    pub fn start(&self) -> Result<SessionStart> {
+        Ok(SessionStart {
+            program: self
+                .program
+                .clone()
+                .ok_or_else(|| WinwrightError::invalid("start needs a program"))?,
+            args: self.args.clone().unwrap_or_default(),
+            working_dir: self.working_dir.as_ref().map(PathBuf::from),
+        })
+    }
+
+    /// The text to send, with Enter (`\r\n`) unless `enter` is false.
+    pub fn input(&self) -> Result<String> {
+        let mut text = self
+            .text
+            .clone()
+            .ok_or_else(|| WinwrightError::invalid("input needs text"))?;
+        if self.enter != Some(false) {
+            text.push_str("\r\n");
+        }
+        Ok(text)
+    }
+
+    pub fn wait(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.wait_ms.unwrap_or(2_000).min(30_000))
+    }
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

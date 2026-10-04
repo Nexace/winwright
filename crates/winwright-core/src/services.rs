@@ -9,7 +9,7 @@ use winwright_contracts::overlay::{HighlightRequest, HighlightResult, OverlayId,
 use winwright_contracts::security::{ActionRisk, Capability, ProposedAction, TargetSummary};
 use winwright_contracts::system::{
     ExecRequest, ExecResult, FileOperation, FileResult, LaunchRequest, LaunchResult, ProcessInfo,
-    WriteMode,
+    SessionInfo, SessionOutput, SessionStart, WriteMode,
 };
 use winwright_contracts::window::WindowInfo;
 use winwright_contracts::{WinwrightError, WinwrightResult};
@@ -100,6 +100,29 @@ fn describe_file_op(op: &FileOperation) -> String {
         }
     }
 }
+/// What running `requested` (resolved to `resolved`) needs: shell execution, with PowerShell
+/// behind its own switch even when the shell is enabled.
+fn shell_capability(requested: &str, resolved: &str) -> Capability {
+    match stricter(program_capability(requested), program_capability(resolved)) {
+        Capability::PowerShell => Capability::PowerShell,
+        _ => Capability::Shell,
+    }
+}
+
+/// Input for a session as a prompt shows it: whole up to the prompt limit, then cut, saying
+/// how much is hidden.
+fn shown_input(text: &str) -> String {
+    let total = text.chars().count();
+    if total <= MAX_PROMPT_ARGS {
+        return text.to_owned();
+    }
+    let kept: String = text.chars().take(MAX_PROMPT_ARGS).collect();
+    format!(
+        "{kept}\u{2026} ({} more characters)",
+        total - MAX_PROMPT_ARGS
+    )
+}
+
 /// What a file operation needs and how risky it is.
 fn file_risk(op: &FileOperation) -> (Capability, ActionRisk) {
     match op {
@@ -597,14 +620,7 @@ impl Engine {
             None => Ok(request.program.clone()),
         };
         let shown = resolved.as_deref().unwrap_or(&request.program);
-        // PowerShell stays behind its own switch even when the shell is enabled.
-        let capability = match stricter(
-            program_capability(&request.program),
-            program_capability(shown),
-        ) {
-            Capability::PowerShell => Capability::PowerShell,
-            _ => Capability::Shell,
-        };
+        let capability = shell_capability(&request.program, shown);
         let action = proposed(
             "shell_execute",
             capability,
@@ -641,11 +657,194 @@ impl Engine {
         result
     }
 
+    /// Starts a background session. Gated like `shell_execute`: off unless the user enabled the
+    /// shell, and every start asks.
+    pub async fn session_start(
+        &self,
+        session: &Session,
+        request: SessionStart,
+    ) -> WinwrightResult<SessionInfo> {
+        let started = Instant::now();
+        let exec = ExecRequest {
+            program: request.program.clone(),
+            args: request.args.clone(),
+            working_dir: request.working_dir.clone(),
+            timeout_ms: MAX_EXEC_TIMEOUT_MS,
+            max_output_bytes: 0,
+        };
+        let resolved = match self.processes.as_deref() {
+            Some(p) => p.resolve_program(&exec),
+            None => Ok(request.program.clone()),
+        };
+        let shown = resolved.as_deref().unwrap_or(&request.program);
+        let action = proposed(
+            "process_session",
+            shell_capability(&request.program, shown),
+            ActionRisk::Sensitive,
+            Some(request.program.clone()),
+        );
+        let target = action.target.clone();
+        let summary = format!(
+            "Start {shown}{} in the background",
+            with_args(&request.args)
+        );
+        let mut lease = None;
+        let mut confirmed = false;
+        let result = async {
+            resolved?;
+            confirmed = self.permit(session, action, summary, &mut lease).await?;
+            self.processes
+                .as_deref()
+                .ok_or_else(|| unavailable("process"))?
+                .session_start(request)
+        }
+        .await;
+        self.record(
+            session,
+            "process_session",
+            target.as_ref(),
+            None,
+            &result,
+            confirmed,
+            started,
+        );
+        result
+    }
+
+    /// Sends `text` to a session. Input to a running program is a command: it asks every
+    /// time, and the prompt shows the text.
+    pub async fn session_input(
+        &self,
+        session: &Session,
+        id: u32,
+        text: String,
+    ) -> WinwrightResult<()> {
+        let started = Instant::now();
+        let mut target = None;
+        let mut lease = None;
+        let mut confirmed = false;
+        let result = async {
+            self.ensure_running()?;
+            let processes = self
+                .processes
+                .as_deref()
+                .ok_or_else(|| unavailable("process"))?;
+            let info = processes
+                .session_list()
+                .into_iter()
+                .find(|s| s.id == id)
+                .ok_or_else(|| {
+                    WinwrightError::invalid(format!(
+                        "no session {id}: list sessions to see the open ones"
+                    ))
+                })?;
+            let action = proposed(
+                "process_session",
+                shell_capability(&info.program, &info.program),
+                ActionRisk::Sensitive,
+                Some(info.program.clone()),
+            );
+            target.clone_from(&action.target);
+            let summary = format!(
+                "Send to {} (session {id}): {}",
+                info.program,
+                shown_input(&text)
+            );
+            confirmed = self.permit(session, action, summary, &mut lease).await?;
+            processes.session_input(id, text).await
+        }
+        .await;
+        self.record(
+            session,
+            "process_session",
+            target.as_ref(),
+            None,
+            &result,
+            confirmed,
+            started,
+        );
+        result
+    }
+
+    /// A session's output since the previous read (audited, like other reads).
+    pub async fn session_read(
+        &self,
+        session: &Session,
+        id: u32,
+        wait: Duration,
+    ) -> WinwrightResult<SessionOutput> {
+        let started = Instant::now();
+        let result = async {
+            self.observe("process_session")?;
+            self.processes
+                .as_deref()
+                .ok_or_else(|| unavailable("process"))?
+                .session_read(id, wait)
+                .await
+        }
+        .await;
+        self.record(
+            session,
+            "process_session",
+            None,
+            None,
+            &result,
+            false,
+            started,
+        );
+        result
+    }
+
+    pub fn session_list(&self) -> WinwrightResult<Vec<SessionInfo>> {
+        self.observe("process_session")?;
+        Ok(self
+            .processes
+            .as_deref()
+            .ok_or_else(|| unavailable("process"))?
+            .session_list())
+    }
+
+    /// Ends a session Winwright itself started (the user agreed to it); this does not ask.
+    pub async fn session_stop(&self, session: &Session, id: u32) -> WinwrightResult<SessionInfo> {
+        let started = Instant::now();
+        let action = proposed(
+            "process_session",
+            Capability::Interact,
+            ActionRisk::Normal,
+            None,
+        );
+        let mut lease = None;
+        let mut confirmed = false;
+        let summary = format!("Stop background session {id}");
+        let result = async {
+            confirmed = self.permit(session, action, summary, &mut lease).await?;
+            self.processes
+                .as_deref()
+                .ok_or_else(|| unavailable("process"))?
+                .session_stop(id)
+        }
+        .await;
+        self.record(
+            session,
+            "process_session",
+            None,
+            None,
+            &result,
+            confirmed,
+            started,
+        );
+        result
+    }
+
     /// Emergency stop (spec §22, §44): cancel every session and queued operation, release any
     /// synthesized keys/buttons, and hide overlays. Independent of queues; never blocks.
     /// The engine stays stopped until [`Engine::rearm`] is called from trusted local UI.
     pub fn emergency_stop(&self) {
         self.sessions.cancel_all();
+        // Background programs the AI started end too.
+        if let Some(processes) = self.processes.as_deref() {
+            processes.stop_all_sessions();
+        }
         if let Some(input) = self.input.as_deref()
             && let Err(err) = input.release_all()
         {
@@ -670,6 +869,35 @@ mod tests {
 
     fn op(json: &str) -> FileOperation {
         serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn every_program_run_is_shell_execution_and_powershell_keeps_its_switch() {
+        assert_eq!(shell_capability("ping.exe", "ping.exe"), Capability::Shell);
+        assert_eq!(
+            shell_capability("cmd", r"C:\Windows\System32\cmd.exe"),
+            Capability::Shell
+        );
+        assert_eq!(
+            shell_capability("pwsh", r"C:\pwsh\pwsh.exe"),
+            Capability::PowerShell
+        );
+        // A harmless-looking name that resolves to PowerShell is judged as PowerShell.
+        assert_eq!(
+            shell_capability(
+                "tool",
+                r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+            ),
+            Capability::PowerShell
+        );
+    }
+
+    #[test]
+    fn session_input_is_shown_whole_up_to_the_prompt_limit() {
+        assert_eq!(shown_input("dir\r\n"), "dir\r\n");
+        let long = "x".repeat(MAX_PROMPT_ARGS + 5);
+        let shown = shown_input(&long);
+        assert!(shown.ends_with("(5 more characters)"), "{shown}");
     }
 
     #[test]

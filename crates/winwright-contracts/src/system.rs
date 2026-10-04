@@ -256,6 +256,50 @@ pub enum FileResult {
     },
 }
 
+/// A program to run in the background as a session: its output is kept for later reads and it
+/// can be sent input (a build, a dev server, a REPL).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionStart {
+    pub program: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_dir: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionInfo {
+    pub id: u32,
+    /// The program's file name.
+    pub program: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_id: Option<u32>,
+    pub running: bool,
+    /// Once it has exited on its own (`None` while running, or when it was stopped).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionOutput {
+    #[serde(flatten)]
+    pub session: SessionInfo,
+    /// Output (stdout and stderr, as they arrived) since the previous read.
+    pub output: String,
+    /// Older unread output was dropped to stay within the buffer.
+    pub dropped: bool,
+}
+
+fn no_sessions() -> crate::WinwrightError {
+    crate::WinwrightError::BackendUnavailable {
+        backend: "process".into(),
+        reason: "this backend has no background sessions".into(),
+    }
+}
+
 pub trait ProcessService: Send + Sync {
     fn launch<'a>(
         &'a self,
@@ -295,6 +339,43 @@ pub trait ProcessService: Send + Sync {
     fn terminate(&self, pid: u32, name: &str) -> WinwrightResult<()> {
         self.can_terminate(pid, name)
     }
+
+    /// Starts a background session. Its process tree ends when the session is stopped or the
+    /// backend goes away.
+    fn session_start(&self, request: SessionStart) -> WinwrightResult<SessionInfo> {
+        let _ = request;
+        Err(no_sessions())
+    }
+
+    /// Writes `text` to the session's standard input.
+    fn session_input<'a>(&'a self, id: u32, text: String) -> BackendFuture<'a, ()> {
+        let _ = (id, text);
+        Box::pin(async { Err(no_sessions()) })
+    }
+
+    /// Output since the previous read: waits up to `wait` for some to arrive, then until it
+    /// pauses, so a burst comes back whole.
+    fn session_read<'a>(
+        &'a self,
+        id: u32,
+        wait: std::time::Duration,
+    ) -> BackendFuture<'a, SessionOutput> {
+        let _ = (id, wait);
+        Box::pin(async { Err(no_sessions()) })
+    }
+
+    fn session_list(&self) -> Vec<SessionInfo> {
+        Vec::new()
+    }
+
+    /// Ends the session's process tree and forgets it.
+    fn session_stop(&self, id: u32) -> WinwrightResult<SessionInfo> {
+        let _ = id;
+        Err(no_sessions())
+    }
+
+    /// Ends every session (the emergency stop).
+    fn stop_all_sessions(&self) {}
 }
 
 pub trait FileService: Send + Sync {

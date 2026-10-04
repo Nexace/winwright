@@ -82,7 +82,9 @@ Tools: `desktop_snapshot` (use `diff: true` after actions), `desktop_find`, `des
 `desktop_inspect`, `desktop_windows`, `window_control`, `desktop_screenshot`, `desktop_mouse`
 (move, click, drag or scroll at a point, for apps with no UI tree such as games; the element
 under the point is judged like a click on it),
-`overlay_highlight`, `overlay_clear`, `app_launch`, `process_list`, `process_terminate`
+`overlay_highlight`, `overlay_clear`, `app_launch`, `process_list`, `process_session` (run a
+program in the background, send it input, read its output; starting and every input ask, and
+need `allowShell`; the emergency stop ends them all), `process_terminate`
 (always asks; Windows' own processes and services are refused), `filesystem_operation`
 (files and folders, and text files: read by lines, write, exact edits, grep; a replaced or
 edited file goes to the Recycle Bin first, and secret files such as keys and `.env` ask first),

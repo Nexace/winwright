@@ -30,7 +30,7 @@ fn exec_request(program: &str, args: &[&str]) -> ExecRequest {
 
 #[tokio::test]
 async fn exec_captures_stdout_and_exit_code() {
-    let result = SystemProcesses
+    let result = SystemProcesses::new()
         .exec(
             exec_request("cmd.exe", &["/c", "echo", "hello"]),
             &ctx(Duration::from_secs(30)),
@@ -46,7 +46,7 @@ async fn exec_captures_stdout_and_exit_code() {
 
 #[tokio::test]
 async fn exec_captures_stderr_and_nonzero_exit() {
-    let result = SystemProcesses
+    let result = SystemProcesses::new()
         .exec(
             exec_request("cmd.exe", &["/c", "echo oops 1>&2 & exit /b 3"]),
             &ctx(Duration::from_secs(30)),
@@ -62,7 +62,7 @@ async fn exec_times_out_and_kills_the_child() {
     let mut request = exec_request("ping", &["-n", "10", "127.0.0.1"]);
     request.timeout_ms = 500;
     let started = Instant::now();
-    let result = SystemProcesses
+    let result = SystemProcesses::new()
         .exec(request, &ctx(Duration::from_secs(30)))
         .await
         .unwrap();
@@ -78,7 +78,7 @@ async fn exec_times_out_and_kills_the_child() {
 
 #[tokio::test]
 async fn exec_honors_an_earlier_context_deadline() {
-    let result = SystemProcesses
+    let result = SystemProcesses::new()
         .exec(
             exec_request("ping", &["-n", "10", "127.0.0.1"]),
             &ctx(Duration::from_millis(400)),
@@ -98,7 +98,7 @@ async fn exec_cancellation_kills_and_reports_cancelled() {
         cancel.cancel();
     });
     let started = Instant::now();
-    let err = SystemProcesses
+    let err = SystemProcesses::new()
         .exec(exec_request("ping", &["-n", "10", "127.0.0.1"]), &context)
         .await
         .unwrap_err();
@@ -114,7 +114,7 @@ async fn exec_output_is_capped_while_the_child_keeps_running_to_completion() {
         &["/c", "for /l %i in (1,1,5000) do @echo line %i"],
     );
     request.max_output_bytes = 100;
-    let result = SystemProcesses
+    let result = SystemProcesses::new()
         .exec(request, &ctx(Duration::from_secs(60)))
         .await
         .unwrap();
@@ -128,7 +128,7 @@ async fn exec_output_is_capped_while_the_child_keeps_running_to_completion() {
 #[tokio::test]
 async fn exec_rejects_missing_programs_and_batch_files() {
     let context = ctx(Duration::from_secs(10));
-    let missing = SystemProcesses
+    let missing = SystemProcesses::new()
         .exec(
             exec_request("winwright-no-such-program-4711", &[]),
             &context,
@@ -136,7 +136,7 @@ async fn exec_rejects_missing_programs_and_batch_files() {
         .await
         .unwrap_err();
     assert_eq!(missing.code(), ErrorCode::InvalidRequest);
-    let batch = SystemProcesses
+    let batch = SystemProcesses::new()
         .exec(exec_request("build.bat", &[]), &context)
         .await
         .unwrap_err();
@@ -146,7 +146,7 @@ async fn exec_rejects_missing_programs_and_batch_files() {
 #[test]
 fn list_contains_the_current_process() {
     let own = std::process::id();
-    let processes = SystemProcesses.list().unwrap();
+    let processes = SystemProcesses::new().list().unwrap();
     assert!(processes.len() > 10);
     let me = processes
         .iter()
@@ -160,7 +160,7 @@ fn list_contains_the_current_process() {
 #[tokio::test]
 #[ignore = "needs an interactive desktop"]
 async fn launch_starts_notepad_as_a_process() {
-    let result = SystemProcesses
+    let result = SystemProcesses::new()
         .launch(
             LaunchRequest {
                 app: "notepad".to_owned(),
@@ -182,7 +182,7 @@ async fn launch_starts_notepad_as_a_process() {
 #[tokio::test]
 #[ignore = "needs an interactive desktop"]
 async fn launch_opens_a_folder_through_the_shell() {
-    let result = SystemProcesses
+    let result = SystemProcesses::new()
         .launch(
             LaunchRequest {
                 app: std::env::temp_dir().to_string_lossy().into_owned(),
@@ -199,7 +199,7 @@ async fn launch_opens_a_folder_through_the_shell() {
 #[tokio::test]
 #[ignore = "needs an interactive desktop"]
 async fn launch_opens_a_settings_uri() {
-    let result = SystemProcesses
+    let result = SystemProcesses::new()
         .launch(
             LaunchRequest {
                 app: "ms-settings:display".to_owned(),
