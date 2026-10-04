@@ -312,12 +312,14 @@ async fn serve_mcp(
     served.map(|_| ())
 }
 
-/// Idle shutdown for `winwright mcp`: `WINWRIGHT_IDLE_MINUTES` (default 10, 0 = never).
+/// Idle shutdown for `winwright mcp`: `WINWRIGHT_IDLE_MINUTES` (default 0 = never). The app
+/// that started the server stops it when it closes; most apps do not restart a server that
+/// quit on its own, so its tools would just stop working.
 fn mcp_idle_timeout() -> Option<std::time::Duration> {
     let minutes = std::env::var("WINWRIGHT_IDLE_MINUTES")
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
-        .unwrap_or(10);
+        .unwrap_or(0);
     (minutes > 0).then(|| std::time::Duration::from_secs(minutes * 60))
 }
 
@@ -420,7 +422,7 @@ async fn run(cli: Cli) -> Result<(), WinwrightError> {
     let config = winwright_core::config::load_config(cli.config.as_deref())?;
     let json = cli.json;
     let Some(command) = cli.command else {
-        unreachable!("main starts the assistant when no command is given")
+        unreachable!("main answers a missing command itself")
     };
     let command = match command {
         Command::Version => {
@@ -475,8 +477,7 @@ async fn run(cli: Cli) -> Result<(), WinwrightError> {
         | Command::Config
         | Command::Mcp(_)
         | Command::Audit(_)
-        | Command::Inspector
-        | Command::Assistant => unreachable!("handled above"),
+        | Command::Inspector => unreachable!("handled above"),
         Command::Windows => {
             let windows = engine.list_windows()?;
             if json {
@@ -798,8 +799,10 @@ fn main() -> ExitCode {
     match cli.command {
         // The Inspector drives its own window loop and runtime on this thread.
         Some(Command::Inspector) => return report(run_inspector(cli.config.as_deref()), json),
-        // `winwright` alone starts the assistant, the way `claude` starts Claude Code.
-        None | Some(Command::Assistant) => return report(run_assistant(), json),
+        None => {
+            print_overview();
+            return ExitCode::SUCCESS;
+        }
         _ => {}
     }
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -809,144 +812,15 @@ fn main() -> ExitCode {
     report(runtime.block_on(run(cli)), json)
 }
 
-/// Where the assistant lives: `WINWRIGHT_JARVIS_DIR`, else `apps/jarvis` above the
-/// executable (`target/{debug,release}/winwright.exe` inside a checkout), else in the
-/// checkout this binary was built from (an installed copy, e.g. in `~\.cargo\bin`).
-fn jarvis_dir() -> Option<std::path::PathBuf> {
-    if let Some(dir) = std::env::var_os("WINWRIGHT_JARVIS_DIR") {
-        return Some(dir.into());
-    }
-    let built_from = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps/jarvis");
-    let exe = std::env::current_exe().ok()?;
-    exe.ancestors()
-        .map(|a| a.join("apps").join("jarvis"))
-        .chain(std::iter::once(built_from))
-        .find(|d| d.join("bridge").join("server.mjs").is_file())
-}
-
-/// Opens the page in the default browser once the bridge answers on `port` (up to 30 s),
-/// so `winwright` alone takes you straight in.
-fn open_page_when_ready(port: &str, url: &str) {
-    let Ok(addr) = format!("127.0.0.1:{port}").parse::<std::net::SocketAddr>() else {
-        return;
-    };
-    for _ in 0..120 {
-        if std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(200))
-            .is_ok()
-        {
-            // explorer.exe hands a URL to the default browser.
-            let _ = std::process::Command::new("explorer.exe").arg(url).spawn();
-            return;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(250));
-    }
-}
-
-/// A per-run secret for the bridge's local push-to-talk endpoint (OS-seeded hashing, 128 bits).
-fn random_token() -> String {
-    use std::hash::{BuildHasher, Hasher};
-    let part = |salt: u64| {
-        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
-        h.write_u64(salt);
-        h.write_u32(std::process::id());
-        h.finish()
-    };
-    format!("{:016x}{:016x}", part(1), part(2))
-}
-
-/// Tells the bridge the hotkey was pressed. Best effort: if JARVIS is not up yet, nothing happens.
-fn post_ptt(port: &str, token: &str) {
-    use std::io::Write;
-    let Ok(mut conn) = std::net::TcpStream::connect(format!("127.0.0.1:{port}")) else {
-        return;
-    };
-    let _ = conn.set_write_timeout(Some(std::time::Duration::from_secs(2)));
-    let _ = write!(
-        conn,
-        "POST /ptt HTTP/1.1
-Host: localhost
-x-jarvis-ptt: {token}
-Content-Length: 0
-Connection: close
-
-"
-    );
-}
-
-/// Runs the assistant (the JARVIS bridge, a Node app, serving Winwright's own chat page)
-/// until it exits. It talks to Winwright by launching
-/// `winwright mcp`, so every Winwright safety gate (confirmations, default-deny shell,
-/// Ctrl+Alt+Esc, audit log) applies exactly as for any other MCP client.
-fn run_assistant() -> Result<(), WinwrightError> {
-    let unavailable = |reason: String| WinwrightError::BackendUnavailable {
-        backend: "assistant".into(),
-        reason,
-    };
-    let dir = jarvis_dir().ok_or_else(|| {
-        unavailable("apps/jarvis not found; set WINWRIGHT_JARVIS_DIR to its folder".into())
-    })?;
-    if !dir.join("node_modules").is_dir() {
-        return Err(unavailable(format!(
-            "JARVIS dependencies are not installed. Run `npm install` in {} first \
-             (it downloads several hundred MB).",
-            dir.display()
-        )));
-    }
-    let exe = std::env::current_exe().map_err(|e| unavailable(e.to_string()))?;
-    let token = random_token();
-    let port = std::env::var("JARVIS_BRIDGE_PORT").unwrap_or_else(|_| "8787".into());
-    // Push-to-talk: a global hotkey (it works while a game has focus), relayed to the
-    // page by the bridge. Nothing listens until it is pressed.
-    let chord = std::env::var("WINWRIGHT_PTT_HOTKEY").unwrap_or_else(|_| "Ctrl+Space".into());
-    let native = winwright_overlay::NativeUi::start()?;
-    let registered = parse_chord(&chord)
-        .map_err(|e| WinwrightError::invalid(format!("invalid hotkey {chord:?}: {e}")))
-        .and_then(|keys| {
-            let (port, token) = (port.clone(), token.clone());
-            native.hotkeys.register(
-                &keys,
-                Box::new(move || {
-                    let (port, token) = (port.clone(), token.clone());
-                    // Off the UI thread: the hotkey callback must return quickly.
-                    std::thread::spawn(move || post_ptt(&port, &token));
-                }),
-            )
-        });
-    match registered {
-        Ok(_) => println!("Push-to-talk hotkey: {chord} (works in any app, and in games)."),
-        Err(err) => eprintln!(
-            "warning: hotkey {chord} unavailable ({err}); press Space in the JARVIS page instead."
-        ),
-    }
+/// `winwright` alone: what it is and where it runs, then the commands.
+fn print_overview() {
     println!(
-        "Starting the assistant from {} (Ctrl+C to stop).",
-        dir.display()
+        "Winwright lets your AI apps (Claude Code, Codex, opencode, Antigravity, ...) use this \
+         PC's desktop, asking you before anything risky. The apps start it themselves as \
+         `winwright mcp`: just ask them.\n\
+         Task reports: %USERPROFILE%\\.winwright\\reports. Ctrl+Alt+Esc stops it at any time.\n"
     );
-    let url = format!("http://localhost:{port}/");
-    println!("Opening {url} in your browser: type there, or press {chord} to talk.");
-    {
-        let (port, url) = (port.clone(), url.clone());
-        std::thread::spawn(move || open_page_when_ready(&port, &url));
-    }
-    // One process: the bridge also serves the page, so there is no dev server.
-    let status = std::process::Command::new("node")
-        .arg("bridge/server.mjs")
-        .current_dir(&dir)
-        .env("JARVIS_WINWRIGHT_EXE", exe)
-        .env("JARVIS_PTT_TOKEN", &token)
-        .status()
-        .map_err(|e| {
-            unavailable(format!(
-                "cannot start node (is Node.js 20+ installed?): {e}"
-            ))
-        });
-    native.hotkeys.shutdown();
-    let status = status?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(unavailable(format!("the assistant exited with {status}")))
-    }
+    let _ = <Cli as clap::CommandFactory>::command().print_help();
 }
 
 fn run_inspector(config: Option<&std::path::Path>) -> Result<(), WinwrightError> {

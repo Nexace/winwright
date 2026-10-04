@@ -39,23 +39,40 @@ DIALOG "Save As" [e1]
   BUTTON "Cancel" [e5]
 ```
 
-## Use from an AI client (MCP)
+## Use it from your AI apps (MCP)
 
-`winwright mcp` speaks MCP over stdio. The client starts it for a session and it exits when
-the client disconnects: no service, no startup entry, nothing left running. Screen capture
-starts only on the first screenshot; UI Automation event listeners attach only during waits.
-Press **Ctrl+Alt+Esc** at any time to stop everything.
+Winwright has no app of its own: it is a tool inside the AI apps you already use. Install it
+once (`cargo install --path crates/winwright-cli --locked` puts `winwright` in `~\.cargo\bin`),
+then add it to each app. The app starts `winwright mcp` itself and stops it when it closes:
+no service, no startup entry. Typing `winwright` alone explains this and lists the commands.
 
-Claude Code:
+Claude Code (all projects):
 
 ```powershell
-claude mcp add winwright -- "C:\path\to\winwright.exe" mcp
+claude mcp add winwright --scope user -- "C:\Users\you\.cargo\bin\winwright.exe" mcp
 ```
 
-Claude Desktop (`claude_desktop_config.json`):
+Codex (`~\.codex\config.toml`). Codex passes only the environment variables you list:
+
+```toml
+[mcp_servers.winwright]
+command = 'C:\Users\you\.cargo\bin\winwright.exe'
+args = ["mcp"]
+tool_timeout_sec = 120   # the Allow/Deny dialog waits up to 60 s
+env_vars = ["APPDATA", "LOCALAPPDATA", "USERPROFILE", "SystemRoot", "WINWRIGHT_NOTION_TOKEN", "WINWRIGHT_NOTION_PARENT"]
+```
+
+opencode v2 (`~\.config\opencode\opencode.json`, under `mcp.servers`):
 
 ```json
-{ "mcpServers": { "winwright": { "command": "C:\\path\\to\\winwright.exe", "args": ["mcp"] } } }
+"winwright": { "type": "local", "command": ["C:\\Users\\you\\.cargo\\bin\\winwright.exe", "mcp"] }
+```
+
+Antigravity (`~\.gemini\config\mcp_config.json`) and Claude Desktop
+(`claude_desktop_config.json`), under `mcpServers`:
+
+```json
+"winwright": { "command": "C:\\Users\\you\\.cargo\\bin\\winwright.exe", "args": ["mcp"] }
 ```
 
 Tools: `desktop_snapshot` (use `diff: true` after actions), `desktop_find`, `desktop_click`,
@@ -63,11 +80,24 @@ Tools: `desktop_snapshot` (use `diff: true` after actions), `desktop_find`, `des
 `desktop_expand`, `desktop_scroll`, `desktop_focus`, `desktop_read_text`, `desktop_wait_for`,
 `desktop_inspect`, `desktop_windows`, `window_control`, `desktop_screenshot`,
 `overlay_highlight`, `overlay_clear`, `app_launch`, `process_list`, `filesystem_operation`,
-`shell_execute` (off by default).
+`shell_execute` (off by default), `memory_save`, `memory_recall`.
 
-Safety defaults: password values are never read; clicking Send/Delete/Buy-style controls,
-deleting files, and running programs return `CONFIRMATION_REQUIRED` or `ACTION_BLOCKED`;
-elevated apps are refused (`UIPI_BLOCKED`).
+**Safety.** Before anything risky (deleting, spending money, changing security, closing
+programs, running commands) Winwright shows its own Allow/Deny dialog, which only your real
+mouse or keyboard can answer. Password values are never read; elevated apps are refused
+(`UIPI_BLOCKED`). `security.confirmationMode` in `%APPDATA%\winwright\config.json` is
+`balanced` (default), `strict` (ask before every change) or `relaxed` (ask only before the
+risky ones). Ctrl+Alt+Esc stops everything at any time; every action goes to an audit log.
+
+**Memory.** After a desktop task the app's AI saves a short report with `memory_save` to
+`%USERPROFILE%\.winwright\reports` (names and summaries only), and reads earlier ones with
+`memory_recall`, so every app shares one memory. With `WINWRIGHT_NOTION_TOKEN` (a Notion
+"API token" connection) and `WINWRIGHT_NOTION_PARENT` (the link of a page shared with it) set,
+each report is also copied to Notion. `WINWRIGHT_MEMORY=0` turns memory off.
+
+**Outside content.** A client that knows when its conversation read a web page can say so
+with `winwright mcp --taint-file <path>` (it creates the file then); from that point every
+desktop change needs your yes. Apps that do not do this get the normal rules.
 
 ## Layout
 
@@ -83,22 +113,3 @@ elevated apps are refused (`UIPI_BLOCKED`).
 App-by-app results live in [docs/app-compatibility.md](docs/app-compatibility.md).
 
 Logs go to stderr; set `WINWRIGHT_LOG=debug` for detail.
-
-## Voice assistant (JARVIS)
-
-`apps/jarvis` is the [JARVIS](https://github.com/adewaskar/jarvis) browser voice assistant (MIT, vendored), wired to use Winwright as its desktop hands. Press **Ctrl+Space** (a global hotkey, works in any app and in games) to talk, and Claude Code (headless, via the Claude Agent SDK) drives your screen through `winwright mcp`.
-
-```powershell
-cd apps\jarvis
-npm install          # one time; several hundred MB (three.js, speech models)
-cd ..\..
-winwright assistant  # starts JARVIS; open the printed URL in Chrome or Edge
-```
-
-Needs Node.js 20+, Chrome or Edge, and a logged-in Claude Code. No API key. Winwright keeps every safety gate for voice: the native Allow/Deny dialog, default-deny shell, Ctrl+Alt+Esc stop, and the audit log. The dialog accepts only your own mouse or keyboard, so voice-control and on-screen-keyboard tools cannot approve it.
-
-JARVIS's own tools (web search, image generation, its other MCP servers) keep JARVIS's own rules; see `apps/jarvis/README.md`. The only Winwright-specific edits are marked in `apps/jarvis/bridge/server.mjs` (`winwrightServer`, `decideTool`, and a short `DESKTOP` paragraph in the system prompt).
-
-**Idle shutdown.** Nothing keeps running when unused: `winwright mcp` exits after 10 minutes with no tool call (`WINWRIGHT_IDLE_MINUTES`, `0` = never), and the JARVIS bridge exits after 10 minutes with no connection or message from the page (`JARVIS_IDLE_MINUTES`); stopping the bridge stops the face with it. Note that an MCP client such as Claude Desktop will see the Winwright server disconnect after its idle period and may need a restart; set `WINWRIGHT_IDLE_MINUTES=0` in its config to keep it running.
-
-**Push-to-talk, not always listening.** There is no wake word. Nothing listens until you press the hotkey (`WINWRIGHT_PTT_HOTKEY`, default `Ctrl+Space`; Space also works in the JARVIS page). The microphone opens for that turn and is released when JARVIS goes dormant again, so the OS microphone indicator is off in between. Winwright owns the hotkey so it works while another app has focus, and relays it to the bridge with a per-run secret; a web page cannot trigger it. Ctrl+Space is claimed globally while `winwright assistant` runs (set another chord if it clashes with an editor shortcut). A press starts a turn; JARVIS ends it when you stop speaking, not on key release.

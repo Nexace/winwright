@@ -1,7 +1,7 @@
 # Winwright State
 
 **Updated:** 2026-10-04
-**Current phase:** CHECKPOINT (2026-10-04, resume here). Tree green; the last commits are not pushed. Done: security audit, taint rule, Phase 7 (live), our own assistant page (old JARVIS face deleted), `winwright` as a one-word command (installed to ~\.cargo\bin), assistant default Sonnet 5.5 at medium effort, Winwright registered in opencode/Codex/Antigravity, and `confirmationMode: "relaxed"` (the user's own config uses it). Next: the user tries `winwright` in Brave (voice + taint dialog) and Winwright from opencode with Go models.
+**Current phase:** CHECKPOINT (2026-10-04, resume here). Tree green; many local commits not pushed. Winwright is used only inside the user's AI apps (Claude Code, Codex, opencode, Antigravity); the voice page and its bridge (apps/jarvis) are deleted. Done since the last checkpoint: relaxed confirmation mode, typed-command shell gate, confirm dialog brings itself to the front, app_launch waits for its window, typing into documents is verified, memory tools (memory_save/memory_recall, Notion copy), MCP idle shutdown off by default.
 **Toolchain:** Rust 1.98.1 MSVC (pinned), windows-rs 0.62.2, tokio 1.53, schemars 1.2, regex 1.13, rmcp 3.5
 
 ## Done
@@ -51,16 +51,9 @@
   (shows the confirm dialog twice, ~5 s; do not click it). `... manual_` asks a person to click Allow.
 
 ## Next (in order; plan in .gsd/INTEGRATION.md "Decisions and changes from the plan review")
-Direction (user, 2026-10-04): Winwright lives in every app's chat first (opencode, Codex,
-Antigravity, Claude Code all registered); the voice page stays as an optional voice remote.
-1. Voice works in Brave (push-to-talk fixed: one click on the page first). Page looks bad: redo
-   its design later (user's call).
-2. Memory DONE 2026-10-04: Winwright's memory_save / memory_recall (crate winwright-memory)
-   share %USERPROFILE%\.winwright\reports with the voice page; Notion copy from both, live-checked.
-   Still to see: an app (Codex/opencode) calling memory_save by itself after a real task.
-3. The user retests the confirm dialog in Codex after the focus fix (a907911): create a file on
-   the Desktop, then delete it; one click on Allow should work.
-4. Later: cargo clean (~11 GB); push (many local commits).
+Direction (user, 2026-10-04): "just use winwright in the app, no need of a separate web page for anything". apps/jarvis deleted (bridge, page, voice, push-to-talk); `winwright` alone now prints an overview. Lost with it: voice, and the outside-content (taint) rule, which only the bridge switched on (`--taint-file` stays for any client that wants it).
+1. The user tries Winwright inside Codex/Claude Code: one click on Allow (focus fix a907911), app_launch + typing into Notepad (1e7e731), and an app calling memory_save by itself.
+2. Later: cargo clean (~11 GB); push (many local commits). ELEVENLABS_API_KEY user env var is now unused (the user may delete it).
 Dropped: Phase 1b, Phase 9, Phase 12, local speech models (Whisper/Kokoro), Jev.
 
 ## Decisions
@@ -98,12 +91,11 @@ Dropped: Phase 1b, Phase 9, Phase 12, local speech models (Whisper/Kokoro), Jev.
 - Protecting the exe folder (M3) means file operations are refused in the folder winwright.exe
   runs from (e.g. Downloads if run from there): install it in its own folder.
 
-## Assistant (apps/jarvis; updated 2026-10-04)
-- Started as vendored github.com/adewaskar/jarvis (MIT); only its Node bridge is kept. Our own chat page (`winwright-ui/`, plain HTML/CSS/JS) is served by the bridge at http://localhost:8787/; the JARVIS React/Three.js face is deleted. `winwright assistant` runs `node bridge/server.mjs` (one process); it refuses until `npm install` was run in `apps/jarvis`.
-- Live so far: typed turns work (desktop_windows + a card; a WebSocket turn from a script); push-to-talk reached `/stt` in Brave. Not yet confirmed by the user in Brave: voice round trip and the taint dialog ("weather in Pune", then "Open Notepad").
-- ElevenLabs key is set as the user env var ELEVENLABS_API_KEY (sk_, 51 chars; the first try had angle brackets and the wrong value).
-- Start: type `winwright` in any PowerShell (no subcommand = assistant; it opens http://localhost:8787/ in the default browser, Brave). It is a release build in `~\.cargo\bin\winwright.exe` (on the user PATH) that finds `apps\jarvis` via the checkout it was built from. After changing the Rust code, reinstall with `cargo install --path crates/winwright-cli --locked` (~1 min). The debug `target\debug\winwright.exe` still works too.
-- Background tasks in a Claude session are killed after 10 min, so run the assistant in the user's own window, not as a session background task. The Terminal panel's PowerShell did not reach a prompt in 60 s (slow profile); `Start-Process powershell -NoExit -NoProfile ...` worked.
+## Apps (updated 2026-10-04)
+- Registered: Claude Code (`claude mcp add winwright --scope user`, ~/.claude.json), Codex (~/.codex/config.toml, env_vars passes APPDATA/LOCALAPPDATA/USERPROFILE/SystemRoot and the WINWRIGHT_*/JARVIS_* memory and Notion names, tool_timeout_sec 120), opencode v2 (~/.config/opencode/opencode.json `mcp.servers`), Antigravity (~/.gemini/config/mcp_config.json).
+- Installed build: `~\.cargo\bin\winwright.exe`; reinstall with `cargo install --path crates/winwright-cli --locked` (rename the running exe aside first if an app holds it).
+- User config `%APPDATA%\winwright\config.json`: `confirmationMode: relaxed`.
+- Notion: JARVIS_NOTION_TOKEN + JARVIS_NOTION_PARENT user env vars (Winwright reads WINWRIGHT_NOTION_* first, then these).
 
 ## CHECKPOINT 2026-10-03 (resume here)
 State of the tree: `cargo fmt --check`, `cargo clippy --workspace --all-targets -D warnings`, `cargo test --workspace` all pass (2026-10-03, after the audit fixes); live `live_fixture` 7/7, `mcp_stdio` 2/2, `live_confirm` 2/2 and `live_desktop` 3/3 after the fixes. `scripts/check.ps1` runs the same (`-Live` adds live tests).

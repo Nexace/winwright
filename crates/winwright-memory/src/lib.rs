@@ -1,6 +1,6 @@
 //! Task memory: one short markdown report per task, so any app that uses Winwright can recall
 //! earlier work. Reports live in `%USERPROFILE%\.winwright\reports` (not AppData, which apps
-//! installed as packages see redirected to a private copy), shared with the assistant's bridge.
+//! installed as packages see redirected to a private copy).
 //! Each is also copied to Notion when a token and a parent page are configured.
 //!
 //! Reports hold names and summaries only: never typed text, field values, or file contents.
@@ -30,7 +30,7 @@ impl Memory {
 
     /// The reports folder and Notion copy from the environment: `WINWRIGHT_REPORTS_DIR`
     /// (default `%USERPROFILE%\.winwright\reports`), `WINWRIGHT_NOTION_TOKEN` and
-    /// `WINWRIGHT_NOTION_PARENT` (the assistant's `JARVIS_NOTION_*` names work too).
+    /// `WINWRIGHT_NOTION_PARENT` (the older `JARVIS_NOTION_*` names work too).
     /// `WINWRIGHT_MEMORY=0` turns memory off.
     pub fn from_env() -> Option<Self> {
         let var = |name: &str| std::env::var(name).ok().filter(|v| !v.trim().is_empty());

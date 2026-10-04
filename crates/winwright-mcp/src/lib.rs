@@ -39,14 +39,9 @@ const INSTRUCTIONS: &str = "Winwright operates Windows apps through UI Automatio
 4. Prefer app_launch and filesystem_operation over clicking through the shell. app_launch waits for the app's window and returns it: act in that window.\n\
 5. Use desktop_screenshot only when the tree lacks what you need.\n\
 6. verified=false means the effect was not confirmed. Check it (desktop_read_text, or a snapshot) before repeating the action: never type the same text twice into a field blindly.\n\
+7. When you finish a task on the desktop, call memory_save once with a short report. When the person mentions earlier work, call memory_recall first.\n\
 Errors are JSON with a code and a hint. CONFIRMATION_REQUIRED means the user must approve: do not work around it. \
 CANCELLED after an emergency stop means the user stopped you: stop and ask them before doing anything else.";
-
-/// Memory, for clients that do not write task reports themselves (most of them).
-const MEMORY_AUTO: &str = "7. When you finish a task on the desktop, call memory_save once with a short report. When the person mentions earlier work, call memory_recall first.";
-
-/// Memory, under the assistant's bridge, which writes a report after every task itself.
-const MEMORY_BY_CLIENT: &str = "7. Task reports are written for you: call memory_save only when the person asks you to remember something. When they mention earlier work, call memory_recall.";
 
 /// Text results are cut beyond this: a model's context is better spent on a narrower call
 /// than on a megabyte of text it asked for by accident.
@@ -541,15 +536,7 @@ impl ServerHandler for WinwrightMcp {
                     .with_title("Winwright")
                     .with_description("Semantic Windows desktop automation over UI Automation"),
             )
-            .with_instructions(format!(
-                "{INSTRUCTIONS}
-{}",
-                if self.engine.tracks_outside_content() {
-                    MEMORY_BY_CLIENT
-                } else {
-                    MEMORY_AUTO
-                }
-            ))
+            .with_instructions(INSTRUCTIONS)
     }
 }
 

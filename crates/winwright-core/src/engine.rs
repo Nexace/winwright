@@ -99,8 +99,8 @@ pub struct Engine {
 }
 
 /// Whether the conversation has read untrusted content (a web or Notion page), which could
-/// carry instructions aimed at the assistant. The assistant's bridge creates `file` when that
-/// happens; once seen, the taint holds for this process until the user re-enables Winwright,
+/// carry instructions aimed at the assistant. A client that tracks this creates `file` when it
+/// happens (`winwright mcp --taint-file`); once seen, the taint holds for this process until the user re-enables Winwright,
 /// so removing the file does not undo it.
 #[derive(Debug, Default)]
 pub(crate) struct Taint {
@@ -120,8 +120,8 @@ impl Taint {
         present
     }
 
-    /// Whether something tells this process when the conversation read outside content (the
-    /// assistant's bridge does; most MCP clients do not).
+    /// Whether the client tells this process when the conversation read outside content
+    /// (with `--taint-file`; most MCP clients do not).
     pub(crate) fn tracked(&self) -> bool {
         self.file.is_some()
     }
@@ -216,19 +216,13 @@ impl Engine {
     }
 
     /// The file whose existence means this conversation has read untrusted content (see
-    /// `Taint`); passed by the assistant's bridge as `winwright mcp --taint-file`.
+    /// `Taint`); passed as `winwright mcp --taint-file`.
     pub fn with_taint_file(mut self, file: PathBuf) -> Self {
         self.taint = Taint {
             file: Some(file),
             seen: AtomicBool::new(false),
         };
         self
-    }
-
-    /// Whether the client tells Winwright when the conversation read outside content (the
-    /// assistant's bridge, with `--taint-file`). That client also writes task reports itself.
-    pub fn tracks_outside_content(&self) -> bool {
-        self.taint.tracked()
     }
 
     /// Task reports any app can save and recall (memory_save / memory_recall).

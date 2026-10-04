@@ -2,8 +2,8 @@
 //! Winwright tools that ran since the last one), `memory_recall` reads reports back as data.
 //!
 //! A report may hold text that came from outside content: a summary written after the model
-//! read a web page could repeat instructions hidden in it. Where something tracks that (the
-//! assistant's bridge, through the taint file), recalling such a report counts as reading
+//! read a web page could repeat instructions hidden in it. Where the client tracks that
+//! (`--taint-file`), recalling such a report counts as reading
 //! outside content: desktop changes after it need the person's approval.
 
 use std::sync::{Arc, PoisonError};

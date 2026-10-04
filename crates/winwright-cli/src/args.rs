@@ -27,7 +27,7 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub json: bool,
 
-    /// With no command, `winwright` starts the assistant (the same as `winwright assistant`).
+    /// With no command, `winwright` says what it is and lists the commands.
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -98,9 +98,6 @@ pub enum Command {
     Audit(AuditArgs),
     /// Open the Inspector window: browse a window's UI tree, pick, highlight, copy locators.
     Inspector,
-    /// Start the chat and voice assistant (page at http://localhost:8787/) with Winwright as
-    /// its desktop hands.
-    Assistant,
 }
 
 #[derive(Args)]
@@ -645,7 +642,7 @@ mod tests {
     #[test]
     fn winwright_alone_parses_with_no_command() {
         let cli = Cli::try_parse_from(["winwright"]).unwrap();
-        assert!(cli.command.is_none(), "main starts the assistant");
+        assert!(cli.command.is_none(), "main prints an overview");
         assert!(Cli::try_parse_from(["winwright", "--json"]).is_ok());
     }
 
