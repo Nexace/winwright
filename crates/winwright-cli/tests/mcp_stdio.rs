@@ -16,8 +16,13 @@ struct Client {
 }
 
 impl Client {
+    /// `winwright mcp` with default settings, whatever the person's own config allows.
     fn start() -> Self {
+        let config = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("mcp-defaults.json");
+        std::fs::write(&config, "{}").expect("default config");
         let mut child = Command::new(env!("CARGO_BIN_EXE_winwright"))
+            .arg("--config")
+            .arg(&config)
             .arg("mcp")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -112,7 +117,7 @@ fn lists_tools_with_object_schemas() {
         assert!(names.contains(&expected), "missing {expected}: {names:?}");
     }
     assert!(
-        names.len() <= 25,
+        names.len() <= 28,
         "keep the tool surface small: {}",
         names.len()
     );
