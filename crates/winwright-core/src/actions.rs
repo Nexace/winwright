@@ -266,6 +266,16 @@ const KEYSTROKE_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
 /// Pause between reads of a document while waiting for a keystroke.
 const KEYSTROKE_POLL: std::time::Duration = std::time::Duration::from_millis(5);
 
+/// Marks `step` unverified: the text stopped changing after `done` of the keystrokes of `text`.
+fn stalled_warning(step: &mut Step, done: usize, text: &str) {
+    step.verified = false;
+    step.warnings.push(format!(
+        "the text stopped changing after {done} of {} keystrokes, so typing stopped there: read \
+         it with desktop_read_text before typing the rest",
+        keystrokes(text).len()
+    ));
+}
+
 /// `text` as single keystrokes: one character each, with `\r\n` together (one Enter).
 fn keystrokes(text: &str) -> Vec<&str> {
     let mut out = Vec::with_capacity(text.len());
@@ -1267,9 +1277,20 @@ impl Engine {
             input.press_keys(&[Key::Ctrl, Key::Char('a')], ctx).await?;
             input.press_keys(&[Key::Delete], ctx).await?;
         }
-        input.type_text(text, ctx).await?;
+        let stalled = match self.watched_text(r, ctx).await {
+            Some(before) => self.type_watching(r, &before, text, ctx).await?,
+            None => {
+                input.type_text(text, ctx).await?;
+                None
+            }
+        };
         let mut step = Step::new(ActionMethod::PhysicalKeyboard);
         step.warnings.push("used physical keyboard input".into());
+        if let Some(done) = stalled {
+            stalled_warning(&mut step, done, text);
+            step.baseline = Some(focused);
+            return Ok(step);
+        }
         let wanted = if clear {
             text.to_owned()
         } else {
@@ -1310,12 +1331,12 @@ impl Engine {
             ensure_enabled(r)?;
             step.baseline = Some(self.focus_target(r, ctx).await?);
         }
-        let document_before = match r {
-            Some(r) => self.document_text(r, ctx).await,
+        let watched_before = match r {
+            Some(r) => self.watched_text(r, ctx).await,
             None => None,
         };
-        let stalled = match (r, document_before.as_deref()) {
-            (Some(r), Some(before)) => self.type_into_document(r, before, text, ctx).await?,
+        let stalled = match (r, watched_before.as_deref()) {
+            (Some(r), Some(before)) => self.type_watching(r, before, text, ctx).await?,
             _ => {
                 input.type_text(text, ctx).await?;
                 None
@@ -1332,7 +1353,7 @@ impl Engine {
                 };
                 step.verified = expect.met(&after);
                 step.expect = Some(expect);
-            } else if let Some(before) = document_before
+            } else if let Some(before) = watched_before
                 && let Some(now) = self.document_text(r, ctx).await
             {
                 // Documents (Notepad, Word) have no value to compare, but their text says
@@ -1349,23 +1370,36 @@ impl Engine {
             step.after = Some(after);
         }
         if let Some(done) = stalled {
-            step.verified = false;
-            step.warnings.push(format!(
-                "the document stopped changing after {done} of {} keystrokes, so typing stopped \
-                 there: read it with desktop_read_text before typing the rest",
-                keystrokes(text).len()
-            ));
+            stalled_warning(&mut step, done, text);
         }
         Ok(step)
     }
 
-    /// Types into a document one keystroke at a time, sending each only once the document shows
-    /// the one before. Apps whose text services queue keys while busy (Windows 11 Notepad's
-    /// spell checker) replay them later against the keyboard state of that moment, so keys sent
-    /// ahead come out as the last Unicode character sent, or without their Shift or Ctrl. With
-    /// one key in flight there is nothing to misread. Returns how many keystrokes the document
-    /// took when it stopped changing (or could no longer be read) before the end.
-    async fn type_into_document(
+    /// What typing into `r` changes, read back: the field's value, or else a document's text.
+    /// `None` for sensitive fields and for what cannot be read.
+    async fn watched_text(&self, r: &Resolved, ctx: &OperationContext) -> Option<String> {
+        if is_sensitive(&r.props) {
+            return None;
+        }
+        if r.props.value.is_some() {
+            return self
+                .uia
+                .refresh(r.key, ctx)
+                .await
+                .ok()
+                .and_then(|p| p.value);
+        }
+        self.document_text(r, ctx).await
+    }
+
+    /// Types into `r` one keystroke at a time, sending each only once its text (see
+    /// [`Self::watched_text`]) shows the one before. Apps whose text services queue keys while
+    /// busy (Windows 11 Notepad's spell checker, WinUI text boxes) replay them later against the
+    /// keyboard state of that moment, so keys sent ahead come out as the last Unicode character
+    /// sent, or without their Shift or Ctrl. With one key in flight there is nothing to misread.
+    /// Returns how many keystrokes went in when the text stopped changing (or could no longer
+    /// be read) before the end.
+    async fn type_watching(
         &self,
         r: &Resolved,
         before: &str,
@@ -1373,23 +1407,34 @@ impl Engine {
         ctx: &OperationContext,
     ) -> WinwrightResult<Option<usize>> {
         let input = self.input()?;
+        let strokes = keystrokes(text);
         let mut seen = before.to_owned();
-        for (done, stroke) in keystrokes(text).into_iter().enumerate() {
+        for (done, stroke) in strokes.iter().enumerate() {
             input.type_text(stroke, ctx).await?;
             let deadline = std::time::Instant::now() + KEYSTROKE_WAIT;
-            loop {
-                match self.document_text(r, ctx).await {
+            let shown = loop {
+                match self.watched_text(r, ctx).await {
                     Some(now) if now != seen => {
                         seen = now;
-                        break;
+                        break true;
                     }
-                    None => return Ok(Some(done)),
-                    Some(_) if std::time::Instant::now() >= deadline => return Ok(Some(done)),
+                    None => break false,
+                    Some(_) if std::time::Instant::now() >= deadline => break false,
                     Some(_) => {}
                 }
                 tokio::time::sleep(KEYSTROKE_POLL).await;
                 ctx.check("type_text")?;
+            };
+            if shown {
+                continue;
             }
+            // A field that never shows the first key (some update only when left) cannot be
+            // watched: type the rest at once and let the final check judge.
+            if done == 0 {
+                input.type_text(&strokes[1..].concat(), ctx).await?;
+                return Ok(None);
+            }
+            return Ok(Some(done));
         }
         Ok(None)
     }
