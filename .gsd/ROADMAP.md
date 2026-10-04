@@ -3,20 +3,50 @@
 Source of truth for requirements: [SPEC.md](SPEC.md) (§57 phase plan, §63 implementation rules).
 Each phase keeps the workspace building, adds tests before behavior, and lands as atomic commits.
 
+## Direction (2026-10-04)
+Winwright is an MCP server that runs inside the user's AI apps: Claude Code, Codex, opencode and
+Antigravity. The app's model does the thinking and the talking; Winwright is its hands on the
+Windows desktop and the safety authority for every desktop change. There is no assistant, web page,
+voice or browser engine of our own. Web pages belong to the app's browser tools (Playwright MCP,
+Claude in Chrome). JARVIS (`apps/jarvis`, `winwright assistant`, push-to-talk) was deleted on
+2026-10-04 (83ce4bb) and is not coming back.
+
+## Phases 0-13 (original spec plan)
+| Phase | Scope | Status |
+|---|---|---|
+| 0 | Workspace, contracts, typed errors, config, logging, sessions/refs, lease, redaction, default-deny policy | done |
+| 1 | Win32 windows + DPI, MTA UIA worker, compact snapshot + refs, inspect | done |
+| 1b | `winwright serve` over a named pipe | dropped (apps start `winwright mcp` themselves) |
+| 2 | Semantic locators, ranking, ambiguity, Win32 fixture | done |
+| 3 | Pattern-first actions | done |
+| 4 | wait_for, UIA events, verification, snapshot diff | done |
+| 5 | rmcp MCP server | done (stdio); loopback HTTP dropped: no app needs it |
+| 6 | WGC capture + native overlays | done (125% verified; mixed DPI needs a second monitor) |
+| 7 | SendInput physical fallback | done (`live_canvas`, `live_input`) |
+| 8 | Permissions, confirmations, audit, emergency stop, elevation | done (+ audit H1-L5, relaxed mode) |
+| 9 | Playwright/CDP bridge | dropped: the app's browser tools own web pages |
+| 10 | Vision fallback | reworked as Phase 17 (the app's model is the vision; Winwright stays model-free) |
+| 11 | Native tray, Inspector, confirm dialog | done |
+| 12 | Recorder / codegen | dropped |
+| 13 | Own assistant (voice, page) | dropped 2026-10-04; memory moved into Winwright (memory_save/recall + Notion copy) |
+
+## Plan from 2026-10-04 (rebuilt from both earlier chats)
 | Phase | Scope | Acceptance | Status |
 |---|---|---|---|
-| 0 | Cargo workspace, owned contracts + backend traits, typed errors, config, logging, session/ref authority skeleton, action lease, cancellation context, redaction, default-deny policy, CLI version | workspace builds on MSVC; `cargo test` runs; `winwright --version` | done |
-| 1 | Win32 window list/active window/DPI; dedicated MTA UIA worker; raw tree capture; compact snapshot + refs; inspect | Notepad / Settings / Explorer trees readable; interactive controls get refs | done |
-| 1b | `winwright serve` per-user engine over current-user named pipe; `--session` refs across CLI processes | `snapshot --session demo` then `inspect --session demo e14` | dropped (2026-10-04: apps start `winwright mcp` themselves) |
-| 2 | Semantic locators: role, name, text, AutomationId, label, class, framework, ancestor, nth; ranking + ambiguity; Win32 fixture app | `winwright find --role Button --name Save` resolves fixture controls | done |
-| 3 | Pattern-first actions: click, fill, focus, select, toggle, expand/collapse, scroll, press, hotkey | fixture workflows with no coordinate clicks | done |
-| 4 | wait_for, UIA event subscriptions, action verification, snapshot diff | no fixed sleeps in fixture workflows | done |
-| 5 | rmcp MCP server (stdio + loopback HTTP) | MCP model operates Notepad semantically | done (stdio; loopback HTTP deferred) |
-| 6 | WGC capture + native no-activate overlays | element highlight accurate at mixed DPI | done (verified at 125%; mixed-DPI untestable on one monitor) |
-| 7 | SendInput physical fallback | custom canvas fixture controlled physically | done (2026-10-03: `live_canvas` click/right/double/type/chord/wheel + `live_input` 2/2; fixed 3x wheel steps) |
-| 8 | Permission engine, confirmations, audit, emergency stop, elevated-app detection | passwords never returned; stop halts queued work | done |
-| 9 | Optional Playwright/CDP browser bridge | DOM + native dialog in one workflow | planned | **Replaced 2026-10-01:** no own browser engine; Playwright MCP / `jarvis_chrome` own web pages, Winwright owns native dialogs and browser chrome (see `.gsd/INTEGRATION.md`).
-| 10 | VisionGrounder fallback | visual-only target found + clicked, flagged as vision | planned | **Scope 2026-10-01:** screen pixels of non-UIA apps only; unrelated to JARVIS camera.
-| 11 | Native desktop UX, no WebView (user decision: keep usage minimal): tray icon only while running (Active/Stopped, Stop, Re-enable, Open Inspector); native Inspector window (UIA tree + properties, pick under cursor, live highlight, copy locator/ref); native Allow/Deny confirmation dialogs for risky actions. Tauri dropped unless requested later. | tray + inspector work against fixtures; confirmation approvals only from the dialog | done |
-| 12 | Recorder / codegen | recorded Notepad save replays semantically | dropped (2026-10-04) |
-| 13 | Assistant conversation mode (user request; spec §2 experience, §59 post-MVP): separate `winwright-assistant` app on top of the engine (engine stays model-free). Hold hotkey (default Ctrl+Space) -> local Windows speech-to-text -> Claude via the Anthropic API (user-provided key in an env var, never handled by us) with Winwright tools -> acts on screen with highlights -> spoken reply via local Windows text-to-speech; multi-turn memory; same confirmations + emergency stop. User must be told UI text/screenshots go to the API; voice stays local. | spoken request completes a multi-step task on the fixture; confirmations still gate risky steps | replaced 2026-10-04 | **Update 2026-10-04:** no own assistant or web page; Winwright runs inside the user's AI apps (Claude Code, Codex, opencode, Antigravity) and keeps task memory itself (memory_save/memory_recall); `apps/jarvis` and `winwright assistant` are deleted. **Earlier, 2026-10-01:** the user chose the open-source JARVIS (github.com/adewaskar/jarvis) as the face/voice; vendored in `apps/jarvis`, launched by `winwright assistant`, talks to Winwright over `winwright mcp`. A native-Rust assistant stays optional. **See `.gsd/INTEGRATION.md`** for the single-owner routing between Winwright, JARVIS and Playwright.
+| 14 | Command-gate gaps: OK in an open Run box, Start search "Run command" results, script files opened from Explorer, terminals inside other apps (VS Code xterm), Task Manager "Run new task" | engine tests: each path asks like Shell/PowerShell; opening a shell's own window or a plain file stays allowed | done (df7b5e0) |
+| 15 | Docs say apps-only: INTEGRATION.md rewritten as "Winwright and the app's other tools" (no JARVIS, bridge, push-to-talk or ElevenLabs), STATE.md footprint and Next trimmed, README checked, stale memory notes removed | `grep -ri jarvis .gsd README.md` finds only history lines | planned |
+| 16 | Acceptance in the real apps, with the user at the PC. Claude Code first (connected 2026-10-04), then Codex, opencode, Antigravity after a restart | Notepad launched and a line typed, verified on the first try; a test file on the Desktop created then deleted with one click on Allow; memory_save called without being asked; desktop_screenshot of a window read by the model | planned (needs the user) |
+| 17 | Vision and coordinates (reworked Phase 10): click/double/right-click and drag at a point inside a named window for apps with no UI tree (games, canvases); results flagged `vision`; the risk judged by the element under the point; `desktop_drag` between elements (spec §11 drag_to; the input crate can already drag) | `live_canvas` driven through MCP by coordinates; drag works on the fixture; a game window screenshot answers "what should I do next" | planned |
+| 18 | Known-gap fixes: type with the target window's keyboard layout; UWP windows report the real app process, not ApplicationFrameHost; in-window dialogs (WinUI ContentDialog) give dialog context to Yes/OK; Win32 list/tab selection sends the app's change notification | a unit or live test per fix | planned |
+| 19 | Outside-content rule inside the apps (opt-in): a Claude Code PreToolUse hook writes the `--taint-file` marker after web or other MCP reads, so later desktop changes ask | hook live-tested in Claude Code; off unless the user turns it on (it adds prompts to relaxed mode) | ask the user |
+| 20 | Wrap-up: `scripts/check.ps1 -Live`, reinstall, push (only when asked), `cargo clean` (~11 GB), delete scratch and temp files | tree green; only source, config and reports remain on disk | planned |
+
+Not planned: mixed-DPI testing (one monitor), a config list for extra URI schemes (add one when a
+real need appears), local speech models, Jev, ElevenLabs.
+
+For the user (outside the code): restart Codex, opencode and Antigravity for the new build;
+optionally delete the "Winwright memory test" Notion page and the unused `ELEVENLABS_API_KEY`
+user env var.
+
+Standing rules: no live desktop test while the user is busy at the PC without asking; push only when
+asked; secrets never pass through chat; keep disk and RAM use minimal; one PowerShell command per call.

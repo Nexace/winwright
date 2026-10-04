@@ -50,11 +50,9 @@
 - `cargo test -p winwright-overlay --test live_confirm -- --ignored --test-threads=1 --skip manual_`
   (shows the confirm dialog twice, ~5 s; do not click it). `... manual_` asks a person to click Allow.
 
-## Next (in order; plan in .gsd/INTEGRATION.md "Decisions and changes from the plan review")
+## Next
+The plan is `.gsd/ROADMAP.md` "Plan from 2026-10-04" (Phases 14-20, rebuilt from both earlier chats on 2026-10-04). Phase 14 (command-gate gaps) is done (df7b5e0); next 15 docs, 16 acceptance in the real apps with the user, 17 vision/coordinates + drag, 18 known-gap fixes, 19 opt-in outside-content hook (ask the user), 20 wrap-up (push only when asked, cargo clean).
 Direction (user, 2026-10-04): "just use winwright in the app, no need of a separate web page for anything". apps/jarvis deleted (bridge, page, voice, push-to-talk); `winwright` alone now prints an overview. Lost with it: voice, and the outside-content (taint) rule, which only the bridge switched on (`--taint-file` stays for any client that wants it).
-1. The user tries Winwright inside Codex/Claude Code: one click on Allow (focus fix a907911), app_launch + typing into Notepad (1e7e731), and an app calling memory_save by itself.
-2. Later: cargo clean (~11 GB); push (many local commits). ELEVENLABS_API_KEY user env var is now unused (the user may delete it).
-Dropped: Phase 1b, Phase 9, Phase 12, local speech models (Whisper/Kokoro), Jev.
 
 ## Decisions
 - One ref namespace (`eN`); refs per session; reused across snapshots when runtime id +
