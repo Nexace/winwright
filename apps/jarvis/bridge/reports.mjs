@@ -99,15 +99,24 @@ export function writeReport(dir, turn, result) {
   return { path, markdown }
 }
 
-/** Memory text for a report: without the answer when outside content was read. */
+/**
+ * Memory text for a report: without the answer (or summary) unless the report is known to
+ * have been written with no outside content read. Reports Winwright saved for other apps
+ * say `unknown`, since nothing there tracks it.
+ */
 export function memoryOf(markdown) {
-  const outside = /^outsideContent: true$/m.test(markdown)
+  const outside = !/^outsideContent: false$/m.test(markdown)
   // A report must not be able to close the memory block it sits in.
   const body = markdown
     .replace(/^---[\s\S]*?---\n/, '')
     .replace(/<\/?\s*memory\s*>/gi, '[memory]')
     .trim()
-  return outside ? body.replace(/\n\n\*\*Answer:\*\*[\s\S]*$/, '\n\n(answer left out: it followed outside content)') : body
+  return outside
+    ? body.replace(
+        /\n\n\*\*(Answer|Summary):\*\*[\s\S]*$/,
+        '\n\n(answer left out: it may repeat outside content)',
+      )
+    : body
 }
 
 /**

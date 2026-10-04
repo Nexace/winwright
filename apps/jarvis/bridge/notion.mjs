@@ -25,8 +25,8 @@ export function notionPageId(text) {
 
 /** Mirror settings from the environment, or null when off. */
 export function notionConfig(env = process.env) {
-  const token = env.JARVIS_NOTION_TOKEN?.trim()
-  const parent = notionPageId(env.JARVIS_NOTION_PARENT)
+  const token = (env.WINWRIGHT_NOTION_TOKEN || env.JARVIS_NOTION_TOKEN)?.trim()
+  const parent = notionPageId(env.WINWRIGHT_NOTION_PARENT || env.JARVIS_NOTION_PARENT)
   return token && parent ? { token, parent } : null
 }
 

@@ -116,6 +116,9 @@ pub(crate) fn system_protected() -> Protected {
     );
     let profile = known_folder_path(&FOLDERID_Profile)
         .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from));
+    // Task memory: a report rewritten through the file tools could steer later conversations.
+    trees.extend(profile.iter().map(|home| home.join(".winwright")));
+    trees.extend(std::env::var_os("WINWRIGHT_REPORTS_DIR").map(PathBuf::from));
     Protected::new(trees, profile)
 }
 
@@ -342,6 +345,11 @@ mod tests {
             local.join("winwright").join("audit.jsonl"),
             roaming.join("winwright").join("config.json"),
             exe_dir.join("version.dll"),
+            known_folder_path(&FOLDERID_Profile)
+                .unwrap()
+                .join(".winwright")
+                .join("reports")
+                .join("2026-10-04-021326-task.md"),
             // Containing them is protected too.
             roaming.clone(),
         ] {

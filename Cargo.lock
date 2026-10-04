@@ -1117,6 +1117,7 @@ dependencies = [
  "winwright-input",
  "winwright-inspector",
  "winwright-mcp",
+ "winwright-memory",
  "winwright-overlay",
  "winwright-shell",
  "winwright-test-support",
@@ -1214,6 +1215,16 @@ dependencies = [
  "tracing",
  "winwright-contracts",
  "winwright-core",
+]
+
+[[package]]
+name = "winwright-memory"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "tracing",
+ "windows",
+ "winwright-contracts",
 ]
 
 [[package]]

@@ -13,6 +13,7 @@ pub mod geometry;
 pub mod ids;
 pub mod input;
 pub mod locator;
+pub mod memory;
 pub mod overlay;
 pub mod security;
 pub mod snapshot;

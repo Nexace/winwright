@@ -1,0 +1,21 @@
+[package]
+name = "winwright-memory"
+description = "Task reports as markdown files, recalled on request and copied to Notion when configured."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+winwright-contracts.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Networking_WinHttp",
+    "Win32_System_SystemInformation",
+    "Win32_System_Time",
+] }
+
+[lints]
+workspace = true

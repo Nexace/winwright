@@ -18,6 +18,7 @@ winwright-files.workspace = true
 winwright-input.workspace = true
 winwright-inspector.workspace = true
 winwright-mcp.workspace = true
+winwright-memory.workspace = true
 winwright-overlay.workspace = true
 winwright-shell.workspace = true
 winwright-uia.workspace = true

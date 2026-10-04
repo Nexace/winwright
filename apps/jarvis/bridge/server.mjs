@@ -24,7 +24,6 @@ import { bringsOutsideContent, taintMarker } from './taint.mjs'
 import { isTask, loadMemory, newTurn, writeReport } from './reports.mjs'
 import { mirrorToNotion, notionConfig } from './notion.mjs'
 import { WINWRIGHT_PROMPT, serveFace } from './winwright-face.mjs'
-import { fileURLToPath } from 'node:url'
 import { timingSafeEqual } from 'node:crypto'
 import { homedir, tmpdir } from 'node:os'
 import { readFileSync, realpathSync } from 'node:fs'
@@ -36,14 +35,16 @@ import { renderPage } from './page.mjs'
 const PORT = Number(process.env.JARVIS_BRIDGE_PORT ?? 8787)
 
 /**
- * Where task reports go (reports.mjs): `reports/` in the Winwright checkout by
- * default, which git ignores. JARVIS_REPORTS=0 turns reports and memory off.
+ * Where task reports go (reports.mjs): `%USERPROFILE%\.winwright\reports`, the folder
+ * Winwright's memory_save and memory_recall use too, so every app shares one memory.
+ * JARVIS_REPORTS=0 turns reports and memory off.
  */
 const REPORTS_DIR =
   process.env.JARVIS_REPORTS === '0'
     ? null
     : (process.env.JARVIS_REPORTS_DIR ??
-      fileURLToPath(new URL('../../../reports', import.meta.url)))
+      process.env.WINWRIGHT_REPORTS_DIR ??
+      join(homedir(), '.winwright', 'reports'))
 
 /** Each report is also copied to Notion when configured (notion.mjs). */
 const NOTION = REPORTS_DIR ? notionConfig() : null

@@ -10,6 +10,7 @@ members = [
     "crates/winwright-overlay",
     "crates/winwright-capture",
     "crates/winwright-shell",
+    "crates/winwright-memory",
     "crates/winwright-files",
     "crates/winwright-mcp",
     "crates/winwright-inspector",
@@ -28,6 +29,7 @@ default-members = [
     "crates/winwright-overlay",
     "crates/winwright-capture",
     "crates/winwright-shell",
+    "crates/winwright-memory",
     "crates/winwright-files",
     "crates/winwright-mcp",
     "crates/winwright-inspector",
@@ -49,6 +51,7 @@ winwright-inspector = { path = "crates/winwright-inspector" }
 winwright-overlay = { path = "crates/winwright-overlay" }
 winwright-files = { path = "crates/winwright-files" }
 winwright-mcp = { path = "crates/winwright-mcp" }
+winwright-memory = { path = "crates/winwright-memory" }
 winwright-security = { path = "crates/winwright-security" }
 winwright-shell = { path = "crates/winwright-shell" }
 winwright-uia = { path = "crates/winwright-uia" }

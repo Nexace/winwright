@@ -8,6 +8,7 @@ pub mod engine;
 mod find;
 pub mod lease;
 pub mod locator;
+mod memory;
 pub mod refs;
 mod services;
 pub mod session;

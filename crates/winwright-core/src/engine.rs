@@ -2,8 +2,8 @@
 //! waits live in sibling modules as further `impl Engine` blocks.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use winwright_contracts::action::ActionMethod;
@@ -17,6 +17,7 @@ use winwright_contracts::element::ElementDetails;
 use winwright_contracts::geometry::PhysicalPoint;
 use winwright_contracts::ids::{SessionId, format_element_ref, format_generation};
 use winwright_contracts::input::InputBackend;
+use winwright_contracts::memory::MemoryStore;
 use winwright_contracts::overlay::OverlayService;
 use winwright_contracts::security::{
     ActionRisk, Capability, ConfirmationPrompt, Confirmer, PermissionDecision, ProposedAction,
@@ -92,6 +93,9 @@ pub struct Engine {
     /// Confirmation dialogs open right now.
     pub(crate) confirming: AtomicUsize,
     pub(crate) taint: Taint,
+    pub(crate) memory: Option<Arc<dyn MemoryStore>>,
+    /// Tools run since the last memory report, for the next one.
+    pub(crate) worked: Mutex<Vec<String>>,
 }
 
 /// Whether the conversation has read untrusted content (a web or Notion page), which could
@@ -114,6 +118,17 @@ impl Taint {
             self.seen.store(true, Ordering::SeqCst);
         }
         present
+    }
+
+    /// Whether something tells this process when the conversation read outside content (the
+    /// assistant's bridge does; most MCP clients do not).
+    pub(crate) fn tracked(&self) -> bool {
+        self.file.is_some()
+    }
+
+    /// Outside content arrived through Winwright itself (a recalled report).
+    pub(crate) fn latch(&self) {
+        self.seen.store(true, Ordering::SeqCst);
     }
 
     /// The user re-enabled Winwright: forget the taint (the bridge marks it again on the next
@@ -164,6 +179,8 @@ impl Engine {
             lease: ActionLease::default(),
             confirming: AtomicUsize::new(0),
             taint: Taint::default(),
+            memory: None,
+            worked: Mutex::new(Vec::new()),
         }
     }
 
@@ -205,6 +222,18 @@ impl Engine {
             file: Some(file),
             seen: AtomicBool::new(false),
         };
+        self
+    }
+
+    /// Whether the client tells Winwright when the conversation read outside content (the
+    /// assistant's bridge, with `--taint-file`). That client also writes task reports itself.
+    pub fn tracks_outside_content(&self) -> bool {
+        self.taint.tracked()
+    }
+
+    /// Task reports any app can save and recall (memory_save / memory_recall).
+    pub fn with_memory(mut self, memory: Arc<dyn MemoryStore>) -> Self {
+        self.memory = Some(memory);
         self
     }
 
@@ -378,6 +407,12 @@ impl Engine {
         confirmation: bool,
         started: Instant,
     ) {
+        if !tool.starts_with("memory_") {
+            let mut worked = self.worked.lock().unwrap_or_else(PoisonError::into_inner);
+            if worked.len() < 500 {
+                worked.push(tool.to_owned());
+            }
+        }
         let Some(audit) = self.audit.as_deref() else {
             return;
         };

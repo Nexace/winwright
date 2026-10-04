@@ -237,6 +237,10 @@ async fn serve_mcp(
     if let Some(file) = taint_file {
         engine = engine.with_taint_file(file);
     }
+    if let Some(memory) = winwright_memory::Memory::from_env() {
+        tracing::info!(dir = %memory.dir().display(), notion = memory.copies_to_notion(), "memory on");
+        engine = engine.with_memory(Arc::new(memory));
+    }
     let engine = Arc::new(if overlays {
         engine.with_overlay(Arc::new(native.overlay))
     } else {
