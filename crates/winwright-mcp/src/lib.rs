@@ -18,14 +18,14 @@ use rmcp::{
 use serde::Serialize;
 use winwright_contracts::WinwrightError;
 use winwright_contracts::action::DesktopAction;
-use winwright_contracts::capture::ImageFormat;
+use winwright_contracts::capture::{ImageFormat, ScreenshotRequest, ScreenshotTarget};
 use winwright_contracts::ids::SessionId;
 use winwright_contracts::input::parse_chord;
 use winwright_contracts::locator::FindResult;
 use winwright_contracts::memory::{MemoryRecallRequest, MemorySaveRequest};
 use winwright_contracts::snapshot::DesktopSnapshot;
 use winwright_contracts::system::{FileResult, SessionInfo, SessionOutput};
-use winwright_contracts::window::WindowInfo;
+use winwright_contracts::window::{WindowInfo, WindowSelector};
 use winwright_core::Engine;
 use winwright_core::session::Session;
 
@@ -41,6 +41,7 @@ const INSTRUCTIONS: &str = "Winwright operates Windows apps through UI Automatio
 5. Use desktop_screenshot only when the tree lacks what you need; desktop_mouse then acts on what it shows, by its pixels.\n\
 6. verified=false means the effect was not confirmed. Check it (desktop_read_text, or a snapshot) before repeating the action: never type the same text twice into a field blindly.\n\
 7. When you finish a task on the desktop, call memory_save once with a short report. When the person mentions earlier work, call memory_recall first.\n\
+8. When the person wants to learn how to do something, teach with desktop_guide (they click, you point) instead of doing it for them; overlay_highlight shows where something is.\n\
 Errors are JSON with a code and a hint. CONFIRMATION_REQUIRED means the user must approve: do not work around it. \
 CANCELLED after an emergency stop means the user stopped you: stop and ask them before doing anything else.";
 
@@ -463,16 +464,66 @@ impl WinwrightMcp {
     }
 
     #[tool(
-        description = "Point at an element for the user with a click-through overlay (highlight, arrow, or click marker) and optional caption. Nothing is clicked."
+        description = "Show the person something: a click-through overlay at an element (ref/locator) or at a spot by pixels \
+        (x/y of `window`'s desktop_screenshot), with a caption. The default pointer style draws the caption in a bubble \
+        beside a pointer, to answer \"where is ...\" or label things on screen. Nothing is clicked."
     )]
     async fn overlay_highlight(&self, Parameters(input): Parameters<HighlightInput>) -> ToolResult {
-        Ok(match input.request() {
-            Ok(req) => match self.engine.highlight(&self.sess(), req).await {
-                Ok(r) => json(&r),
-                Err(e) => fail(e),
-            },
+        let shown = match input.request() {
+            Ok(Highlight::Element(req)) => self.engine.highlight(&self.sess(), *req).await,
+            Ok(Highlight::Spot(req)) => self.engine.highlight_spot(&self.sess(), req).await,
+            Err(e) => Err(e),
+        };
+        Ok(match shown {
+            Ok(r) => json(&r),
             Err(e) => fail(e),
         })
+    }
+
+    #[tool(
+        description = "Teach the person to do something themselves, step by step: each step's caption appears at its spot \
+        with a pointer, and Winwright waits until they click inside it (wait=click) or until its pixels change (wait=change, \
+        for keys they press), then shows the next step. Steps point at a ref, or at x/y in pixels of `window`'s \
+        desktop_screenshot (width/height = the spot, default 48). Nothing is clicked for them. Returns how far they got, \
+        their clicks and a screenshot: when they clicked elsewhere, look and help; when time ran out, call again with \
+        the steps left."
+    )]
+    async fn desktop_guide(&self, Parameters(input): Parameters<GuideInput>) -> ToolResult {
+        let request = match input.request() {
+            Ok(r) => r,
+            Err(e) => return Ok(fail(e)),
+        };
+        let session = self.sess();
+        let result = match self.engine.guide(&session, request).await {
+            Ok(r) => r,
+            Err(e) => return Ok(fail(e)),
+        };
+        self.activity.touch();
+        // Let the last click take effect and the pointer go before looking.
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let target = match result.window {
+            Some(hwnd) => ScreenshotTarget::Window(WindowSelector {
+                hwnd: Some(hwnd),
+                ..Default::default()
+            }),
+            None => ScreenshotTarget::Active,
+        };
+        let shot = ScreenshotRequest {
+            target,
+            format: ImageFormat::Jpeg,
+            quality: Some(80),
+        };
+        let mut content = vec![ContentBlock::text(
+            serde_json::to_string(&result).unwrap_or_default(),
+        )];
+        match self.engine.screenshot(&session, shot).await {
+            Ok(img) => content.push(ContentBlock::image(
+                base64::engine::general_purpose::STANDARD.encode(&img.bytes),
+                "image/jpeg",
+            )),
+            Err(e) => content.push(ContentBlock::text(format!("no screenshot: {e}"))),
+        }
+        Ok(CallToolResult::success(content))
     }
 
     #[tool(description = "Remove all overlays.")]
@@ -744,7 +795,7 @@ mod tests {
     #[test]
     fn tool_schemas_are_objects_that_name_every_described_field() {
         let tools = WinwrightMcp::tool_router().list_all();
-        assert_eq!(tools.len(), 28);
+        assert_eq!(tools.len(), 29);
         for tool in tools {
             let schema = serde_json::Value::Object(tool.input_schema.as_ref().clone());
             assert_eq!(schema["type"], "object", "{}", tool.name);

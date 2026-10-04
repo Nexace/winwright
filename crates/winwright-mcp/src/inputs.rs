@@ -12,7 +12,10 @@ use winwright_contracts::capture::{ImageFormat, ScreenshotRequest, ScreenshotTar
 use winwright_contracts::geometry::{PhysicalPoint, PhysicalRect};
 use winwright_contracts::input::MouseButton;
 use winwright_contracts::locator::{ElementLocator, FindRequest, MatchMode};
-use winwright_contracts::overlay::{HighlightRequest, OverlayStyle};
+use winwright_contracts::overlay::{
+    DEFAULT_SPOT_SIDE, GuideRequest, GuideStep, GuideTarget, GuideWait, HighlightRequest,
+    OverlayStyle, ScreenSpot, SpotHighlightRequest,
+};
 use winwright_contracts::snapshot::{SnapshotRequest, SnapshotTarget};
 
 use winwright_contracts::system::{ExecRequest, FileOperation, LaunchRequest, SessionStart};
@@ -689,28 +692,158 @@ impl ScreenshotInput {
     }
 }
 
+fn titled(window: &Option<String>) -> Option<WindowSelector> {
+    window.as_ref().map(|title| WindowSelector {
+        title: Some(title.clone()),
+        ..Default::default()
+    })
+}
+
+/// A spot centered on x/y in the pixels of `window`'s screenshot (or the screen).
+fn spot(
+    (x, y): (i32, i32),
+    (width, height): (Option<u32>, Option<u32>),
+    window: &Option<String>,
+) -> ScreenSpot {
+    ScreenSpot {
+        at: ScreenPoint {
+            x,
+            y,
+            window: titled(window),
+        },
+        width: width.unwrap_or(DEFAULT_SPOT_SIDE),
+        height: height.unwrap_or(DEFAULT_SPOT_SIDE),
+    }
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct HighlightInput {
     #[serde(flatten)]
     pub target: TargetFields,
-    /// Text shown next to the element, e.g. "Click here".
+    /// Instead of an element: the center of a spot, in pixels of `window`'s desktop_screenshot
+    /// (or of the screen without `window`), for what has no element.
+    pub x: Option<i32>,
+    pub y: Option<i32>,
+    /// The spot's size around x/y (default 48 each).
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    /// Text shown there, e.g. "Click here".
     pub caption: Option<String>,
-    /// highlight (default), arrow, or clickMarker.
+    /// pointer (default: a pointer with the caption in a bubble), highlight (a box), arrow, or clickMarker.
     pub style: Option<OverlayStyle>,
     /// How long it stays (default 8000 ms).
     pub duration_ms: Option<u64>,
 }
 
+pub enum Highlight {
+    Element(Box<HighlightRequest>),
+    Spot(SpotHighlightRequest),
+}
+
 impl HighlightInput {
-    pub fn request(&self) -> Result<HighlightRequest> {
-        Ok(HighlightRequest {
-            target: self.target.required()?,
-            style: self.style.unwrap_or_default(),
-            label: self.caption.clone(),
-            step: None,
+    pub fn request(&self) -> Result<Highlight> {
+        let style = self.style.unwrap_or(OverlayStyle::Pointer);
+        match (self.x, self.y) {
+            (None, None) => Ok(Highlight::Element(Box::new(HighlightRequest {
+                target: self.target.required()?,
+                style,
+                label: self.caption.clone(),
+                step: None,
+                color: None,
+                duration_ms: self.duration_ms,
+            }))),
+            (Some(x), Some(y)) if self.target.reference.is_none() && !self.target.has_locator() => {
+                Ok(Highlight::Spot(SpotHighlightRequest {
+                    spot: spot((x, y), (self.width, self.height), &self.target.window),
+                    style,
+                    label: self.caption.clone(),
+                    color: None,
+                    duration_ms: self.duration_ms,
+                }))
+            }
+            (Some(_), Some(_)) => Err(WinwrightError::invalid(
+                "give either ref/locator fields or x/y, not both",
+            )),
+            _ => Err(WinwrightError::invalid("x and y go together")),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct GuideStepInput {
+    /// What the person should do, e.g. "Click Develop" (at most 110 characters).
+    pub caption: String,
+    /// The element to point at (a ref from desktop_snapshot or desktop_find), or give x/y.
+    #[serde(rename = "ref")]
+    pub reference: Option<String>,
+    /// The spot's center in pixels of `window`'s desktop_screenshot (or of the screen).
+    pub x: Option<i32>,
+    pub y: Option<i32>,
+    /// The spot's size (default 48 each): a click inside it does the step.
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    /// Title (substring) of the window x/y are relative to.
+    pub window: Option<String>,
+    /// click (default): wait for a click inside the spot. change: wait until the spot's pixels
+    /// change, for a step done with the keyboard (name the keys in the caption).
+    pub wait: Option<GuideWait>,
+}
+
+impl GuideStepInput {
+    fn step(&self, n: usize) -> Result<GuideStep> {
+        let target = match (&self.reference, self.x, self.y) {
+            (Some(r), None, None) => {
+                GuideTarget::Element(Box::new(ElementTarget::by_ref(r.clone())))
+            }
+            (None, Some(x), Some(y)) => {
+                GuideTarget::Spot(spot((x, y), (self.width, self.height), &self.window))
+            }
+            (Some(_), _, _) => {
+                return Err(WinwrightError::invalid(format!(
+                    "step {n}: give ref or x/y, not both"
+                )));
+            }
+            _ => {
+                return Err(WinwrightError::invalid(format!(
+                    "step {n}: give ref, or both x and y"
+                )));
+            }
+        };
+        Ok(GuideStep {
+            target,
+            caption: self.caption.clone(),
+            wait: self.wait.unwrap_or_default(),
+        })
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct GuideInput {
+    /// 1 to 20 steps, shown one at a time. Give several only when all their spots are on
+    /// screen now (not inside a menu that has yet to open).
+    pub steps: Vec<GuideStepInput>,
+    /// pointer (default), highlight, or arrow.
+    pub style: Option<OverlayStyle>,
+    /// How long to wait for the person in all (default 50000 ms, at most 300000; some apps end
+    /// tool calls after 60 s).
+    pub timeout_ms: Option<u64>,
+}
+
+impl GuideInput {
+    pub fn request(&self) -> Result<GuideRequest> {
+        Ok(GuideRequest {
+            steps: self
+                .steps
+                .iter()
+                .enumerate()
+                .map(|(i, s)| s.step(i + 1))
+                .collect::<Result<_>>()?,
+            style: self.style.unwrap_or(OverlayStyle::Pointer),
             color: None,
-            duration_ms: self.duration_ms,
+            timeout_ms: self.timeout_ms.unwrap_or(50_000),
         })
     }
 }
@@ -862,6 +995,49 @@ mod tests {
         assert!(matches!(target.scope, SnapshotTarget::Window(_)));
         let bad: FocusInput = serde_json::from_str(r#"{}"#).unwrap();
         assert!(bad.target.required().is_err());
+    }
+
+    #[test]
+    fn guides_and_highlights_point_at_refs_or_spots() {
+        let guide: GuideInput = serde_json::from_str(
+            r#"{"steps":[{"caption":"Click Develop","ref":"e4"},
+                {"caption":"Drag Exposure right","x":850,"y":420,"width":200,"window":"Lightroom"},
+                {"caption":"Press Ctrl+Z","x":10,"y":20,"wait":"change"}]}"#,
+        )
+        .unwrap();
+        let req = guide.request().unwrap();
+        assert_eq!((req.style, req.timeout_ms), (OverlayStyle::Pointer, 50_000));
+        assert_eq!(
+            req.steps[0].target,
+            GuideTarget::Element(Box::new(ElementTarget::by_ref("e4")))
+        );
+        let GuideTarget::Spot(slider) = &req.steps[1].target else {
+            panic!("a spot")
+        };
+        assert_eq!((slider.at.x, slider.width, slider.height), (850, 200, 48));
+        assert_eq!(
+            slider.at.window.as_ref().unwrap().title.as_deref(),
+            Some("Lightroom")
+        );
+        assert_eq!(req.steps[2].wait, GuideWait::Change);
+
+        let both: GuideInput =
+            serde_json::from_str(r#"{"steps":[{"caption":"x","ref":"e1","x":1,"y":2}]}"#).unwrap();
+        assert!(both.request().unwrap_err().to_string().contains("step 1"));
+        let half: GuideInput =
+            serde_json::from_str(r#"{"steps":[{"caption":"x","x":1}]}"#).unwrap();
+        assert!(half.request().is_err());
+
+        let at: HighlightInput =
+            serde_json::from_str(r#"{"x":5,"y":6,"caption":"Histogram"}"#).unwrap();
+        let Highlight::Spot(spot) = at.request().unwrap() else {
+            panic!("a spot")
+        };
+        assert_eq!((spot.style, spot.spot.width), (OverlayStyle::Pointer, 48));
+        let element: HighlightInput = serde_json::from_str(r#"{"ref":"e2"}"#).unwrap();
+        assert!(matches!(element.request().unwrap(), Highlight::Element(_)));
+        let mixed: HighlightInput = serde_json::from_str(r#"{"ref":"e2","x":1,"y":1}"#).unwrap();
+        assert!(mixed.request().is_err());
     }
 
     #[test]
