@@ -240,6 +240,27 @@ fn typed_risk(text: &str, receiver: Option<&UiProps>) -> ActionRisk {
 
 /// Documents longer than this are not read back to check typing.
 const DOCUMENT_COMPARE_CHARS: u32 = 200_000;
+/// Longest wait for a document to show one typed keystroke before typing stops there.
+const KEYSTROKE_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
+/// Pause between reads of a document while waiting for a keystroke.
+const KEYSTROKE_POLL: std::time::Duration = std::time::Duration::from_millis(5);
+
+/// `text` as single keystrokes: one character each, with `\r\n` together (one Enter).
+fn keystrokes(text: &str) -> Vec<&str> {
+    let mut out = Vec::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(c) = rest.chars().next() {
+        let len = if rest.starts_with("\r\n") {
+            2
+        } else {
+            c.len_utf8()
+        };
+        let (stroke, tail) = rest.split_at(len);
+        out.push(stroke);
+        rest = tail;
+    }
+    out
+}
 
 /// `\r\n` and `\r` (how rich edit controls store line breaks) as `\n`.
 fn line_breaks_as_newlines(text: &str) -> String {
@@ -1140,7 +1161,13 @@ impl Engine {
             Some(r) => self.document_text(r, ctx).await,
             None => None,
         };
-        input.type_text(text, ctx).await?;
+        let stalled = match (r, document_before.as_deref()) {
+            (Some(r), Some(before)) => self.type_into_document(r, before, text, ctx).await?,
+            _ => {
+                input.type_text(text, ctx).await?;
+                None
+            }
+        };
         if let Some(r) = r
             && !is_sensitive(&r.props)
             && let Ok(after) = self.uia.refresh(r.key, ctx).await
@@ -1168,7 +1195,50 @@ impl Engine {
             }
             step.after = Some(after);
         }
+        if let Some(done) = stalled {
+            step.verified = false;
+            step.warnings.push(format!(
+                "the document stopped changing after {done} of {} keystrokes, so typing stopped \
+                 there: read it with desktop_read_text before typing the rest",
+                keystrokes(text).len()
+            ));
+        }
         Ok(step)
+    }
+
+    /// Types into a document one keystroke at a time, sending each only once the document shows
+    /// the one before. Apps whose text services queue keys while busy (Windows 11 Notepad's
+    /// spell checker) replay them later against the keyboard state of that moment, so keys sent
+    /// ahead come out as the last Unicode character sent, or without their Shift or Ctrl. With
+    /// one key in flight there is nothing to misread. Returns how many keystrokes the document
+    /// took when it stopped changing (or could no longer be read) before the end.
+    async fn type_into_document(
+        &self,
+        r: &Resolved,
+        before: &str,
+        text: &str,
+        ctx: &OperationContext,
+    ) -> WinwrightResult<Option<usize>> {
+        let input = self.input()?;
+        let mut seen = before.to_owned();
+        for (done, stroke) in keystrokes(text).into_iter().enumerate() {
+            input.type_text(stroke, ctx).await?;
+            let deadline = std::time::Instant::now() + KEYSTROKE_WAIT;
+            loop {
+                match self.document_text(r, ctx).await {
+                    Some(now) if now != seen => {
+                        seen = now;
+                        break;
+                    }
+                    None => return Ok(Some(done)),
+                    Some(_) if std::time::Instant::now() >= deadline => return Ok(Some(done)),
+                    Some(_) => {}
+                }
+                tokio::time::sleep(KEYSTROKE_POLL).await;
+                ctx.check("type_text")?;
+            }
+        }
+        Ok(None)
     }
 
     /// A document's text through TextPattern, with line breaks as `\n`, for checking typing
@@ -1877,6 +1947,15 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_splits_into_keystrokes() {
+        assert_eq!(
+            keystrokes("a😀\r\nb\nc"),
+            ["a", "😀", "\r\n", "b", "\n", "c"]
+        );
+        assert!(keystrokes("").is_empty());
+    }
 
     #[test]
     fn typing_into_a_document_is_judged_by_its_text() {
