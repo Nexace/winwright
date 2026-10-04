@@ -71,6 +71,15 @@ impl ProcessService for SystemProcesses {
     fn resolve_program(&self, request: &ExecRequest) -> WinwrightResult<String> {
         exec::resolve_program(request).map(|path| path.display().to_string())
     }
+
+    fn can_terminate(&self, pid: u32, name: &str) -> WinwrightResult<()> {
+        processes::can_terminate(pid, name)
+    }
+
+    fn terminate(&self, pid: u32, name: &str) -> WinwrightResult<()> {
+        tracing::info!(pid, "terminate");
+        processes::terminate(pid, name)
+    }
 }
 
 fn worker_failed(operation: &str, err: &tokio::task::JoinError) -> WinwrightError {

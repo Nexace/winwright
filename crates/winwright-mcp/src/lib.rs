@@ -534,6 +534,20 @@ impl WinwrightMcp {
     }
 
     #[tool(
+        description = "End a running process by its pid from process_list. Always asks the user first; anything unsaved \
+        in it is lost. Windows' own processes and services are refused. Prefer closing an app's window (window_control) \
+        so it can save."
+    )]
+    async fn process_terminate(&self, Parameters(input): Parameters<TerminateInput>) -> ToolResult {
+        Ok(
+            match self.engine.process_terminate(&self.sess(), input.pid).await {
+                Ok(p) => text(format!("ended {} (process {})", p.name, p.process_id)),
+                Err(e) => fail(e),
+            },
+        )
+    }
+
+    #[tool(
         description = "File operations without touching Explorer: list, metadata, copy, move, rename, delete (Recycle Bin, needs user confirmation), \
         createDirectory, search (file names), knownFolder (Desktop, Documents, Downloads, ...); and text files: read (lines by offset/length), \
         write (create, or mode overwrite/append), edit (replace exact `old` text with `new`), grep (lines matching a regex). \
@@ -651,7 +665,7 @@ mod tests {
     #[test]
     fn tool_schemas_are_objects_that_name_every_described_field() {
         let tools = WinwrightMcp::tool_router().list_all();
-        assert_eq!(tools.len(), 26);
+        assert_eq!(tools.len(), 27);
         for tool in tools {
             let schema = serde_json::Value::Object(tool.input_schema.as_ref().clone());
             assert_eq!(schema["type"], "object", "{}", tool.name);

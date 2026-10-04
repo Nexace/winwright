@@ -279,6 +279,22 @@ pub trait ProcessService: Send + Sync {
     fn resolve_program(&self, request: &ExecRequest) -> WinwrightResult<String> {
         Ok(request.program.clone())
     }
+
+    /// Whether process `pid` named `name` may be ended at all, checked before anyone is asked:
+    /// Windows' own processes and services never may.
+    fn can_terminate(&self, pid: u32, name: &str) -> WinwrightResult<()> {
+        let _ = (pid, name);
+        Err(crate::WinwrightError::BackendUnavailable {
+            backend: "process".into(),
+            reason: "this backend cannot end processes".into(),
+        })
+    }
+
+    /// Ends process `pid`, but only while its program is still `name`: an id reused since the
+    /// person agreed is never ended. Blocks until it has exited (a few seconds at most).
+    fn terminate(&self, pid: u32, name: &str) -> WinwrightResult<()> {
+        self.can_terminate(pid, name)
+    }
 }
 
 pub trait FileService: Send + Sync {

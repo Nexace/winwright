@@ -1,7 +1,7 @@
 //! Process listing from a Toolhelp snapshot, enriched with session, image path, and integrity
 //! level where the limited-information access right allows.
 
-use windows::Win32::Foundation::HANDLE;
+use windows::Win32::Foundation::{E_ACCESSDENIED, HANDLE, WAIT_OBJECT_0};
 use windows::Win32::Security::{
     GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, IsValidSid,
     TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TokenIntegrityLevel,
@@ -12,11 +12,12 @@ use windows::Win32::System::Diagnostics::ToolHelp::{
 use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
 use windows::Win32::System::Threading::{
     OpenProcess, OpenProcessToken, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
-    QueryFullProcessImageNameW,
+    PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, QueryFullProcessImageNameW, TerminateProcess,
+    WaitForSingleObject,
 };
 use windows::core::PWSTR;
-use winwright_contracts::WinwrightResult;
 use winwright_contracts::system::ProcessInfo;
+use winwright_contracts::{WinwrightError, WinwrightResult};
 
 use crate::handle::OwnedHandle;
 use crate::platform;
@@ -151,6 +152,92 @@ fn integrity_rid(process: HANDLE) -> Option<u32> {
     Some(unsafe { *GetSidSubAuthority(sid, last) })
 }
 
+/// Processes whose end crashes Windows or logs the person off, plus the hosts of the desktop,
+/// its fonts and its text input.
+const CRITICAL: &[&str] = &[
+    "system",
+    "registry",
+    "secure system",
+    "memory compression",
+    "smss.exe",
+    "csrss.exe",
+    "wininit.exe",
+    "winlogon.exe",
+    "services.exe",
+    "lsass.exe",
+    "lsaiso.exe",
+    "svchost.exe",
+    "dwm.exe",
+    "fontdrvhost.exe",
+    "sihost.exe",
+    "ctfmon.exe",
+    "winwright.exe",
+];
+
+/// How long to wait for an ended process to exit.
+const EXIT_WAIT_MS: u32 = 5_000;
+
+pub(crate) fn can_terminate(pid: u32, name: &str) -> WinwrightResult<()> {
+    let refuse = |why: &str| {
+        Err(WinwrightError::ActionBlocked {
+            reason: format!("{name} (process {pid}) {why}"),
+        })
+    };
+    if pid <= 4 || pid == std::process::id() || CRITICAL.contains(&name.to_lowercase().as_str()) {
+        return refuse("is part of Windows or Winwright and is never ended");
+    }
+    if session_of(pid) == 0 {
+        return refuse("is a Windows service; stop the service instead");
+    }
+    Ok(())
+}
+
+pub(crate) fn terminate(pid: u32, name: &str) -> WinwrightResult<()> {
+    can_terminate(pid, name)?;
+    // SAFETY: no pointer arguments; the handle is owned and closed by OwnedHandle.
+    let handle = unsafe {
+        OpenProcess(
+            PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+            false,
+            pid,
+        )
+    }
+    .map_err(|e| {
+        if e.code() == E_ACCESSDENIED {
+            WinwrightError::ActionBlocked {
+                reason: format!(
+                    "{name} runs with higher rights (as administrator); Winwright cannot end it"
+                ),
+            }
+        } else {
+            WinwrightError::invalid(format!(
+                "process {pid} is gone or cannot be opened: list processes again"
+            ))
+        }
+    })?;
+    let process = OwnedHandle::new(handle)
+        .ok_or_else(|| WinwrightError::invalid(format!("process {pid} cannot be opened")))?;
+    // The id may have been reused since the person agreed: end it only while it is `name`.
+    let mut buf = vec![0u16; IMAGE_PATH_CAPACITY];
+    let image = image_path(&process, &mut buf).unwrap_or_default();
+    let now = image.rsplit(['\\', '/']).next().unwrap_or_default();
+    if !now.eq_ignore_ascii_case(name) {
+        return Err(WinwrightError::invalid(format!(
+            "process {pid} is now {now:?}, not {name}: list processes again"
+        )));
+    }
+    // SAFETY: `process` is live with PROCESS_TERMINATE.
+    unsafe { TerminateProcess(process.0, 1) }.map_err(|e| platform("TerminateProcess", &e))?;
+    // SAFETY: `process` is live with SYNCHRONIZE.
+    if unsafe { WaitForSingleObject(process.0, EXIT_WAIT_MS) } != WAIT_OBJECT_0 {
+        return Err(WinwrightError::ActionOutcomeUnknown {
+            operation: "terminate".to_owned(),
+            reason: format!("{name} (process {pid}) had not exited after 5 s"),
+        });
+    }
+    Ok(())
+}
+
 /// Maps a mandatory-label RID onto the contract's integrity names.
 pub(crate) fn integrity_name(rid: u32) -> &'static str {
     match rid {
@@ -174,6 +261,35 @@ mod tests {
         assert_eq!(integrity_name(0x3000), "high");
         assert_eq!(integrity_name(0x4000), "system");
         assert_eq!(integrity_name(0x5000), "system"); // protected process
+    }
+
+    #[test]
+    fn windows_and_winwright_are_never_ended() {
+        for (pid, name) in [
+            (4, "System"),
+            (900, "csrss.exe"),
+            (901, "LSASS.EXE"),
+            (902, "svchost.exe"),
+            (903, "winwright.exe"),
+            (std::process::id(), "anything.exe"),
+        ] {
+            let err = can_terminate(pid, name).unwrap_err();
+            assert_eq!(err.code().as_str(), "ACTION_BLOCKED", "{name}");
+        }
+    }
+
+    #[test]
+    fn a_child_process_is_ended_and_a_reused_name_is_refused() {
+        let mut child = std::process::Command::new(r"C:\Windows\System32\PING.EXE")
+            .args(["-n", "30", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let wrong = terminate(pid, "notepad.exe").unwrap_err();
+        assert!(wrong.to_string().contains("not notepad.exe"), "{wrong}");
+        terminate(pid, "ping.exe").unwrap();
+        assert!(child.try_wait().unwrap().is_some(), "exited");
     }
 
     #[test]

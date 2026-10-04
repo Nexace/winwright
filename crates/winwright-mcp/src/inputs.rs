@@ -715,6 +715,13 @@ impl HighlightInput {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
+pub struct TerminateInput {
+    /// Process id from process_list.
+    pub pid: u32,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct LaunchInput {
     /// notepad.exe, msedge, a program path, a folder, or a document/image/media file. URIs:
     /// http(s), mailto, ms-settings, shell:<folder>. Other files (shortcuts, scripts): start

@@ -461,6 +461,72 @@ impl Engine {
             .list()
     }
 
+    /// Ends a process once the person agrees; the prompt names the program and its path.
+    /// Windows' own processes, services and Winwright are refused before anyone is asked.
+    pub async fn process_terminate(
+        &self,
+        session: &Session,
+        pid: u32,
+    ) -> WinwrightResult<ProcessInfo> {
+        let started = Instant::now();
+        let mut target = None;
+        let mut lease = None;
+        let mut confirmed = false;
+        let result = async {
+            self.ensure_running()?;
+            let processes = self
+                .processes
+                .clone()
+                .ok_or_else(|| unavailable("process"))?;
+            let info = processes
+                .list()?
+                .into_iter()
+                .find(|p| p.process_id == pid)
+                .ok_or_else(|| {
+                    WinwrightError::invalid(format!(
+                        "no process has id {pid}: list processes again"
+                    ))
+                })?;
+            self.guard_self(pid, &info.name)?;
+            processes.can_terminate(pid, &info.name)?;
+            let action = proposed(
+                "process_terminate",
+                Capability::ProcessTerminate,
+                ActionRisk::Destructive,
+                Some(info.name.clone()),
+            );
+            target.clone_from(&action.target);
+            let summary = format!(
+                "End {} (process {pid}{}); anything unsaved in it is lost",
+                info.name,
+                info.path
+                    .as_deref()
+                    .map(|p| format!(", {p}"))
+                    .unwrap_or_default()
+            );
+            confirmed = self.permit(session, action, summary, &mut lease).await?;
+            let name = info.name.clone();
+            tokio::task::spawn_blocking(move || processes.terminate(pid, &name))
+                .await
+                .map_err(|e| WinwrightError::ActionOutcomeUnknown {
+                    operation: "terminate".into(),
+                    reason: format!("worker task failed: {e}"),
+                })??;
+            Ok(info)
+        }
+        .await;
+        self.record(
+            session,
+            "process_terminate",
+            target.as_ref(),
+            None,
+            &result,
+            confirmed,
+            started,
+        );
+        result
+    }
+
     /// Typed file operations. Delete always goes to the Recycle Bin and needs confirmation.
     pub async fn file_operation(
         &self,
