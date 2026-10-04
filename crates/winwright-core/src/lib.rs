@@ -6,6 +6,7 @@ pub mod config;
 pub mod diff;
 pub mod engine;
 mod find;
+mod guide;
 pub mod lease;
 pub mod locator;
 mod memory;

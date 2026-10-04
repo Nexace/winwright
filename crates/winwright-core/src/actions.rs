@@ -1772,7 +1772,7 @@ impl Engine {
     }
 
     /// A mouse point in screen pixels. One relative to a window must fall inside it.
-    fn screen_point(&self, p: &ScreenPoint) -> WinwrightResult<PhysicalPoint> {
+    pub(crate) fn screen_point(&self, p: &ScreenPoint) -> WinwrightResult<PhysicalPoint> {
         let Some(selector) = &p.window else {
             return Ok(PhysicalPoint { x: p.x, y: p.y });
         };

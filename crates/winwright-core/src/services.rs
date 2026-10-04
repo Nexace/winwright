@@ -5,7 +5,9 @@ use winwright_contracts::backend::OperationContext;
 use winwright_contracts::capture::{
     CaptureRequest, CaptureTarget, CapturedImage, ScreenshotRequest, ScreenshotTarget,
 };
-use winwright_contracts::overlay::{HighlightRequest, HighlightResult, OverlayId, OverlayRequest};
+use winwright_contracts::overlay::{
+    HighlightRequest, HighlightResult, OverlayId, OverlayRequest, OverlayService,
+};
 use winwright_contracts::security::{ActionRisk, Capability, ProposedAction, TargetSummary};
 use winwright_contracts::system::{
     ExecRequest, ExecResult, FileOperation, FileResult, LaunchRequest, LaunchResult, ProcessInfo,
@@ -21,7 +23,7 @@ use std::time::{Duration, Instant};
 use crate::engine::Engine;
 use crate::session::Session;
 
-const DEFAULT_HIGHLIGHT_MS: u64 = 8_000;
+pub(crate) const DEFAULT_HIGHLIGHT_MS: u64 = 8_000;
 /// Longest run `exec` accepts (the process backend enforces the same limit).
 const MAX_EXEC_TIMEOUT_MS: u64 = 600_000;
 
@@ -167,7 +169,7 @@ fn file_risk(op: &FileOperation) -> (Capability, ActionRisk) {
     }
 }
 
-const DEFAULT_OVERLAY_COLOR: u32 = 0x00E0_4A2A;
+pub(crate) const DEFAULT_OVERLAY_COLOR: u32 = 0x00E0_4A2A;
 
 /// Prompts show at most this many characters of arguments.
 const MAX_PROMPT_ARGS: usize = 600;
@@ -215,14 +217,14 @@ fn program_stem(program: &str) -> String {
     name.strip_suffix(".exe").unwrap_or(&name).to_owned()
 }
 
-fn unavailable(backend: &str) -> WinwrightError {
+pub(crate) fn unavailable(backend: &str) -> WinwrightError {
     WinwrightError::BackendUnavailable {
         backend: backend.into(),
         reason: format!("{backend} is not enabled in this engine"),
     }
 }
 
-fn proposed(
+pub(crate) fn proposed(
     tool: &str,
     capability: Capability,
     risk: ActionRisk,
@@ -379,16 +381,7 @@ impl Engine {
         self.guard_self(resolved.props.process_id, &resolved.label())?;
         // Again, right before drawing: a confirmation may have opened while resolving.
         self.ensure_no_confirmation_open()?;
-        let overlay = self.overlay.as_deref().ok_or_else(|| {
-            // Turned off by the user is a decision, not a fault.
-            if self.config.overlay.enabled {
-                unavailable("overlay")
-            } else {
-                WinwrightError::ActionBlocked {
-                    reason: "overlays are disabled in config (overlay.enabled)".into(),
-                }
-            }
-        })?;
+        let overlay = self.overlay_service()?;
         let rect = resolved
             .props
             .bounds
@@ -409,6 +402,19 @@ impl Engine {
             reference: resolved.reference.clone(),
             target: resolved.label(),
             rect,
+        })
+    }
+
+    pub(crate) fn overlay_service(&self) -> WinwrightResult<&dyn OverlayService> {
+        self.overlay.as_deref().ok_or_else(|| {
+            // Turned off by the user is a decision, not a fault.
+            if self.config.overlay.enabled {
+                unavailable("overlay")
+            } else {
+                WinwrightError::ActionBlocked {
+                    reason: "overlays are disabled in config (overlay.enabled)".into(),
+                }
+            }
         })
     }
 
