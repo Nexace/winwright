@@ -6,7 +6,7 @@ use winwright_contracts::capture::{
     CaptureRequest, CaptureTarget, CapturedImage, ScreenshotRequest, ScreenshotTarget,
 };
 use winwright_contracts::overlay::{
-    HighlightRequest, HighlightResult, OverlayId, OverlayRequest, OverlayService,
+    HighlightRequest, HighlightResult, OverlayId, OverlayRequest, OverlayService, OverlayStyle,
 };
 use winwright_contracts::security::{ActionRisk, Capability, ProposedAction, TargetSummary};
 use winwright_contracts::system::{
@@ -170,6 +170,16 @@ fn file_risk(op: &FileOperation) -> (Capability, ActionRisk) {
 }
 
 pub(crate) const DEFAULT_OVERLAY_COLOR: u32 = 0x00E0_4A2A;
+/// The pointer style teaches, so it gets a calmer blue.
+const POINTER_COLOR: u32 = 0x0025_63EB;
+
+pub(crate) fn default_overlay_color(style: OverlayStyle) -> u32 {
+    if style == OverlayStyle::Pointer {
+        POINTER_COLOR
+    } else {
+        DEFAULT_OVERLAY_COLOR
+    }
+}
 
 /// Prompts show at most this many characters of arguments.
 const MAX_PROMPT_ARGS: usize = 600;
@@ -394,7 +404,9 @@ impl Engine {
             style: request.style,
             label: request.label,
             step: request.step,
-            color: request.color.unwrap_or(DEFAULT_OVERLAY_COLOR),
+            color: request
+                .color
+                .unwrap_or(default_overlay_color(request.style)),
             duration_ms: Some(request.duration_ms.unwrap_or(DEFAULT_HIGHLIGHT_MS)),
         })?;
         Ok(HighlightResult {

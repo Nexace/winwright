@@ -484,8 +484,9 @@ impl WinwrightMcp {
         description = "Teach the person to do something themselves, step by step: each step's caption appears at its spot \
         with a pointer, and Winwright waits until they click inside it (wait=click) or until its pixels change (wait=change, \
         for keys they press), then shows the next step. Steps point at a ref, or at x/y in pixels of `window`'s \
-        desktop_screenshot (width/height = the spot, default 48). Nothing is clicked for them. Returns how far they got, \
-        their clicks and a screenshot: when they clicked elsewhere, look and help; when time ran out, call again with \
+        desktop_screenshot (width/height = the spot, default 48). Nothing is clicked for them. A click outside the spot \
+        shows \"Not there\" and keeps waiting; the third one on a step stops the guide. Returns how far they got, their \
+        clicks and a screenshot: when it stopped on clicks elsewhere, look and help; when time ran out, call again with \
         the steps left."
     )]
     async fn desktop_guide(&self, Parameters(input): Parameters<GuideInput>) -> ToolResult {

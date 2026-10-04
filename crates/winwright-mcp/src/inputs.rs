@@ -773,7 +773,7 @@ impl HighlightInput {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct GuideStepInput {
-    /// What the person should do, e.g. "Click Develop" (at most 110 characters).
+    /// What the person should do, e.g. "Click Develop" (at most 100 characters).
     pub caption: String,
     /// The element to point at (a ref from desktop_snapshot or desktop_find), or give x/y.
     #[serde(rename = "ref")]

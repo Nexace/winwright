@@ -16,12 +16,12 @@ use winwright_contracts::{WinwrightError, WinwrightResult};
 
 use crate::engine::Engine;
 use crate::find::Resolved;
-use crate::services::{DEFAULT_HIGHLIGHT_MS, DEFAULT_OVERLAY_COLOR, proposed, unavailable};
+use crate::services::{DEFAULT_HIGHLIGHT_MS, default_overlay_color, proposed, unavailable};
 use crate::session::Session;
 
 const MAX_STEPS: usize = 20;
-/// Overlays take 120 characters; captions get a "12/20  " prefix.
-const MAX_CAPTION_CHARS: usize = 110;
+/// Overlays take 120 characters, "Not there: " included.
+const MAX_CAPTION_CHARS: usize = 100;
 const MAX_GUIDE_MS: u64 = 300_000;
 const MAX_SPOT_SIDE: u32 = 4_000;
 /// A release further than this from its press makes the click a drag.
@@ -29,6 +29,12 @@ const DRAG_PIXELS: i32 = 6;
 /// A change step captures its area once the pointer is drawn, then this often.
 const CHANGE_SETTLE: Duration = Duration::from_millis(300);
 const CHANGE_POLL: Duration = Duration::from_millis(400);
+/// Clicks elsewhere a step takes before the guide stops for help.
+const MAX_MISSES: u32 = 3;
+/// After that the step stays this long, so the person sees where it was.
+const MISSED_MS: u64 = 8_000;
+/// The pointer after a click elsewhere.
+const MISS_COLOR: u32 = 0x00E5_484D;
 
 /// `width` x `height` centered on `center`.
 fn centered(center: PhysicalPoint, width: u32, height: u32) -> PhysicalRect {
@@ -38,13 +44,9 @@ fn centered(center: PhysicalPoint, width: u32, height: u32) -> PhysicalRect {
     PhysicalRect::new(left, top, left + w, top + h)
 }
 
-/// The caption as shown: numbered when there are several steps.
-fn numbered(caption: &str, step: usize, steps: usize) -> String {
-    if steps > 1 {
-        format!("{step}/{steps}  {caption}")
-    } else {
-        caption.to_owned()
-    }
+/// The step's caption after a click elsewhere.
+fn not_there(caption: &str) -> String {
+    format!("Not there: {caption}")
 }
 
 /// Where a press was released, when that makes it a drag.
@@ -168,7 +170,9 @@ impl Engine {
             style: request.style,
             label: request.label,
             step: None,
-            color: request.color.unwrap_or(DEFAULT_OVERLAY_COLOR),
+            color: request
+                .color
+                .unwrap_or(default_overlay_color(request.style)),
             duration_ms: Some(request.duration_ms.unwrap_or(DEFAULT_HIGHLIGHT_MS)),
         })?;
         Ok(HighlightResult {
@@ -185,7 +189,8 @@ impl Engine {
     }
 
     /// Teaches: points at each step in turn and waits until the person clicks inside it (or,
-    /// for a keyboard step, until its pixels change). A click elsewhere ends the guide there.
+    /// for a keyboard step, until its pixels change). A click elsewhere marks the step "Not
+    /// there" and keeps waiting; the third one stops the guide so the model can help.
     pub async fn guide(
         &self,
         session: &Session,
@@ -202,6 +207,8 @@ impl Engine {
             ))?;
         }
         let overlay = self.overlay_service()?;
+        // A step left on screen by the previous guide.
+        let _ = overlay.clear(None);
         let ctx = session.operation(Duration::from_millis(request.timeout_ms.min(MAX_GUIDE_MS)))?;
         let (tx, mut events) = unbounded_channel();
         let _watch = overlay.watch_pointer(Box::new(move |event| {
@@ -216,34 +223,56 @@ impl Engine {
             window: None,
             warnings: Vec::new(),
         };
-        for (i, step) in request.steps.iter().enumerate() {
+        let color = request
+            .color
+            .unwrap_or(default_overlay_color(request.style));
+        let mut missed = None;
+        'steps: for (i, step) in request.steps.iter().enumerate() {
             self.ensure_no_confirmation_open()?;
             let shown = self.guide_target(session, &step.target, &ctx).await?;
             result.window = shown.window.or(result.window);
             self.ensure_no_confirmation_open()?;
-            let id = overlay.show(OverlayRequest {
-                rect: shown.rect,
-                style: request.style,
-                label: Some(numbered(step.caption.trim(), i + 1, total)),
-                step: None,
-                color: request.color.unwrap_or(DEFAULT_OVERLAY_COLOR),
-                duration_ms: Some((ctx.remaining().as_millis() as u64).max(1)),
-            })?;
-            let _drawn = Drawn { overlay, id };
+            let caption = step.caption.trim();
+            let number = (total > 1).then_some(i as u32 + 1);
+            let show = |label: String, color: u32| {
+                overlay.show(OverlayRequest {
+                    rect: shown.rect,
+                    style: request.style,
+                    label: Some(label),
+                    step: number,
+                    color,
+                    duration_ms: Some((ctx.remaining().as_millis() as u64).max(1)),
+                })
+            };
+            let mut drawn = Drawn {
+                overlay,
+                id: show(caption.to_owned(), color)?,
+            };
             match step.wait {
                 GuideWait::Click => {
-                    let Some(click) = self
-                        .next_click(session, &mut events, &shown, i + 1, &ctx)
-                        .await?
-                    else {
-                        result.outcome = GuideOutcome::TimedOut;
-                        break;
-                    };
-                    let inside = click.inside;
-                    result.clicks.push(click);
-                    if !inside {
-                        result.outcome = GuideOutcome::ClickedElsewhere;
-                        break;
+                    let mut misses = 0;
+                    loop {
+                        let Some(click) = self
+                            .next_click(session, &mut events, &shown, i + 1, &ctx)
+                            .await?
+                        else {
+                            result.outcome = GuideOutcome::TimedOut;
+                            break 'steps;
+                        };
+                        let inside = click.inside;
+                        result.clicks.push(click);
+                        if inside {
+                            break;
+                        }
+                        misses += 1;
+                        if misses == MAX_MISSES {
+                            result.outcome = GuideOutcome::ClickedElsewhere;
+                            missed = Some((shown.rect, number, caption));
+                            break 'steps;
+                        }
+                        // The same step, marked, waits for the right click.
+                        let _ = overlay.clear(Some(drawn.id));
+                        drawn.id = show(not_there(caption), MISS_COLOR)?;
                     }
                 }
                 GuideWait::Change => {
@@ -256,6 +285,16 @@ impl Engine {
                 }
             }
             result.completed += 1;
+        }
+        if let Some((rect, step, caption)) = missed {
+            let _ = overlay.show(OverlayRequest {
+                rect,
+                style: request.style,
+                label: Some(not_there(caption)),
+                step,
+                color: MISS_COLOR,
+                duration_ms: Some(MISSED_MS),
+            });
         }
         Ok(result)
     }
@@ -424,9 +463,10 @@ mod tests {
     }
 
     #[test]
-    fn several_steps_are_numbered_and_drags_need_a_real_move() {
-        assert_eq!(numbered("Click Develop", 2, 5), "2/5  Click Develop");
-        assert_eq!(numbered("Click Develop", 1, 1), "Click Develop");
+    fn misses_are_marked_and_drags_need_a_real_move() {
+        assert_eq!(not_there("Click +"), "Not there: Click +");
+        let longest = not_there(&"x".repeat(MAX_CAPTION_CHARS));
+        assert!(longest.chars().count() <= 120);
         let press = PhysicalPoint { x: 100, y: 100 };
         assert_eq!(dragged(press, PhysicalPoint { x: 104, y: 97 }), None);
         let far = PhysicalPoint { x: 160, y: 100 };
