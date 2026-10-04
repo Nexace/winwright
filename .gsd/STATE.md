@@ -1,7 +1,7 @@
 # Winwright State
 
 **Updated:** 2026-10-04
-**Current phase:** CHECKPOINT (2026-10-04, resume here). Tree green; many local commits not pushed. Winwright is used only inside the user's AI apps (Claude Code, Codex, opencode, Antigravity); the voice page and its bridge (apps/jarvis) are deleted. Done since the last checkpoint: relaxed confirmation mode, typed-command shell gate (extended df7b5e0: editor terminals, Run box OK, Start "Run command", scripts in Explorer; installed), confirm dialog brings itself to the front, app_launch waits for its window, typing into documents is verified, memory tools (memory_save/memory_recall, Notion copy). MCP idle shutdown stays 10 min (user's call; it was briefly off by default).
+**Current phase:** CHECKPOINT (2026-10-04, resume here). Tree green. Winwright is used only inside the user's AI apps (Claude Code, Codex, opencode, Antigravity); the voice page and its bridge (apps/jarvis) are deleted. Done since the last checkpoint: relaxed confirmation mode, typed-command shell gate (extended df7b5e0: editor terminals, Run box OK, Start "Run command", scripts in Explorer; installed), confirm dialog brings itself to the front, app_launch waits for its window, typing into documents is verified, memory tools (memory_save/memory_recall, Notion copy). MCP idle shutdown stays 10 min (user's call; it was briefly off by default).
 **Toolchain:** Rust 1.98.1 MSVC (pinned), windows-rs 0.62.2, tokio 1.53, schemars 1.2, regex 1.13, rmcp 3.5
 
 ## Done
@@ -15,7 +15,8 @@
   UIPI refusal, action lease, unknown-outcome timeouts; Win32 window control.
 - Phase 4: `wait_for` (real-state polling, UIA events only wake the loop; listeners attached
   only while a wait runs), snapshot diff (`+`/`-`/`~`, focus moves).
-- Phase 5: rmcp stdio MCP server, 23 tools (`winwright mcp`). Loopback HTTP not built.
+- Phase 5: rmcp stdio MCP server, 25 tools with memory_save/memory_recall (`winwright mcp`).
+  Loopback HTTP dropped (no app needs it).
 - Phase 6: engine wired to WGC capture + native overlays (`screenshot`, `highlight`); verified
   live at 125% scaling (highlight lands exactly on the target).
 - Phase 8: native Yes/No confirmation dialog (default No, auto-deny on timeout), engine refuses
@@ -34,7 +35,8 @@
   `winwright mcp --taint-file`; once the bridge's PreToolUse hook writes the marker (before any
   web/Notion/sub-agent/third-party MCP tool), every allowed desktop change needs the native
   confirmation until a new conversation or Re-enable. Unit-tested on both sides
-  (`node --test bridge/taint.test.mjs`); not yet exercised live with JARVIS running.
+  (`node --test bridge/taint.test.mjs`). The bridge was deleted 2026-10-04, so nothing writes the
+  marker today: ROADMAP Phase 19 (opt-in Claude Code hook).
 - Tests: all workspace tests pass; clippy `-D warnings` clean. Live after the audit fixes
   (2026-10-03): `live_fixture` 7/7, `mcp_stdio` 2/2, `live_confirm` 2/2, `live_desktop` 3/3.
 - Phase 7 live (2026-10-03, user OK'd): `live_canvas` 1/1 twice (click, right-click,
@@ -51,7 +53,7 @@
   (shows the confirm dialog twice, ~5 s; do not click it). `... manual_` asks a person to click Allow.
 
 ## Next
-The plan is `.gsd/ROADMAP.md` "Plan from 2026-10-04" (Phases 14-20, rebuilt from both earlier chats on 2026-10-04). Phase 14 (command-gate gaps) is done (df7b5e0); next 15 docs, 16 acceptance in the real apps with the user, 17 vision/coordinates + drag, 18 known-gap fixes, 19 opt-in outside-content hook (ask the user), 20 wrap-up (push only when asked, cargo clean).
+The plan is `.gsd/ROADMAP.md` "Plan from 2026-10-04" (Phases 14-20, rebuilt from both earlier chats on 2026-10-04). Phase 14 (command-gate gaps) is done (df7b5e0) and 15 (docs apps-only) is done; next 16 acceptance in the real apps with the user, 17 vision/coordinates + drag, 18 known-gap fixes, 19 opt-in outside-content hook (ask the user), 20 wrap-up (push only when asked, cargo clean).
 Direction (user, 2026-10-04): "just use winwright in the app, no need of a separate web page for anything". apps/jarvis deleted (bridge, page, voice, push-to-talk); `winwright` alone now prints an overview. Lost with it: voice, and the outside-content (taint) rule, which only the bridge switched on (`--taint-file` stays for any client that wants it).
 
 ## Decisions
@@ -87,7 +89,7 @@ Direction (user, 2026-10-04): "just use winwright in the app, no need of a separ
 - Relaxed mode (2026-10-04): Sensitive is allowed; Destructive (now including spending and
   security phrases), file delete, process terminate and the shell still ask. The user's real
   config is `%APPDATA%\winwright\config.json` = `{"security":{"confirmationMode":"relaxed"}}`.
-  Outside the assistant the taint rule is off (nothing writes the marker).
+  The taint rule is off (nothing writes the marker; ROADMAP Phase 19).
 - `app_launch` URI allowlist is fixed in code (http, https, mailto, ms-settings, shell:<folder>);
   no config for extra schemes yet.
 - Protecting the exe folder (M3) means file operations are refused in the folder winwright.exe
@@ -99,7 +101,7 @@ Direction (user, 2026-10-04): "just use winwright in the app, no need of a separ
 - User config `%APPDATA%\winwright\config.json`: `confirmationMode: relaxed`.
 - Notion: JARVIS_NOTION_TOKEN + JARVIS_NOTION_PARENT user env vars (Winwright reads WINWRIGHT_NOTION_* first, then these).
 
-## CHECKPOINT 2026-10-03 (resume here)
+## CHECKPOINT 2026-10-03 (history)
 State of the tree: `cargo fmt --check`, `cargo clippy --workspace --all-targets -D warnings`, `cargo test --workspace` all pass (2026-10-03, after the audit fixes); live `live_fixture` 7/7, `mcp_stdio` 2/2, `live_confirm` 2/2 and `live_desktop` 3/3 after the fixes. `scripts/check.ps1` runs the same (`-Live` adds live tests).
 
 COMMITTED 2026-10-03 as c48e464 (contracts/mcp/cli, incl. idle timer + push-to-talk), 1b6a954 files, c4afe04 uia, 9bb432d shell, 8c3ad61 overlay, e276d97 inspector, 39a2a16 core/security:
@@ -121,7 +123,7 @@ Security audit items, all DONE 2026-10-03 (origin = github.com/Nexace/winwright,
 
 Final cleanup still owed: `cargo clean` (~11 GB).
 
-## Footprint (2026-10-01)
-- Assistant (2026-10-04): the JARVIS face is deleted; node_modules 814 MB -> ~310 MB (the Claude Agent SDK binary is most of it, required). One Node process (the bridge serves the page); no Vite, no 3D.
-- Winwright: idles ~23 MB / 11 threads (debug). Release profile now opt-level "s" + thin LTO + 1 codegen unit + stripped (not panic=abort: window procs use catch_unwind). Release build not made yet (storage); do it only when needed.
+## Footprint
+- 2026-10-04: apps/jarvis deleted (311 MB with node_modules); Winwright is the only thing that runs.
+- Winwright: idles ~23 MB / 11 threads (debug, 2026-10-01). Release profile: opt-level "s" + thin LTO + 1 codegen unit + stripped (not panic=abort: window procs use catch_unwind); `cargo install` builds with it.
 - Cleanup at the end: `cargo clean` (~11 GB).
