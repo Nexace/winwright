@@ -254,7 +254,11 @@ impl Sessions {
         session.end();
         self.table().remove(&id);
         tracing::info!(id, "session stopped");
-        Ok(session.info())
+        // Its tree has been ended; the exit is recorded a moment later.
+        Ok(SessionInfo {
+            running: false,
+            ..session.info()
+        })
     }
 
     pub(crate) fn stop_all(&self) {
@@ -351,6 +355,7 @@ mod tests {
         assert_eq!(sessions.list().len(), 1);
         let stopped = sessions.stop(info.id).unwrap();
         assert_eq!(stopped.id, info.id);
+        assert!(!stopped.running, "{stopped:?}");
         // The process is gone within a moment.
         let gone = async {
             while crate::processes::list()
