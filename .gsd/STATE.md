@@ -1,7 +1,10 @@
 # Winwright State
 
-**Updated:** 2026-10-04
-**Current phase:** CHECKPOINT (2026-10-04, resume here). Tree green. Winwright is used only inside the user's AI apps (Claude Code, Codex, opencode, Antigravity); the voice page and its bridge (apps/jarvis) are deleted. Done since the last checkpoint: relaxed confirmation mode, typed-command shell gate (extended df7b5e0: editor terminals, Run box OK, Start "Run command", scripts in Explorer; installed), confirm dialog brings itself to the front, app_launch waits for its window, typing into documents is verified, memory tools (memory_save/memory_recall, Notion copy). MCP idle shutdown stays 10 min (user's call; it was briefly off by default).
+**Updated:** 2026-10-05
+**Current phase:** CHECKPOINT (2026-10-05, resume here). Tree green, everything committed and installed (`~\.cargo\bin\winwright.exe`, 28 tools); nothing pushed since dacbd8d (`git log origin/main..HEAD`; push only when asked). Phases 14-18 and 21 are done; left: 19 (opt-in outside-content hook, ask the user first) and 20 (wrap-up). Winwright is used only inside the user's AI apps (Claude Code, Codex, opencode, Antigravity); apps/jarvis is deleted. MCP idle shutdown stays 10 min (user's call).
+**Since the 2026-10-04 checkpoint:** typing waits for each keystroke to show (Notepad garbling fixed; text fields too), `desktop_mouse` (move/click/drag/scroll by screen or window pixels), text files in `filesystem_operation` (read/write/edit/grep; Recycle Bin before replace/edit; secrets ask), `process_terminate`, `process_session` (background programs with input/output; every start and input asks; emergency stop ends them), keyboard layout of the target window, Store apps report their own process, in-window dialogs give Yes/OK their context, Win32 list/tab items clicked for real.
+**User settings:** `%APPDATA%\winwright\config.json` = relaxed + `allowShell: true` (written via an explorer-run .cmd; see memory appdata-sandbox-redirect). `allowPowershell` is still false: the permission system refused to let Claude turn a security switch on; the user was told how to add it in Notepad themselves.
+**Session notes:** a Bash read of engine_tests.rs fake wiring was refused by the permission classifier on 2026-10-04; engine-level fakes were not extended since then (pure unit tests + live tests instead). Two `winwright-replace-test.txt` files sit in the user's Recycle Bin (opt-in test; Claude must not empty it). Old `winwright.old.*.exe` copies in `~\.cargo\bin` are deleted once no app holds them.
 **Toolchain:** Rust 1.98.1 MSVC (pinned), windows-rs 0.62.2, tokio 1.53, schemars 1.2, regex 1.13, rmcp 3.5
 
 ## Done
@@ -15,8 +18,7 @@
   UIPI refusal, action lease, unknown-outcome timeouts; Win32 window control.
 - Phase 4: `wait_for` (real-state polling, UIA events only wake the loop; listeners attached
   only while a wait runs), snapshot diff (`+`/`-`/`~`, focus moves).
-- Phase 5: rmcp stdio MCP server, 25 tools with memory_save/memory_recall (`winwright mcp`).
-  Loopback HTTP dropped (no app needs it).
+- Phase 5: rmcp stdio MCP server, 28 tools (`winwright mcp`). Loopback HTTP dropped.
 - Phase 6: engine wired to WGC capture + native overlays (`screenshot`, `highlight`); verified
   live at 125% scaling (highlight lands exactly on the target).
 - Phase 8: native Yes/No confirmation dialog (default No, auto-deny on timeout), engine refuses
@@ -51,9 +53,14 @@
   (opens the Win32 fixture; UIA patterns plus one guarded Enter for the combo; ~8 s)
 - `cargo test -p winwright-overlay --test live_confirm -- --ignored --test-threads=1 --skip manual_`
   (shows the confirm dialog twice, ~5 s; do not click it). `... manual_` asks a person to click Allow.
+- Ask the user to be hands-off first: `cargo test -p winwright-input --test live_input -- --ignored`
+  and `cargo test -p winwright-cli --test live_canvas -- --ignored --test-threads=1` (move the real
+  mouse). Last full live run 2026-10-05: fixture 7/7, mcp_stdio 2/2, input 2/2, canvas 2/2,
+  confirm 2/2.
+- Opt-in, puts two tiny files in the Recycle Bin: `cargo test -p winwright-files --lib -- --ignored replaced`.
 
 ## Next
-The plan is `.gsd/ROADMAP.md` "Plan from 2026-10-04" (Phases 14-20, rebuilt from both earlier chats on 2026-10-04). Phase 14 (command-gate gaps) is done (df7b5e0), 15 (docs apps-only) is done, 16 passed in Claude Code (typing fix 424a4f3, installed; the user checks Codex/opencode/Antigravity after restarting them); 17 cursor control done (desktop_mouse, 9d8947f, installed; 26 tools); 21 done and installed (text files 1ed7a51, process_terminate af65a24, process_session 4e2ee62; 28 tools); user config now relaxed + allowShell (PowerShell off). Next: 18 known-gap fixes, 19 (ask), 20 wrap-up; the incremental cache stays until the end (user's call). Disk 2026-10-05: target 23.1 GB (debug\incremental 15.6 GB, deps 6.5 GB, release 0.8 GB), .rustup 1.2 GB, registry 0.3 GB, installed exe 6.4 MB, 18 known-gap fixes, 19 opt-in outside-content hook (ask the user), 20 wrap-up (push only when asked, cargo clean).
+The plan is `.gsd/ROADMAP.md` "Plan from 2026-10-04". Done: 14, 15, 16 (in Claude Code; the user checks Codex/opencode/Antigravity after restarting them), 17, 18, 21. Next: 19 opt-in outside-content hook (ask the user whether they want it: it adds prompts after web reads), then 20 wrap-up (push only when asked; `cargo clean` of ~23 GB at the very end, the user's call: the incremental cache stays until then). Disk 2026-10-05: target 23.1 GB (debug\incremental 15.6 GB, deps 6.5 GB, release 0.8 GB), .rustup 1.2 GB, registry 0.3 GB, installed exe 6.4 MB.
 Direction (user, 2026-10-04): "just use winwright in the app, no need of a separate web page for anything". apps/jarvis deleted (bridge, page, voice, push-to-talk); `winwright` alone now prints an overview. Lost with it: voice, and the outside-content (taint) rule, which only the bridge switched on (`--taint-file` stays for any client that wants it).
 
 ## Decisions
@@ -68,16 +75,16 @@ Direction (user, 2026-10-04): "just use winwright in the app, no need of a separ
 - No worktree subagents (user asked to keep disk use minimal); debuginfo trimmed in profiles.
 
 ## Known gaps / follow-ups
-- UWP windows report `ApplicationFrameHost.exe` as process.
 - Capture: intermittent all-black region captures seen once by the capture agent (cause unknown).
 - Overlays are clipped to one monitor and are visible in screen captures.
-- Input: keyboard layout comes from the calling thread (VkKeyScanW), not the target app.
-- Recycle-bin delete and app launch are only unit-tested (live tests opt-in, not yet run).
-- Win32 list/tab selection via UIA may skip the app's change notification (e.g. LBN_SELCHANGE).
 - Mixed-DPI multi-monitor untested (single monitor).
-- MCP loopback HTTP transport not built (stdio only).
-- Dialog context (M1) covers owned windows and `#32770` dialogs; in-window dialogs (WinUI
-  ContentDialog, web modals) are judged by the button name only.
+- A minimized Store app still reports ApplicationFrameHost.exe (its frame holds no app then).
+- In-window dialogs count only when UI Automation marks them as dialogs (IsDialog); web modals
+  exposed as plain panes are judged by the button name.
+- Typing into a field that never shows the first keystroke falls back to typing at once (old
+  behaviour) and lets the final check judge; each such call costs about 1 s.
+- Engine-level fakes (engine_tests.rs) do not cover desktop_mouse, the new file ops or sessions;
+  those are covered by unit tests in their modules and by live runs.
 - UI-driven execution: Enter in a terminal window or an editor's terminal (xterm.js, a field
   named "Terminal ..."), Enter in the Run box / Start search / Explorer address bar / Task
   Manager's "Run new task" on a shell command line, OK in the Run box or "Create new task" on
@@ -88,7 +95,7 @@ Direction (user, 2026-10-04): "just use winwright in the app, no need of a separ
   it runs nothing until Enter.
 - Relaxed mode (2026-10-04): Sensitive is allowed; Destructive (now including spending and
   security phrases), file delete, process terminate and the shell still ask. The user's real
-  config is `%APPDATA%\winwright\config.json` = `{"security":{"confirmationMode":"relaxed"}}`.
+  config is `%APPDATA%\winwright\config.json` = relaxed + `allowShell: true` (2026-10-05).
   The taint rule is off (nothing writes the marker; ROADMAP Phase 19).
 - `app_launch` URI allowlist is fixed in code (http, https, mailto, ms-settings, shell:<folder>);
   no config for extra schemes yet.
