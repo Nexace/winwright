@@ -51,14 +51,16 @@
   (shows the confirm dialog twice, ~5 s; do not click it). `... manual_` asks a person to click Allow.
 
 ## Next (in order; plan in .gsd/INTEGRATION.md "Decisions and changes from the plan review")
-1. Assistant end to end in Brave with the user (`winwright`): voice round trip, then the taint
-   check ("weather in Pune", then "Open Notepad" must show Winwright's dialog). Then the user's
-   feedback on the page's look.
-2. Reports + Notion memory: reports and local memory DONE 2026-10-04 (see INTEGRATION.md
-   "Memory and reports"). Notion copy DONE and live-checked (task -> file -> Notion page);
-   JARVIS_NOTION_TOKEN + JARVIS_NOTION_PARENT are set as user env vars.
+Direction (user, 2026-10-04): Winwright lives in every app's chat first (opencode, Codex,
+Antigravity, Claude Code all registered); the voice page stays as an optional voice remote.
+1. Voice works in Brave (push-to-talk fixed: one click on the page first). Page looks bad: redo
+   its design later (user's call).
+2. Memory DONE 2026-10-04: Winwright's memory_save / memory_recall (crate winwright-memory)
+   share %USERPROFILE%\.winwright\reports with the voice page; Notion copy from both, live-checked.
+   Still to see: an app (Codex/opencode) calling memory_save by itself after a real task.
 3. The user retests the confirm dialog in Codex after the focus fix (a907911): create a file on
    the Desktop, then delete it; one click on Allow should work.
+4. Later: cargo clean (~11 GB); push (many local commits).
 Dropped: Phase 1b, Phase 9, Phase 12, local speech models (Whisper/Kokoro), Jev.
 
 ## Decisions
