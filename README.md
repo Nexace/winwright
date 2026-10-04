@@ -44,7 +44,8 @@ DIALOG "Save As" [e1]
 Winwright has no app of its own: it is a tool inside the AI apps you already use. Install it
 once (`cargo install --path crates/winwright-cli --locked` puts `winwright` in `~\.cargo\bin`),
 then add it to each app. The app starts `winwright mcp` itself and stops it when it closes:
-no service, no startup entry. Typing `winwright` alone explains this and lists the commands.
+no service, no startup entry. It also quits after 10 minutes without a tool call
+(`WINWRIGHT_IDLE_MINUTES`, `0` = never); an app that does not restart it needs a restart. Typing `winwright` alone explains this and lists the commands.
 
 Claude Code (all projects):
 

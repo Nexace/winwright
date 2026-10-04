@@ -1,7 +1,7 @@
 # Winwright State
 
 **Updated:** 2026-10-04
-**Current phase:** CHECKPOINT (2026-10-04, resume here). Tree green; many local commits not pushed. Winwright is used only inside the user's AI apps (Claude Code, Codex, opencode, Antigravity); the voice page and its bridge (apps/jarvis) are deleted. Done since the last checkpoint: relaxed confirmation mode, typed-command shell gate, confirm dialog brings itself to the front, app_launch waits for its window, typing into documents is verified, memory tools (memory_save/memory_recall, Notion copy), MCP idle shutdown off by default.
+**Current phase:** CHECKPOINT (2026-10-04, resume here). Tree green; many local commits not pushed. Winwright is used only inside the user's AI apps (Claude Code, Codex, opencode, Antigravity); the voice page and its bridge (apps/jarvis) are deleted. Done since the last checkpoint: relaxed confirmation mode, typed-command shell gate, confirm dialog brings itself to the front, app_launch waits for its window, typing into documents is verified, memory tools (memory_save/memory_recall, Notion copy). MCP idle shutdown stays 10 min (user's call; it was briefly off by default).
 **Toolchain:** Rust 1.98.1 MSVC (pinned), windows-rs 0.62.2, tokio 1.53, schemars 1.2, regex 1.13, rmcp 3.5
 
 ## Done

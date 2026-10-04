@@ -312,14 +312,14 @@ async fn serve_mcp(
     served.map(|_| ())
 }
 
-/// Idle shutdown for `winwright mcp`: `WINWRIGHT_IDLE_MINUTES` (default 0 = never). The app
-/// that started the server stops it when it closes; most apps do not restart a server that
-/// quit on its own, so its tools would just stop working.
+/// Idle shutdown for `winwright mcp`: `WINWRIGHT_IDLE_MINUTES` (default 10, 0 = never), so
+/// nothing keeps running unused. Some apps do not restart a server that quit on its own:
+/// restart the app, or set 0 in its config.
 fn mcp_idle_timeout() -> Option<std::time::Duration> {
     let minutes = std::env::var("WINWRIGHT_IDLE_MINUTES")
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
-        .unwrap_or(0);
+        .unwrap_or(10);
     (minutes > 0).then(|| std::time::Duration::from_secs(minutes * 60))
 }
 
