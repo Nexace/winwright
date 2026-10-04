@@ -94,6 +94,10 @@ need `allowShell`; the emergency stop ends them all), `process_terminate`
 edited file goes to the Recycle Bin first, and secret files such as keys and `.env` ask first),
 `shell_execute` (off by default), `memory_save`, `memory_recall`.
 
+**Check your PC.** `winwright doctor` lists every monitor with its size and scaling, draws a
+small box on each and checks it lands exactly in place and shows in a screenshot, then checks
+UI Automation and the click watcher. Run it once after installing, and after adding a monitor.
+
 **Safety.** Before anything risky (deleting, spending money, changing security, closing
 programs, running commands) Winwright shows its own Allow/Deny dialog, which only your real
 mouse or keyboard can answer. Password values are never read; elevated apps are refused

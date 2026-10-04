@@ -77,19 +77,20 @@ Direction (user, 2026-10-04): "just use winwright in the app, no need of a separ
 
 ## Known gaps / follow-ups
 - Capture: intermittent all-black region captures seen once by the capture agent (cause unknown).
-- Overlays are clipped to one monitor and are visible in screen captures.
-- Mixed-DPI multi-monitor untested (single monitor).
+- Overlays are visible in screen and region captures (not in window captures).
 - A minimized Store app still reports ApplicationFrameHost.exe (its frame holds no app then).
 - In-window dialogs count only when UI Automation marks them as dialogs (IsDialog); web modals
   exposed as plain panes are judged by the button name.
 - Typing into a field that never shows the first keystroke falls back to typing at once (old
   behaviour) and lets the final check judge; each such call costs about 1 s.
 - Engine-level fakes (engine_tests.rs) do not cover desktop_mouse, the new file ops, sessions or
-  guides; those are covered by unit tests in their modules and by live runs. The guide's "Not
-  there, keep waiting" loop was checked by hand only.
+  guides; those are covered by unit tests in their modules (guide press pairing, Not there /
+  give-up verdicts, keyboard-step change judging) and by live runs.
 - Guides: a window screenshot does not show overlays (region and monitor captures do); a change
-  step fires on any pixel change in its spot (animations, a blinking caret); Windows drops a
-  low-level hook whose thread stalls past its timeout, and a guide would then time out.
+  step can still fire on an animation that only starts after the person's input; Windows drops
+  a low-level hook whose thread stalls past its timeout, and a guide would then time out.
+- Multi-monitor: each overlay stays on one monitor; `winwright doctor` checks every monitor's
+  placement and scaling, but only one monitor (125 %) has been tested here.
 - UI-driven execution: Enter in a terminal window or an editor's terminal (xterm.js, a field
   named "Terminal ..."), Enter in the Run box / Start search / Explorer address bar / Task
   Manager's "Run new task" on a shell command line, OK in the Run box or "Create new task" on

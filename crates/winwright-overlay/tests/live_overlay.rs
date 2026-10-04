@@ -7,6 +7,9 @@ use std::thread::sleep;
 use std::time::Duration;
 
 use windows::Win32::Foundation::{HWND, LPARAM, POINT};
+use windows::Win32::UI::HiDpi::{
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetThreadDpiAwarenessContext,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     GWL_EXSTYLE, GetForegroundWindow, GetWindowLongW, HTTRANSPARENT, IsWindow, IsWindowVisible,
     SendMessageW, WM_NCHITTEST, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
@@ -148,6 +151,17 @@ fn pointer_renders_and_the_click_watch_comes_and_goes() {
         .unwrap()
         .expect("pointer window");
     assert!(is_window(handle));
+    // It glides in from the cursor and settles with its tip just right of and below the
+    // target's center (650, 320), the window starting a few pixels up-left of the tip.
+    // Physical pixels, as Winwright itself works (a DPI-unaware caller sees scaled ones).
+    // SAFETY: affects only this test thread.
+    unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+    sleep(Duration::from_millis(500));
+    let landed = ui.overlay.window_rect(id).unwrap().expect("pointer window");
+    assert!(
+        (630..=680).contains(&landed.left) && (300..=335).contains(&landed.top),
+        "{landed:?}"
+    );
 
     let first = ui.overlay.watch_pointer(Box::new(|_| {})).unwrap();
     let second = ui.overlay.watch_pointer(Box::new(|_| {})).unwrap();

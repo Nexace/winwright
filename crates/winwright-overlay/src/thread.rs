@@ -114,8 +114,9 @@ struct Glide {
     start: Instant,
 }
 
-/// Glide timers carry this bit; auto-hide timers are the bare overlay id.
-const GLIDE_TIMER: u64 = 1 << 40;
+/// Glide timers carry this bit; auto-hide timers are the bare overlay id. The tag stays within
+/// 32 bits, so the id is the same on every Windows build.
+const GLIDE_TIMER: u64 = 1 << 30;
 const GLIDE_FRAME_MS: u32 = 15;
 const GLIDE_MS: f32 = 280.0;
 
