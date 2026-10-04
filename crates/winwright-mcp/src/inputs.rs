@@ -297,6 +297,8 @@ impl TypeInput {
 #[serde(rename_all = "camelCase")]
 pub struct PressInput {
     /// Key chord, e.g. "Ctrl+S", "Enter", "Alt+F4", "Ctrl+Shift+Tab". Use "Plus" for +.
+    /// `key` is accepted too: models reach for it for a single chord.
+    #[serde(alias = "key")]
     pub keys: String,
     #[serde(flatten)]
     pub target: TargetFields,
@@ -710,6 +712,17 @@ mod tests {
         assert!(matches!(target.scope, SnapshotTarget::Window(_)));
         let bad: FocusInput = serde_json::from_str(r#"{}"#).unwrap();
         assert!(bad.target.required().is_err());
+    }
+
+    #[test]
+    fn press_takes_key_or_keys() {
+        for json in [
+            r#"{"keys":"ctrl+a"}"#,
+            r#"{"key":"ctrl+a","window":"Notepad"}"#,
+        ] {
+            let p: PressInput = serde_json::from_str(json).unwrap();
+            assert_eq!(p.keys, "ctrl+a", "{json}");
+        }
     }
 
     #[test]

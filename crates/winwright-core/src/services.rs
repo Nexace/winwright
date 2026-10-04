@@ -1,6 +1,7 @@
 //! Engine entry points for capture, overlays, processes and files (spec §18, §21, §39, §40).
 //! Every call is authorized first; risky capabilities are default-deny in the policy.
 
+use winwright_contracts::backend::OperationContext;
 use winwright_contracts::capture::{
     CaptureRequest, CaptureTarget, CapturedImage, ScreenshotRequest, ScreenshotTarget,
 };
@@ -13,6 +14,7 @@ use winwright_contracts::window::WindowInfo;
 use winwright_contracts::{WinwrightError, WinwrightResult};
 use winwright_security::{program_capability, stricter, transfer_risk};
 
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use crate::engine::Engine;
@@ -90,6 +92,27 @@ fn with_args(args: &[String]) -> String {
     )
 }
 
+/// How long app_launch waits for the app's window, and then for the app to finish starting:
+/// keys sent the moment a window appears can land while it is still loading (Notepad
+/// restoring its tabs garbled typed text that way).
+const LAUNCH_WINDOW_WAIT: Duration = Duration::from_secs(5);
+const LAUNCH_SETTLE: Duration = Duration::from_millis(500);
+/// An app that reuses a window it already had (a new tab) opens no new one: after this long
+/// without one, its foreground window counts.
+const LAUNCH_REUSE_AFTER: Duration = Duration::from_millis(1_500);
+
+/// `C:\Windows\notepad.exe` -> `notepad`: what a window's process name is compared with.
+fn program_stem(program: &str) -> String {
+    let name = program
+        .trim()
+        .trim_matches('"')
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    name.strip_suffix(".exe").unwrap_or(&name).to_owned()
+}
+
 fn unavailable(backend: &str) -> WinwrightError {
     WinwrightError::BackendUnavailable {
         backend: backend.into(),
@@ -115,6 +138,45 @@ fn proposed(
 }
 
 impl Engine {
+    /// The window a launch opened: a new titled top-level window (the one in front, when
+    /// several appeared), or after a while the front window if it belongs to the launched
+    /// program. Waits a moment more once found, so the app is ready for input.
+    async fn launched_window(
+        &self,
+        before: &HashSet<u64>,
+        program: &str,
+        ctx: &OperationContext,
+    ) -> Option<WindowInfo> {
+        let started = Instant::now();
+        let deadline = started + LAUNCH_WINDOW_WAIT.min(ctx.remaining());
+        loop {
+            let windows = self.windows.list_windows().unwrap_or_default();
+            let mut opened: Vec<&WindowInfo> = windows
+                .iter()
+                .filter(|w| !before.contains(&w.hwnd) && !w.title.is_empty() && !w.minimized)
+                .collect();
+            opened.sort_by_key(|w| !w.foreground);
+            let reused = || {
+                (started.elapsed() >= LAUNCH_REUSE_AFTER)
+                    .then(|| {
+                        windows
+                            .iter()
+                            .find(|w| w.foreground && program_stem(&w.process_name) == program)
+                    })
+                    .flatten()
+            };
+            if let Some(found) = opened.first().copied().or_else(reused) {
+                let hwnd = found.hwnd;
+                tokio::time::sleep(LAUNCH_SETTLE.min(ctx.remaining())).await;
+                return self.windows.window(hwnd).ok().flatten();
+            }
+            if Instant::now() >= deadline || ctx.cancel.is_cancelled() {
+                return None;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
     /// On-demand screenshot (never continuous). Element targets crop the element's bounds.
     /// Audited: a screenshot can carry anything on screen.
     pub async fn screenshot(
@@ -279,6 +341,12 @@ impl Engine {
         );
         let target = action.target.clone();
         let summary = format!("Launch {shown}{}", with_args(&request.args));
+        let program = program_stem(shown);
+        let before: HashSet<u64> = self
+            .windows
+            .list_windows()
+            .map(|ws| ws.into_iter().map(|w| w.hwnd).collect())
+            .unwrap_or_default();
         let mut lease = None;
         let mut confirmed = false;
         let result = async {
@@ -289,7 +357,9 @@ impl Engine {
                 .as_deref()
                 .ok_or_else(|| unavailable("process"))?;
             let ctx = session.operation(self.timeout())?;
-            processes.launch(request, &ctx).await
+            let mut launched = processes.launch(request, &ctx).await?;
+            launched.window = self.launched_window(&before, &program, &ctx).await;
+            Ok(launched)
         }
         .await;
         self.record(

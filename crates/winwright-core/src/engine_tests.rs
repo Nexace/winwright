@@ -2354,6 +2354,68 @@ async fn scrolling_a_target_into_view_does_not_verify_a_physical_click() {
     assert!(!r.verified, "the click itself changed nothing: {r:?}");
 }
 
+/// Opens its window a moment after the launch returns, the way a real app does.
+struct WindowOpeningProcesses {
+    fake: Arc<Fake>,
+}
+
+impl winwright_contracts::system::ProcessService for WindowOpeningProcesses {
+    fn launch<'a>(
+        &'a self,
+        _: winwright_contracts::system::LaunchRequest,
+        _: &'a OperationContext,
+    ) -> BackendFuture<'a, winwright_contracts::system::LaunchResult> {
+        let fake = self.fake.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let opened = window(99, "Untitled - Notepad", "Notepad.exe", true);
+            fake.s().windows.push(opened);
+        });
+        Box::pin(async {
+            Ok(winwright_contracts::system::LaunchResult {
+                process_id: Some(4924),
+                method: "process".into(),
+                window: None,
+            })
+        })
+    }
+    fn list(&self) -> WinwrightResult<Vec<winwright_contracts::system::ProcessInfo>> {
+        Ok(Vec::new())
+    }
+    fn exec<'a>(
+        &'a self,
+        _: winwright_contracts::system::ExecRequest,
+        _: &'a OperationContext,
+    ) -> BackendFuture<'a, winwright_contracts::system::ExecResult> {
+        Box::pin(async { Err(WinwrightError::invalid("not used")) })
+    }
+}
+
+#[tokio::test]
+async fn app_launch_waits_for_the_window_it_opens() {
+    let fake = Fake::new();
+    let engine =
+        engine(&fake).with_processes(Arc::new(WindowOpeningProcesses { fake: fake.clone() }));
+    let session = engine.session(&sid(), "test").unwrap();
+    let started = std::time::Instant::now();
+    let launched = engine
+        .launch_app(
+            &session,
+            serde_json::from_str(r#"{"app":"notepad.exe"}"#).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        launched.window.as_ref().map(|w| w.title.as_str()),
+        Some("Untitled - Notepad"),
+        "{launched:?}"
+    );
+    assert!(
+        started.elapsed() >= Duration::from_millis(800),
+        "waited for the window, then for the app to finish starting"
+    );
+}
+
 /// Records the time budget each `exec` call was given.
 #[derive(Default)]
 struct FakeProcesses {

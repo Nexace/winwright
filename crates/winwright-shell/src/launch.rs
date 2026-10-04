@@ -114,6 +114,7 @@ impl Plan {
                 Ok(LaunchResult {
                     process_id: Some(pid),
                     method: "process".to_owned(),
+                    window: None,
                 })
             }
             Target::Shell(target) => {
@@ -121,6 +122,7 @@ impl Plan {
                 Ok(LaunchResult {
                     process_id: pid,
                     method: "shell".to_owned(),
+                    window: None,
                 })
             }
         }

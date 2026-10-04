@@ -238,6 +238,24 @@ fn typed_risk(text: &str, receiver: Option<&UiProps>) -> ActionRisk {
     }
 }
 
+/// Documents longer than this are not read back to check typing.
+const DOCUMENT_COMPARE_CHARS: u32 = 200_000;
+
+/// `\r\n` and `\r` (how rich edit controls store line breaks) as `\n`.
+fn line_breaks_as_newlines(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+/// Whether typed `text` arrived in a document that read `before` and now reads `after`: the
+/// document holds it and grew by exactly its length, or holds only it (typing replaced a
+/// selection). Typing that went elsewhere, was garbled, or landed twice fails.
+fn arrived(before: &str, after: &str, text: &str) -> bool {
+    let text = line_breaks_as_newlines(text);
+    let len = |s: &str| s.chars().count();
+    after.contains(text.as_str())
+        && (len(after) == len(before) + len(&text) || after.trim_end_matches('\n') == text)
+}
+
 /// The lines typed text submits, one per line break; text after the last break is only typed.
 /// The first line is judged both alone (typing replaced a selected value, as in an address bar)
 /// and after the field's current value.
@@ -1072,6 +1090,10 @@ impl Engine {
             ensure_enabled(r)?;
             step.baseline = Some(self.focus_target(r, ctx).await?);
         }
+        let document_before = match r {
+            Some(r) => self.document_text(r, ctx).await,
+            None => None,
+        };
         input.type_text(text, ctx).await?;
         if let Some(r) = r
             && !is_sensitive(&r.props)
@@ -1084,10 +1106,43 @@ impl Engine {
                 };
                 step.verified = expect.met(&after);
                 step.expect = Some(expect);
+            } else if let Some(before) = document_before
+                && let Some(now) = self.document_text(r, ctx).await
+            {
+                // Documents (Notepad, Word) have no value to compare, but their text says
+                // whether the typing arrived.
+                step.verified = arrived(&before, &now, text);
+                if !step.verified {
+                    step.warnings.push(
+                        "the typed text is not in the document as expected: read it with \
+                         desktop_read_text before typing again"
+                            .into(),
+                    );
+                }
             }
             step.after = Some(after);
         }
         Ok(step)
+    }
+
+    /// A document's text through TextPattern, with line breaks as `\n`, for checking typing
+    /// where the element has no readable value. `None` when it has one, cannot be read, is
+    /// sensitive, or is too long to compare.
+    async fn document_text(&self, r: &Resolved, ctx: &OperationContext) -> Option<String> {
+        if r.props.value.is_some()
+            || !r.props.has_pattern(UiPattern::Text)
+            || is_sensitive(&r.props)
+        {
+            return None;
+        }
+        let max_chars = DOCUMENT_COMPARE_CHARS;
+        let out = self
+            .pattern(r, UiPatternAction::GetText { max_chars }, ctx)
+            .await
+            .ok()?;
+        let (text, source) = out.text?;
+        (source == "TextPattern" && text.chars().count() < max_chars as usize)
+            .then(|| line_breaks_as_newlines(&text))
     }
 
     async fn focus(&self, r: &Resolved, ctx: &OperationContext) -> WinwrightResult<Step> {
@@ -1770,5 +1825,29 @@ impl Engine {
             focus: None,
             warnings,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn typing_into_a_document_is_judged_by_its_text() {
+        // Appended at the caret, or typed over a selection: arrived.
+        assert!(arrived("", "Hello, Amogh.", "Hello, Amogh."));
+        assert!(arrived("Dear Ann,\n", "Dear Ann,\nHello", "Hello"));
+        assert!(arrived("garbled", "Hello, Amogh.\n", "Hello, Amogh."));
+        // Rich edit controls store line breaks as \r.
+        let after = line_breaks_as_newlines("one\rtwo");
+        assert!(arrived("", &after, "one\ntwo"));
+        // Garbled, lost, or typed twice: not arrived.
+        assert!(!arrived("", "Hlelo, Amgoh.", "Hello, Amogh."));
+        assert!(!arrived("", "", "Hello, Amogh."));
+        assert!(!arrived(
+            "Hello, Amogh.",
+            "Hello, Amogh.Hello, Amogh.Hello, Amogh.",
+            "Hello, Amogh."
+        ));
     }
 }

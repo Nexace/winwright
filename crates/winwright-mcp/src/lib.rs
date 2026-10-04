@@ -33,8 +33,9 @@ const INSTRUCTIONS: &str = "Winwright operates Windows apps through UI Automatio
 1. desktop_snapshot shows the active window as a compact tree; interactive elements carry refs like [e12].\n\
 2. Act by ref (desktop_click, desktop_fill, desktop_select, desktop_check, ...). Locators (role/name/label/window) also work when you have no ref.\n\
 3. Use desktop_wait_for instead of sleeping, then desktop_snapshot with diff=true to see only what changed.\n\
-4. Prefer app_launch and filesystem_operation over clicking through the shell.\n\
+4. Prefer app_launch and filesystem_operation over clicking through the shell. app_launch waits for the app's window and returns it: act in that window.\n\
 5. Use desktop_screenshot only when the tree lacks what you need.\n\
+6. verified=false means the effect was not confirmed. Check it (desktop_read_text, or a snapshot) before repeating the action: never type the same text twice into a field blindly.\n\
 Errors are JSON with a code and a hint. CONFIRMATION_REQUIRED means the user must approve: do not work around it. \
 CANCELLED after an emergency stop means the user stopped you: stop and ask them before doing anything else.";
 

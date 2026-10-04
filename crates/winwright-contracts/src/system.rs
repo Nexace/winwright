@@ -29,6 +29,10 @@ pub struct LaunchResult {
     pub process_id: Option<u32>,
     /// How it was started: `process` (CreateProcess) or `shell` (ShellExecuteEx).
     pub method: String,
+    /// The window it opened, once it appeared and had a moment to get ready for input.
+    /// `None` when no window showed up in time (a background program, or a slow start).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<crate::window::WindowInfo>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
