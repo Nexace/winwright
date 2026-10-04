@@ -1,4 +1,5 @@
 mod args;
+mod doctor;
 mod lazy;
 
 use std::process::ExitCode;
@@ -442,6 +443,7 @@ async fn run(cli: Cli) -> Result<(), WinwrightError> {
             print_json(&config);
             return Ok(());
         }
+        Command::Doctor => return doctor::run(config).await,
         Command::Mcp(m) => {
             check_mcp_enabled(&config)?;
             return serve_mcp(config, m.taint_file).await;
@@ -477,6 +479,7 @@ async fn run(cli: Cli) -> Result<(), WinwrightError> {
         | Command::Config
         | Command::Mcp(_)
         | Command::Audit(_)
+        | Command::Doctor
         | Command::Inspector => unreachable!("handled above"),
         Command::Windows => {
             let windows = engine.list_windows()?;

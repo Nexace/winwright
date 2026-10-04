@@ -98,6 +98,9 @@ pub enum Command {
     Audit(AuditArgs),
     /// Open the Inspector window: browse a window's UI tree, pick, highlight, copy locators.
     Inspector,
+    /// Check this PC: each monitor's size and scaling, an overlay drawn and captured on each,
+    /// UI Automation and the click watcher. Shows a small box per monitor; takes no input.
+    Doctor,
 }
 
 #[derive(Args)]

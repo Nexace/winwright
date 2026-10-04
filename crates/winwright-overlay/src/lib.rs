@@ -41,8 +41,9 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::{JoinHandle, ThreadId};
 use std::time::{Duration, Instant};
 
-use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
-use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
+use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
+use windows::Win32::UI::WindowsAndMessaging::{GetWindowRect, PostMessageW};
+use winwright_contracts::geometry::PhysicalRect;
 use winwright_contracts::input::{Key, parse_chord};
 use winwright_contracts::overlay::{
     OverlayId, OverlayRequest, OverlayService, PointerCallback, PointerWatch,
@@ -336,6 +337,19 @@ impl NativeOverlay {
                 id,
                 reply,
             })
+    }
+
+    /// Diagnostics: where the overlay's window is on screen, or `None` as for
+    /// [`NativeOverlay::window_handle`].
+    pub fn window_rect(&self, id: OverlayId) -> WinwrightResult<Option<PhysicalRect>> {
+        let Some(handle) = self.window_handle(id)? else {
+            return Ok(None);
+        };
+        let mut r = RECT::default();
+        // SAFETY: `r` is a valid out-parameter; any thread may query a window's rect.
+        unsafe { GetWindowRect(HWND(handle as usize as *mut _), &mut r) }
+            .map_err(|e| platform("GetWindowRect", &e))?;
+        Ok(Some(PhysicalRect::new(r.left, r.top, r.right, r.bottom)))
     }
 
     /// Destroys every overlay and hotkey and stops the shared thread (also done on drop).
