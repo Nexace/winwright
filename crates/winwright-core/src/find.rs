@@ -70,7 +70,7 @@ fn window_of(m: &Match, trees: &[(UiTree, Option<u64>)]) -> Option<u64> {
         .and_then(|(_, w)| *w)
 }
 
-fn all_keys(node: &UiNode, out: &mut Vec<ElementKey>) {
+pub(crate) fn all_keys(node: &UiNode, out: &mut Vec<ElementKey>) {
     out.push(node.key);
     for c in &node.children {
         all_keys(c, out);

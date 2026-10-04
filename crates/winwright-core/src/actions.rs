@@ -9,7 +9,7 @@ use winwright_contracts::action::{
     WindowVisualState,
 };
 use winwright_contracts::backend::{
-    ElementKey, InspectTarget, OperationContext, ScrollAmount, TreeRoot, UiActionOutcome, UiNode,
+    InspectTarget, OperationContext, ScrollAmount, TreeRoot, UiActionOutcome, UiNode,
     UiPatternAction, UiProps, UiTreeRequest,
 };
 use winwright_contracts::element::{ControlRole, ExpandState, ToggleState, UiPattern};
@@ -87,7 +87,7 @@ use winwright_security::{
 };
 
 use crate::engine::Engine;
-use crate::find::Resolved;
+use crate::find::{Resolved, all_keys};
 use crate::session::Session;
 
 /// How long an action may take to show an observable effect before we report "unverified".
@@ -321,6 +321,29 @@ fn submitted_lines(value: Option<&str>, text: &str) -> Vec<String> {
     lines
 }
 
+/// The innermost dialog (`ControlRole::Dialog`) around the element with `runtime_id` in the
+/// tree under `node`; `None` when it is in none, or not in the tree.
+fn dialog_around<'a>(
+    node: &'a UiNode,
+    runtime_id: &[i32],
+    outer: Option<&'a UiNode>,
+) -> Option<&'a UiNode> {
+    if runtime_id.is_empty() {
+        return None;
+    }
+    let around = if node.props.role == ControlRole::Dialog {
+        Some(node)
+    } else {
+        outer
+    };
+    if node.props.runtime_id == runtime_id {
+        return around;
+    }
+    node.children
+        .iter()
+        .find_map(|c| dialog_around(c, runtime_id, around))
+}
+
 /// Where a mouse action lands, past the element under its first point.
 struct Pointer {
     /// Screen points in order: one, or a drag's start and end.
@@ -463,40 +486,57 @@ impl Engine {
         let window = match target {
             Some(r) => r.window.and_then(|w| self.windows.window(w).ok().flatten()),
             None => self.windows.foreground_window().ok().flatten(),
-        };
-        let window = window.filter(|w| w.owner_hwnd.is_some() || w.class_name == "#32770")?;
-        let mut text = vec![window.title.clone()];
+        }?;
+        // A separate dialog window, or a dialog drawn inside the app's window (WinUI's
+        // ContentDialog, web modals), found around the button in the window's tree.
+        let separate = window.owner_hwnd.is_some() || window.class_name == "#32770";
+        let receiver_id = receiver.map(|p| p.runtime_id.clone()).unwrap_or_default();
+        let mut text = Vec::new();
         let mut fields = Vec::new();
         let request = UiTreeRequest {
             root: TreeRoot::Window(window.hwnd),
-            max_depth: 6,
-            max_nodes: 300,
+            max_depth: if separate { 6 } else { 16 },
+            max_nodes: if separate { 300 } else { 1_500 },
             max_children: 100,
             include_offscreen: false,
         };
-        // Without the tree the title still says a lot ("Delete File").
-        if let Ok(tree) = self.uia.capture_tree(request, ctx).await {
-            fn walk(
-                n: &UiNode,
-                text: &mut Vec<String>,
-                fields: &mut Vec<String>,
-                keys: &mut Vec<ElementKey>,
-            ) {
-                keys.push(n.key);
-                match n.props.role {
-                    ControlRole::Text => text.push(n.props.name.clone()),
-                    ControlRole::Edit | ControlRole::ComboBox => {
-                        fields.extend(n.props.value.clone())
-                    }
-                    _ => {}
-                }
-                for c in &n.children {
-                    walk(c, text, fields, keys);
-                }
+        fn walk(n: &UiNode, text: &mut Vec<String>, fields: &mut Vec<String>) {
+            match n.props.role {
+                ControlRole::Text => text.push(n.props.name.clone()),
+                ControlRole::Edit | ControlRole::ComboBox => fields.extend(n.props.value.clone()),
+                _ => {}
             }
-            let mut keys = Vec::new();
-            walk(&tree.root, &mut text, &mut fields, &mut keys);
-            self.release(keys).await;
+            for c in &n.children {
+                walk(c, text, fields);
+            }
+        }
+        match self.uia.capture_tree(request, ctx).await {
+            Ok(tree) => {
+                let scope = if separate {
+                    text.push(window.title.clone());
+                    Some(&tree.root)
+                } else {
+                    // Only dialogs inside the window: unrelated text in a main window (even one
+                    // flagged as a dialog) must not make "OK" look risky.
+                    tree.root
+                        .children
+                        .iter()
+                        .find_map(|c| dialog_around(c, &receiver_id, None))
+                };
+                if let Some(dialog) = scope {
+                    if !separate {
+                        text.push(dialog.props.name.clone());
+                    }
+                    walk(dialog, &mut text, &mut fields);
+                }
+                let mut keys = Vec::new();
+                all_keys(&tree.root, &mut keys);
+                self.release(keys).await;
+                scope?;
+            }
+            // Without the tree a dialog window's title still says a lot ("Delete File").
+            Err(_) if separate => text.push(window.title.clone()),
+            Err(_) => return None,
         }
         let command = is_launcher(&window.process_name)
             .then(|| {
@@ -2253,6 +2293,49 @@ mod tests {
         let mut item = props(ControlRole::Custom, "Remove");
         item.patterns.push(UiPattern::Invoke);
         assert_eq!(clicked_element(&icon, &[item]).name, "Remove");
+    }
+
+    #[test]
+    fn a_dialog_inside_a_window_is_found_around_its_button() {
+        let node = |role, name: &str, id: i32, children| UiNode {
+            key: winwright_contracts::backend::ElementKey {
+                worker_epoch: 0,
+                slot: id as u64,
+            },
+            props: UiProps {
+                role,
+                name: name.to_owned(),
+                runtime_id: vec![id],
+                ..UiProps::default()
+            },
+            children,
+            children_total: 0,
+        };
+        let tree = node(
+            ControlRole::Window,
+            "Files",
+            1,
+            vec![
+                node(ControlRole::Button, "Delete", 2, vec![]),
+                node(
+                    ControlRole::Dialog,
+                    "Delete 3 items?",
+                    3,
+                    vec![node(
+                        ControlRole::Group,
+                        "",
+                        4,
+                        vec![node(ControlRole::Button, "Yes", 5, vec![])],
+                    )],
+                ),
+            ],
+        );
+        let around = dialog_around(&tree, &[5], None).map(|d| d.props.name.as_str());
+        assert_eq!(around, Some("Delete 3 items?"));
+        // A button outside any dialog, an unknown element, and no runtime id: none.
+        assert!(dialog_around(&tree, &[2], None).is_none());
+        assert!(dialog_around(&tree, &[99], None).is_none());
+        assert!(dialog_around(&tree, &[], None).is_none());
     }
 
     #[test]
