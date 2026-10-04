@@ -34,6 +34,12 @@ pub struct Metrics {
     /// Pointer style: the pointer's length along each side, and the white edge around it.
     pub pointer_size: i32,
     pub pointer_edge: i32,
+    /// Pointer style: the caption bubble's padding and corner, and the soft shadow under it.
+    pub bubble_pad_x: i32,
+    pub bubble_pad_y: i32,
+    pub bubble_radius: i32,
+    pub shadow: i32,
+    pub shadow_dy: i32,
 }
 
 impl Metrics {
@@ -55,8 +61,13 @@ impl Metrics {
             badge_diameter: s(24),
             badge_ring: s(2),
             badge_font: s(13),
-            pointer_size: s(21),
+            pointer_size: s(22),
             pointer_edge: s(2),
+            bubble_pad_x: s(14),
+            bubble_pad_y: s(9),
+            bubble_radius: s(12),
+            shadow: s(6),
+            shadow_dy: s(3),
         }
     }
 }
@@ -256,13 +267,14 @@ pub fn place_arrow(target: PhysicalRect, work: PhysicalRect, m: &Metrics) -> Arr
     arrow.offset(moved.left - arrow.bounds.left, moved.top - arrow.bounds.top)
 }
 
-/// The pointer style's dart, its tip on the target, pointing up and left like a mouse pointer.
+/// The pointer style's arrowhead, its tip on the target, pointing up and left like a mouse
+/// pointer, with a notch between its wings. Painted with a white edge and a shadow.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Pointer {
     pub tip: PhysicalPoint,
-    /// The colored dart, drawn over [`Pointer::edge`], a slightly larger white one.
-    pub fill: [PhysicalPoint; 3],
-    pub edge: [PhysicalPoint; 3],
+    /// Tip, one wing, the notch, the other wing.
+    pub shape: [PhysicalPoint; 4],
+    /// The shape plus its edge and shadow.
     pub bounds: PhysicalRect,
 }
 
@@ -274,30 +286,24 @@ impl Pointer {
         };
         Self {
             tip: shift(self.tip),
-            fill: self.fill.map(shift),
-            edge: self.edge.map(shift),
+            shape: self.shape.map(shift),
             bounds: offset(self.bounds, dx, dy),
         }
     }
 }
 
 pub fn place_pointer(tip: PhysicalPoint, m: &Metrics) -> Pointer {
-    let (s, e) = (m.pointer_size, m.pointer_edge);
-    let narrow = s * 2 / 7;
+    let s = m.pointer_size;
+    let (wing, notch) = (s * 2 / 7, s / 2);
+    let reach = m.pointer_edge + m.shadow_dy + 1;
     let at = |x: i32, y: i32| PhysicalPoint {
         x: tip.x + x,
         y: tip.y + y,
     };
-    let edge = [
-        at(-e, -e),
-        at(narrow - e / 2, s + 2 * e),
-        at(s + 2 * e, narrow - e / 2),
-    ];
     Pointer {
         tip,
-        fill: [at(0, 0), at(narrow, s), at(s, narrow)],
-        edge,
-        bounds: span_rect(edge[0], at(s + 2 * e, s + 2 * e)),
+        shape: [at(0, 0), at(wing, s), at(notch, notch), at(s, wing)],
+        bounds: span_rect(at(-reach, -reach), at(s + reach, s + reach)),
     }
 }
 
@@ -398,6 +404,8 @@ pub struct Layout {
     pub pointer: Option<Pointer>,
     /// Label box including padding (the bubble, with the pointer style).
     pub label: Option<PhysicalRect>,
+    /// Where the label's text goes.
+    pub text: Option<PhysicalRect>,
     pub badge: Option<PhysicalRect>,
 }
 
@@ -414,7 +422,15 @@ pub fn compute_layout(input: &LayoutInput) -> Option<Layout> {
     let highlight = (input.style == OverlayStyle::Highlight).then_some(target);
     let arrow = (input.style == OverlayStyle::Arrow).then(|| place_arrow(target, work, m));
     let marker = (input.style == OverlayStyle::ClickMarker).then(|| target.center());
-    let pointer = (input.style == OverlayStyle::Pointer).then(|| place_pointer(target.center(), m));
+    let pointer = (input.style == OverlayStyle::Pointer).then(|| {
+        // Inside the target, down and right of its center: pointing at its label, not over it.
+        let c = target.center();
+        let tip = PhysicalPoint {
+            x: c.x + (target.width() / 4).min(m.pointer_size),
+            y: c.y + (target.height() / 4).min(m.pointer_size),
+        };
+        place_pointer(tip, m)
+    });
     let anchor = if highlight.is_some() {
         inflate(target, m.border)
     } else {
@@ -424,20 +440,55 @@ pub fn compute_layout(input: &LayoutInput) -> Option<Layout> {
         x: target.left,
         y: target.top,
     };
-    let badge = input
-        .badge_text
-        .filter(|_| pointer.is_none())
-        .map(|text| place_badge(corner, text, m, work));
-    let label = input.label_text.map(|(w, h)| {
-        let size = (w + 2 * m.label_pad_x, h + 2 * m.label_pad_y);
-        match &pointer {
-            Some(p) => place_bubble(p.tip, size, work, m),
-            None => {
-                let min_left = badge.map_or(i32::MIN, |b| b.right + m.gap / 2);
-                place_label(anchor, size, min_left, work, m.gap)
-            }
+
+    let (label, badge, text) = match &pointer {
+        // A bubble beside the pointer; the step number sits inside it, left of the text.
+        Some(p) => {
+            let number = input.badge_text.map(|_| m.badge_diameter);
+            let label = input.label_text.map(|(w, h)| {
+                let w = w + number.map_or(0, |d| d + m.gap) + 2 * m.bubble_pad_x;
+                let h = h.max(number.unwrap_or(0)) + 2 * m.bubble_pad_y;
+                place_bubble(p.tip, (w, h), work, m)
+            });
+            let badge = label.zip(number).map(|(bubble, d)| {
+                let left = bubble.left + m.bubble_pad_x;
+                let top = bubble.top + (bubble.height() - d) / 2;
+                PhysicalRect::new(left, top, left + d, top + d)
+            });
+            let text = label.map(|bubble| {
+                let left = badge.map_or(bubble.left + m.bubble_pad_x, |b| b.right + m.gap);
+                PhysicalRect::new(
+                    left,
+                    bubble.top + m.bubble_pad_y,
+                    bubble.right - m.bubble_pad_x,
+                    bubble.bottom - m.bubble_pad_y,
+                )
+            });
+            (label, badge, text)
         }
-    });
+        None => {
+            let badge = input
+                .badge_text
+                .map(|text| place_badge(corner, text, m, work));
+            let label = input.label_text.map(|(w, h)| {
+                let min_left = badge.map_or(i32::MIN, |b| b.right + m.gap / 2);
+                let size = (w + 2 * m.label_pad_x, h + 2 * m.label_pad_y);
+                place_label(anchor, size, min_left, work, m.gap)
+            });
+            let text = label.map(|r| {
+                PhysicalRect::new(
+                    r.left + m.label_pad_x,
+                    r.top + m.label_pad_y,
+                    r.right - m.label_pad_x,
+                    r.bottom - m.label_pad_y,
+                )
+            });
+            (label, badge, text)
+        }
+    };
+    let shadow = label
+        .filter(|_| pointer.is_some())
+        .map(|b| offset(inflate(b, m.shadow), 0, m.shadow_dy));
 
     let parts = [
         highlight.map(|t| inflate(t, m.border)),
@@ -445,6 +496,7 @@ pub fn compute_layout(input: &LayoutInput) -> Option<Layout> {
         marker.map(|c| marker_bounds(c, m)),
         pointer.map(|p| p.bounds),
         label,
+        shadow,
         badge,
     ];
     let window = intersect(parts.into_iter().flatten().reduce(union)?, input.monitor);
@@ -462,6 +514,7 @@ pub fn compute_layout(input: &LayoutInput) -> Option<Layout> {
         }),
         pointer: pointer.map(|p| p.offset(dx, dy)),
         label: label.map(|r| offset(r, dx, dy)),
+        text: text.map(|r| offset(r, dx, dy)),
         badge: badge.map(|r| offset(r, dx, dy)),
     })
 }
@@ -693,27 +746,49 @@ mod tests {
         let target = PhysicalRect::new(500, 400, 600, 440);
         let mut i = input(target, OverlayStyle::Pointer);
         i.label_text = Some((80, 20));
-        i.badge_text = Some((8, 16));
         let layout = compute_layout(&i).unwrap();
         let p = layout.pointer.unwrap();
+        // Center (550, 420) plus a quarter of the size, at most the pointer's 22 px.
         let tip = (p.tip.x + layout.window.left, p.tip.y + layout.window.top);
-        assert_eq!(tip, (550, 420));
-        assert_eq!(p.fill[0], p.tip);
-        assert!(p.fill[1..].iter().all(|c| c.x > p.tip.x && c.y > p.tip.y));
-        assert_eq!((layout.badge, layout.highlight), (None, None));
-        // 18 px past the tip, 80 + 2*8 wide and 20 + 2*4 tall.
+        assert_eq!(tip, (572, 430));
+        assert!(target.contains(PhysicalPoint { x: tip.0, y: tip.1 }));
+        assert_eq!(p.shape[0], p.tip);
+        assert!(p.shape[1..].iter().all(|c| c.x > p.tip.x && c.y > p.tip.y));
+        assert_eq!(layout.highlight, None);
+        // 18 px past the tip; 80 + 2*14 wide and 20 + 2*9 tall.
         let bubble = on_screen(&layout, layout.label.unwrap());
-        assert_eq!(bubble, PhysicalRect::new(568, 438, 664, 466));
+        assert_eq!(bubble, PhysicalRect::new(590, 448, 698, 486));
+        let text = on_screen(&layout, layout.text.unwrap());
+        assert_eq!(text, PhysicalRect::new(604, 457, 684, 477));
         let local = PhysicalRect::new(0, 0, layout.window.width(), layout.window.height());
         assert!(contains_rect(local, p.bounds));
+        // The bubble's shadow is inside the window too.
+        assert_eq!(layout.window.bottom, 486 + 6 + 3);
 
         // In the bottom-right corner the bubble goes left of the tip and above it.
         let corner = place_bubble(PhysicalPoint { x: 1900, y: 1030 }, (96, 28), WORK, &m);
         assert_eq!(corner, PhysicalRect::new(1798, 996, 1894, 1024));
         // No caption: just the pointer.
         let bare = compute_layout(&input(target, OverlayStyle::Pointer)).unwrap();
-        assert_eq!(bare.label, None);
-        assert_eq!(bare.window, PhysicalRect::new(548, 418, 576, 446));
+        assert_eq!((bare.label, bare.text), (None, None));
+        assert_eq!(bare.window, PhysicalRect::new(566, 424, 601, 459));
+    }
+
+    #[test]
+    fn a_step_number_sits_inside_the_bubble_left_of_the_text() {
+        let target = PhysicalRect::new(500, 400, 600, 440);
+        let mut i = input(target, OverlayStyle::Pointer);
+        i.label_text = Some((80, 20));
+        i.badge_text = Some((8, 16));
+        let layout = compute_layout(&i).unwrap();
+        let bubble = on_screen(&layout, layout.label.unwrap());
+        let badge = on_screen(&layout, layout.badge.unwrap());
+        let text = on_screen(&layout, layout.text.unwrap());
+        // 24 px number + 6 px gap more than without it; 24 + 2*9 tall.
+        assert_eq!(bubble, PhysicalRect::new(590, 448, 728, 490));
+        assert_eq!(badge, PhysicalRect::new(604, 457, 628, 481));
+        assert_eq!(text.left, badge.right + 6);
+        assert!(contains_rect(bubble, badge) && contains_rect(bubble, text));
     }
 
     #[test]

@@ -4,10 +4,17 @@
 
 use winwright_contracts::geometry::{PhysicalPoint, PhysicalRect};
 
-use crate::layout::{Layout, Metrics, inflate, intersect};
+use crate::layout::{Layout, Metrics, inflate, intersect, offset};
 
 pub const WHITE: u32 = 0x00FF_FFFF;
 const DARK_TEXT: u32 = 0x001A_1A1A;
+const BLACK: u32 = 0;
+/// The pointer style's caption bubble: near-black with a slightly lighter rim.
+pub const BUBBLE_FILL: u32 = 0x001F_2023;
+const BUBBLE_RIM: u32 = 0x0045_474D;
+/// Alpha of each of the stacked layers that make a soft shadow.
+const SHADOW_LAYER_ALPHA: u8 = 9;
+const POINTER_SHADOW_ALPHA: u8 = 70;
 /// Alpha of the faint fill inside a highlight.
 pub const FILL_ALPHA: u8 = 24;
 const MARKER_RING_ALPHA: u8 = 200;
@@ -207,6 +214,47 @@ impl<'a> Canvas<'a> {
         });
     }
 
+    /// Polygon through `pts` (pixel coordinates, even-odd fill), anti-aliased with 4x4
+    /// supersampling.
+    pub fn fill_polygon(&mut self, pts: &[(f32, f32)], rgb: u32, alpha: u8) {
+        if pts.len() < 3 {
+            return;
+        }
+        let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+        for &(x, y) in pts {
+            (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
+        }
+        let bbox = PhysicalRect::new(
+            x0.floor() as i32,
+            y0.floor() as i32,
+            x1.ceil() as i32 + 1,
+            y1.ceil() as i32 + 1,
+        );
+        let inside = |x: f32, y: f32| {
+            let mut odd = false;
+            let mut j = pts.len() - 1;
+            for i in 0..pts.len() {
+                let ((xi, yi), (xj, yj)) = (pts[i], pts[j]);
+                if (yi > y) != (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi {
+                    odd = !odd;
+                }
+                j = i;
+            }
+            odd
+        };
+        self.fill_coverage(bbox, rgb, alpha, |cx, cy| {
+            let mut hits = 0u8;
+            for sy in 0..4 {
+                for sx in 0..4 {
+                    let x = cx - 0.5 + (sx as f32 + 0.5) / 4.0;
+                    let y = cy - 0.5 + (sy as f32 + 0.5) / 4.0;
+                    hits += u8::from(inside(x, y));
+                }
+            }
+            f32::from(hits) / 16.0
+        });
+    }
+
     /// Alpha bytes of `r`, row-major; pair with [`Canvas::restore_alpha`] around GDI text.
     pub fn alpha_snapshot(&self, r: PhysicalRect) -> Vec<u8> {
         let r = intersect(r, self.bounds());
@@ -255,8 +303,35 @@ pub fn draw(canvas: &mut Canvas<'_>, layout: &Layout, m: &Metrics, color: u32) {
         canvas.fill_circle(x, y, m.marker_radius as f32, color, 255);
     }
     if let Some(pointer) = &layout.pointer {
-        canvas.fill_triangle(pointer.edge, WHITE, 255);
-        canvas.fill_triangle(pointer.fill, color, 255);
+        if let Some(bubble) = layout.label {
+            // A soft shadow: stacked, growing, faint layers, a little below the bubble.
+            let radius = m.bubble_radius as f32;
+            for k in (1..=m.shadow).rev() {
+                let layer = offset(inflate(bubble, k), 0, m.shadow_dy);
+                canvas.fill_rounded_rect(layer, radius + k as f32, BLACK, SHADOW_LAYER_ALPHA);
+            }
+            canvas.fill_rounded_rect(bubble, radius, BUBBLE_RIM, 255);
+            canvas.fill_rounded_rect(inflate(bubble, -1), radius - 1.0, BUBBLE_FILL, 255);
+        }
+        if let Some(badge) = layout.badge {
+            let r = badge.width() as f32 / 2.0;
+            let center = (badge.left as f32 + r, badge.top as f32 + r);
+            canvas.fill_circle(center.0, center.1, r, color, 255);
+        }
+        let shape = pointer.shape.map(|p| (p.x as f32 + 0.5, p.y as f32 + 0.5));
+        let shifted = |dx: f32, dy: f32| shape.map(|(x, y)| (x + dx, y + dy));
+        let edge = m.pointer_edge as f32;
+        canvas.fill_polygon(
+            &shifted(edge / 2.0, m.shadow_dy as f32),
+            BLACK,
+            POINTER_SHADOW_ALPHA,
+        );
+        for k in 0..16 {
+            let angle = k as f32 * std::f32::consts::TAU / 16.0;
+            canvas.fill_polygon(&shifted(edge * angle.cos(), edge * angle.sin()), WHITE, 255);
+        }
+        canvas.fill_polygon(&shape, color, 255);
+        return;
     }
     if let Some(label) = layout.label {
         canvas.fill_rounded_rect(label, m.label_radius as f32, color, 255);
@@ -417,7 +492,20 @@ mod tests {
     }
 
     #[test]
-    fn pointer_is_a_colored_dart_with_a_white_edge() {
+    fn polygons_cover_their_interior_only() {
+        let mut px = vec![0u32; 20 * 20];
+        let mut c = Canvas::new(20, 20, &mut px);
+        // A notched arrowhead: the notch at (10, 10) stays empty.
+        let shape = [(1.0, 1.0), (6.0, 18.0), (10.0, 10.0), (18.0, 6.0)];
+        c.fill_polygon(&shape, RED, 255);
+        assert_eq!(c.pixel(4, 4), premultiply(RED, 255));
+        assert_eq!(c.pixel(13, 13), 0);
+        assert_eq!(c.pixel(19, 0), 0);
+        assert_premultiplied(&px);
+    }
+
+    #[test]
+    fn pointer_is_an_arrowhead_with_a_white_edge_over_a_dark_bubble() {
         let m = Metrics::for_dpi(96);
         let layout = compute_layout(&LayoutInput {
             target: PhysicalRect::new(100, 100, 140, 120),
@@ -425,8 +513,8 @@ mod tests {
             monitor: PhysicalRect::new(0, 0, 800, 600),
             work: PhysicalRect::new(0, 0, 800, 560),
             metrics: m,
-            label_text: None,
-            badge_text: None,
+            label_text: Some((60, 18)),
+            badge_text: Some((8, 16)),
         })
         .unwrap();
         let (w, h) = (layout.window.width(), layout.window.height());
@@ -434,9 +522,13 @@ mod tests {
         let mut c = Canvas::new(w, h, &mut px);
         draw(&mut c, &layout, &m, RED);
         let tip = layout.pointer.unwrap().tip;
-        assert_eq!(c.pixel(tip.x + 6, tip.y + 6), premultiply(RED, 255));
-        // Past the dart's tail, inside its edge.
-        assert_eq!(c.pixel(tip.x + 14, tip.y + 14), premultiply(WHITE, 255));
+        assert_eq!(c.pixel(tip.x + 5, tip.y + 5), premultiply(RED, 255));
+        // Just outside a wing: the white edge.
+        assert_eq!(c.pixel(tip.x + 2, tip.y + 12), premultiply(WHITE, 255));
+        let text = layout.text.unwrap();
+        assert_eq!(c.pixel(text.left, text.top), premultiply(BUBBLE_FILL, 255));
+        let badge = layout.badge.unwrap().center();
+        assert_eq!(c.pixel(badge.x, badge.y), premultiply(RED, 255));
         assert_premultiplied(&px);
     }
 

@@ -5,8 +5,8 @@ use std::ffi::c_void;
 
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, POINT, RECT, SIZE};
 use windows::Win32::Graphics::Gdi::{
-    AC_SRC_ALPHA, AC_SRC_OVER, ANTIALIASED_QUALITY, BI_RGB, BITMAPINFO, BITMAPINFOHEADER,
-    BLENDFUNCTION, CLIP_DEFAULT_PRECIS, CreateCompatibleDC, CreateDIBSection, CreateFontW,
+    AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION,
+    CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateCompatibleDC, CreateDIBSection, CreateFontW,
     DEFAULT_CHARSET, DIB_RGB_COLORS, DRAW_TEXT_FORMAT, DT_CALCRECT, DT_CENTER, DT_END_ELLIPSIS,
     DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, DeleteDC, DeleteObject, DrawTextW,
     FONT_WEIGHT, FW_BOLD, FW_SEMIBOLD, GdiFlush, GetMonitorInfoW, HDC, HGDIOBJ,
@@ -170,7 +170,8 @@ fn font(height: i32, weight: FONT_WEIGHT) -> WinwrightResult<GdiObject> {
             DEFAULT_CHARSET,
             OUT_DEFAULT_PRECIS,
             CLIP_DEFAULT_PRECIS,
-            ANTIALIASED_QUALITY,
+            // Every text box is opaque, so ClearType's colored edges blend correctly.
+            CLEARTYPE_QUALITY,
             0,
             w!("Segoe UI"),
         )
@@ -253,6 +254,7 @@ struct Text<'a> {
     text: &'a [u16],
     font: &'a GdiObject,
     align: DRAW_TEXT_FORMAT,
+    rgb: u32,
 }
 
 /// Renders `request` into a new, shown overlay window. `None` when no part of it lies on a
@@ -292,18 +294,20 @@ pub fn create_overlay(
     let (bitmap, bits) = dib_section(dc.0, width, height)?;
     let _bitmap = Selection::new(dc.0, &bitmap);
 
+    let on_color = paint::text_color_on(request.color);
     let mut texts = Vec::new();
-    if let (Some(rect), Some(text)) = (layout.label, label.as_deref()) {
+    if let (Some(rect), Some(text)) = (layout.text, label.as_deref()) {
         texts.push(Text {
-            rect: PhysicalRect::new(
-                rect.left + metrics.label_pad_x,
-                rect.top + metrics.label_pad_y,
-                rect.right - metrics.label_pad_x,
-                rect.bottom - metrics.label_pad_y,
-            ),
+            rect,
             text,
             font: &label_font,
             align: DT_LEFT,
+            // The pointer's bubble is dark whatever the color.
+            rgb: if layout.pointer.is_some() {
+                paint::WHITE
+            } else {
+                on_color
+            },
         });
     }
     if let (Some(rect), Some(text)) = (layout.badge, badge.as_deref()) {
@@ -312,6 +316,7 @@ pub fn create_overlay(
             text,
             font: &badge_font,
             align: DT_CENTER,
+            rgb: on_color,
         });
     }
 
@@ -327,9 +332,8 @@ pub fn create_overlay(
             .map(|t| canvas.alpha_snapshot(t.rect))
             .collect()
     };
-    let text_rgb = paint::text_color_on(request.color);
     for t in &texts {
-        draw_text(dc.0, t.font, t.text, t.rect, t.align, text_rgb);
+        draw_text(dc.0, t.font, t.text, t.rect, t.align, t.rgb);
     }
     // SAFETY: no arguments; completes batched GDI drawing before the pixels are read.
     let _ = unsafe { GdiFlush() };
