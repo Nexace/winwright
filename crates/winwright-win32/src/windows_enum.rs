@@ -6,11 +6,12 @@ use windows::Win32::Graphics::Dwm::{
     DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GW_OWNER, GWL_EXSTYLE, GetClassNameW, GetCursorPos, GetForegroundWindow,
-    GetWindow, GetWindowLongW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
-    GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, IsZoomed, WS_EX_TOPMOST,
+    EnumWindows, FindWindowExW, GW_OWNER, GWL_EXSTYLE, GetClassNameW, GetCursorPos,
+    GetForegroundWindow, GetWindow, GetWindowLongW, GetWindowRect, GetWindowTextLengthW,
+    GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, IsZoomed,
+    WS_EX_TOPMOST,
 };
-use windows::core::BOOL;
+use windows::core::{BOOL, PCWSTR, w};
 use winwright_contracts::geometry::{PhysicalPoint, PhysicalRect};
 use winwright_contracts::window::WindowInfo;
 use winwright_contracts::{WinwrightError, WinwrightResult};
@@ -98,14 +99,46 @@ fn class_name(hwnd: HWND) -> String {
     String::from_utf16_lossy(&buf[..n.max(0) as usize])
 }
 
-fn build_info(hwnd: HWND, foreground: HWND, names: &mut HashMap<u32, String>) -> WindowInfo {
+fn window_pid(hwnd: HWND) -> u32 {
     let mut pid = 0u32;
     // SAFETY: `pid` is a valid out pointer.
     unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
-    let process_name = names
-        .entry(pid)
-        .or_insert_with(|| process_name(pid).unwrap_or_default())
-        .clone();
+    pid
+}
+
+/// Store apps (Settings, Calculator) draw inside a frame owned by ApplicationFrameHost.exe; the
+/// app itself owns the `Windows.UI.Core.CoreWindow` child. Reports that app (`None` when the
+/// frame holds none, as while it is minimized).
+fn framed_app(frame: HWND) -> Option<u32> {
+    // SAFETY: searches the frame's direct children by class; both strings are static and
+    // NUL-terminated.
+    let core = unsafe {
+        FindWindowExW(
+            Some(frame),
+            None,
+            w!("Windows.UI.Core.CoreWindow"),
+            PCWSTR::null(),
+        )
+    }
+    .ok()?;
+    Some(window_pid(core)).filter(|&pid| pid != 0)
+}
+
+fn build_info(hwnd: HWND, foreground: HWND, names: &mut HashMap<u32, String>) -> WindowInfo {
+    let mut pid = window_pid(hwnd);
+    let mut name_of = |pid: u32| {
+        names
+            .entry(pid)
+            .or_insert_with(|| process_name(pid).unwrap_or_default())
+            .clone()
+    };
+    let mut process_name = name_of(pid);
+    if process_name.eq_ignore_ascii_case("ApplicationFrameHost.exe")
+        && let Some(app) = framed_app(hwnd)
+    {
+        pid = app;
+        process_name = name_of(app);
+    }
     // SAFETY: the remaining calls take only the HWND by value.
     let (minimized, maximized, exstyle, owner) = unsafe {
         (
