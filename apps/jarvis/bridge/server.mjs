@@ -573,9 +573,14 @@ const handleRequest = async (req, res) => {
       return res.end('forbidden')
     }
     touch()
+    let pages = 0
     for (const client of wss.clients) {
-      if (client.readyState === 1) client.send(JSON.stringify({ type: 'ptt' }))
+      if (client.readyState === 1) {
+        client.send(JSON.stringify({ type: 'ptt' }))
+        pages += 1
+      }
     }
+    console.log(`[jarvis] push-to-talk pressed (${pages} page${pages === 1 ? '' : 's'} open)`)
     res.writeHead(204)
     return res.end()
   }

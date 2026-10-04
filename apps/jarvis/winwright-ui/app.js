@@ -534,14 +534,34 @@ const END_OF_SPEECH_MS = 1200
 const NO_SPEECH_MS = 7000
 const MAX_RECORDING_MS = 30_000
 
+const PAGE_TITLE = document.title
+
 function toggleListening() {
   if (state.listening) stopListening(true)
   else startListening()
 }
 
+/**
+ * Browsers keep a page's audio off until the person has clicked or typed in it
+ * once. A page the launcher opened, then driven by the global hotkey, may never
+ * have been clicked: say so instead of listening to silence.
+ */
+function audioAllowed() {
+  return navigator.userActivation?.hasBeenActive !== false
+}
+
 async function startListening() {
   if (!state.stt) {
     notice('Voice needs an ElevenLabs key (ELEVENLABS_API_KEY). You can still type.')
+    return
+  }
+  if (!audioAllowed()) {
+    notice(
+      'Click anywhere on this page once: the browser keeps the microphone off until you do. ' +
+        'Then press Ctrl+Space again.',
+      'error',
+    )
+    document.title = `Click me · ${PAGE_TITLE}`
     return
   }
   stopSpeaking()
@@ -564,7 +584,12 @@ async function startListening() {
   })
 
   // A pause after speech ends the recording; so does silence from the start.
+  // Without a running audio context nothing can hear the pause, so the second
+  // press (or the time limit) ends it instead.
   const context = new AudioContext()
+  if (context.state !== 'running') await context.resume().catch(() => {})
+  const hearsPauses = context.state === 'running'
+  if (!hearsPauses) notice('Listening. Press Ctrl+Space again when you are done.')
   const analyser = context.createAnalyser()
   analyser.fftSize = 1024
   context.createMediaStreamSource(stream).connect(analyser)
@@ -583,8 +608,8 @@ async function startListening() {
       heard = true
       lastLoud = now
     }
-    if (heard && now - lastLoud > END_OF_SPEECH_MS) stopListening(true)
-    else if (!heard && now - started > NO_SPEECH_MS) stopListening(false)
+    if (hearsPauses && heard && now - lastLoud > END_OF_SPEECH_MS) stopListening(true)
+    else if (hearsPauses && !heard && now - started > NO_SPEECH_MS) stopListening(false)
     else if (now - started > MAX_RECORDING_MS) stopListening(true)
   }, 50)
 
@@ -592,6 +617,8 @@ async function startListening() {
   recorder.addEventListener('stop', () => finishListening(recorder.mimeType || type || 'audio/webm'))
   recorder.start(250)
   micButton.setAttribute('aria-pressed', 'true')
+  // Visible in the tab strip too: the hotkey works while the page is behind.
+  document.title = `● Listening · ${PAGE_TITLE}`
   idleStatus()
 }
 
@@ -609,6 +636,7 @@ async function finishListening(type) {
   state.listening = null
   listening.stream.getTracks().forEach((track) => track.stop())
   listening.context.close().catch(() => {})
+  document.title = PAGE_TITLE
   micButton.setAttribute('aria-pressed', 'false')
   micButton.style.removeProperty('--level')
   if (!listening.transcribe) {
@@ -661,8 +689,13 @@ async function speak(text) {
     state.audio = audio
     idleStatus()
     await audio.play()
-  } catch {
-    // Not being heard is not worth an error line: the reply is on screen.
+  } catch (err) {
+    // Not being heard is not worth an error line, the reply is on screen; but a
+    // browser that blocks sound until the page is clicked is worth one hint.
+    if (err?.name === 'NotAllowedError' && !state.toldAboutSound) {
+      state.toldAboutSound = true
+      notice('Click anywhere on this page once so replies can be spoken.')
+    }
   }
 }
 
