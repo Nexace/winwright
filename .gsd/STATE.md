@@ -1,7 +1,8 @@
 # Winwright State
 
 **Updated:** 2026-10-05
-**Current phase:** CHECKPOINT (2026-10-05, resume here). Tree green, everything committed and installed (`~\.cargo\bin\winwright.exe`, 28 tools); nothing pushed since dacbd8d (`git log origin/main..HEAD`; push only when asked). Phases 14-18 and 21 are done; left: 20 (wrap-up); 19 was dropped by the user (2026-10-05). Winwright is used only inside the user's AI apps (Claude Code, Codex, opencode, Antigravity); apps/jarvis is deleted. MCP idle shutdown stays 10 min (user's call).
+**Current phase:** PLAN COMPLETE (2026-10-05, resume here). Tree green, everything committed, installed (`~\.cargo\bin\winwright.exe`, 29 tools) and pushed to origin/main. Phases 14-18 and 20-22 are done; 19 was dropped by the user. The build cache was deleted at the wrap-up: the first build after this takes a few minutes. Winwright is used only inside the user's AI apps (Claude Code, Codex, opencode, Antigravity); apps/jarvis is deleted. MCP idle shutdown stays 10 min (user's call).
+**Phase 22 (2026-10-05):** teaching mode. `overlay_highlight` takes pixel spots and defaults to the pointer style (a blue arrowhead with the caption in a dark bubble); `desktop_guide` points at each step and waits for the person's own click inside it (a low-level mouse hook only while waiting, injected input skipped, keys never seen) or for the spot's pixels to change (keyboard steps); a wrong click marks the step "Not there" and it keeps waiting, the third stops the guide; the result lists every click and carries a screenshot.
 **Since the 2026-10-04 checkpoint:** typing waits for each keystroke to show (Notepad garbling fixed; text fields too), `desktop_mouse` (move/click/drag/scroll by screen or window pixels), text files in `filesystem_operation` (read/write/edit/grep; Recycle Bin before replace/edit; secrets ask), `process_terminate`, `process_session` (background programs with input/output; every start and input asks; emergency stop ends them), keyboard layout of the target window, Store apps report their own process, in-window dialogs give Yes/OK their context, Win32 list/tab items clicked for real.
 **User settings:** `%APPDATA%\winwright\config.json` = relaxed + `allowShell: true` (written via an explorer-run .cmd; see memory appdata-sandbox-redirect). `allowPowershell` is still false: the permission system refused to let Claude turn a security switch on; the user was told how to add it in Notepad themselves.
 **Session notes:** a Bash read of engine_tests.rs fake wiring was refused by the permission classifier on 2026-10-04; engine-level fakes were not extended since then (pure unit tests + live tests instead). Two `winwright-replace-test.txt` files sit in the user's Recycle Bin (opt-in test; Claude must not empty it). Old `winwright.old.*.exe` copies in `~\.cargo\bin` are deleted once no app holds them.
@@ -18,7 +19,7 @@
   UIPI refusal, action lease, unknown-outcome timeouts; Win32 window control.
 - Phase 4: `wait_for` (real-state polling, UIA events only wake the loop; listeners attached
   only while a wait runs), snapshot diff (`+`/`-`/`~`, focus moves).
-- Phase 5: rmcp stdio MCP server, 28 tools (`winwright mcp`). Loopback HTTP dropped.
+- Phase 5: rmcp stdio MCP server, 29 tools (`winwright mcp`). Loopback HTTP dropped.
 - Phase 6: engine wired to WGC capture + native overlays (`screenshot`, `highlight`); verified
   live at 125% scaling (highlight lands exactly on the target).
 - Phase 8: native Yes/No confirmation dialog (default No, auto-deny on timeout), engine refuses
@@ -60,7 +61,7 @@
 - Opt-in, puts two tiny files in the Recycle Bin: `cargo test -p winwright-files --lib -- --ignored replaced`.
 
 ## Next
-The plan is `.gsd/ROADMAP.md` "Plan from 2026-10-04". Done: 14, 15, 16 (in Claude Code; the user checks Codex/opencode/Antigravity after restarting them), 17, 18, 21. 19 dropped (user, 2026-10-05). Next: 20 wrap-up (push only when asked; `cargo clean` of ~23 GB at the very end, the user's call: the incremental cache stays until then). Disk 2026-10-05: target 23.1 GB (debug\incremental 15.6 GB, deps 6.5 GB, release 0.8 GB), .rustup 1.2 GB, registry 0.3 GB, installed exe 6.4 MB.
+The plan is `.gsd/ROADMAP.md` "Plan from 2026-10-04": all done (14-18, 20-22; 19 dropped by the user). Nothing is planned. For the user: restart Codex, opencode and Antigravity to load the 29-tool build, then try a lesson ("teach me how to ... in <app>"). Disk after the wrap-up: the 23.1 GB `target` folder deleted; kept: .rustup 1.2 GB and the cargo registry 0.3 GB (needed to rebuild), installed exe ~7 MB.
 Direction (user, 2026-10-04): "just use winwright in the app, no need of a separate web page for anything". apps/jarvis deleted (bridge, page, voice, push-to-talk); `winwright` alone now prints an overview. Lost with it: voice, and the outside-content (taint) rule, which only the bridge switched on (`--taint-file` stays for any client that wants it).
 
 ## Decisions
@@ -83,8 +84,12 @@ Direction (user, 2026-10-04): "just use winwright in the app, no need of a separ
   exposed as plain panes are judged by the button name.
 - Typing into a field that never shows the first keystroke falls back to typing at once (old
   behaviour) and lets the final check judge; each such call costs about 1 s.
-- Engine-level fakes (engine_tests.rs) do not cover desktop_mouse, the new file ops or sessions;
-  those are covered by unit tests in their modules and by live runs.
+- Engine-level fakes (engine_tests.rs) do not cover desktop_mouse, the new file ops, sessions or
+  guides; those are covered by unit tests in their modules and by live runs. The guide's "Not
+  there, keep waiting" loop was checked by hand only.
+- Guides: a window screenshot does not show overlays (region and monitor captures do); a change
+  step fires on any pixel change in its spot (animations, a blinking caret); Windows drops a
+  low-level hook whose thread stalls past its timeout, and a guide would then time out.
 - UI-driven execution: Enter in a terminal window or an editor's terminal (xterm.js, a field
   named "Terminal ..."), Enter in the Run box / Start search / Explorer address bar / Task
   Manager's "Run new task" on a shell command line, OK in the Run box or "Create new task" on
