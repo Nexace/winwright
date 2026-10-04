@@ -14,5 +14,6 @@ Step 'tests'   { cargo test --workspace }
 if ($Live) {
   Step 'live: fixture + mcp' { cargo test -p winwright-cli --test live_fixture --test mcp_stdio -- --ignored --test-threads=1 }
   Step 'live: confirm dialog' { cargo test -p winwright-overlay --test live_confirm -- --ignored --test-threads=1 --skip manual_ }
+  Step 'live: overlays' { cargo test -p winwright-overlay --test live_overlay -- --ignored --test-threads=1 }
 }
 Write-Host 'all checks passed'
