@@ -1,7 +1,7 @@
 # Winwright State
 
 **Updated:** 2026-10-05
-**Current phase:** CHECKPOINT (2026-10-05, resume here). Tree green, everything committed and installed (`~\.cargo\bin\winwright.exe`, 28 tools); nothing pushed since dacbd8d (`git log origin/main..HEAD`; push only when asked). Phases 14-18 and 21 are done; left: 19 (opt-in outside-content hook, ask the user first) and 20 (wrap-up). Winwright is used only inside the user's AI apps (Claude Code, Codex, opencode, Antigravity); apps/jarvis is deleted. MCP idle shutdown stays 10 min (user's call).
+**Current phase:** CHECKPOINT (2026-10-05, resume here). Tree green, everything committed and installed (`~\.cargo\bin\winwright.exe`, 28 tools); nothing pushed since dacbd8d (`git log origin/main..HEAD`; push only when asked). Phases 14-18 and 21 are done; left: 20 (wrap-up); 19 was dropped by the user (2026-10-05). Winwright is used only inside the user's AI apps (Claude Code, Codex, opencode, Antigravity); apps/jarvis is deleted. MCP idle shutdown stays 10 min (user's call).
 **Since the 2026-10-04 checkpoint:** typing waits for each keystroke to show (Notepad garbling fixed; text fields too), `desktop_mouse` (move/click/drag/scroll by screen or window pixels), text files in `filesystem_operation` (read/write/edit/grep; Recycle Bin before replace/edit; secrets ask), `process_terminate`, `process_session` (background programs with input/output; every start and input asks; emergency stop ends them), keyboard layout of the target window, Store apps report their own process, in-window dialogs give Yes/OK their context, Win32 list/tab items clicked for real.
 **User settings:** `%APPDATA%\winwright\config.json` = relaxed + `allowShell: true` (written via an explorer-run .cmd; see memory appdata-sandbox-redirect). `allowPowershell` is still false: the permission system refused to let Claude turn a security switch on; the user was told how to add it in Notepad themselves.
 **Session notes:** a Bash read of engine_tests.rs fake wiring was refused by the permission classifier on 2026-10-04; engine-level fakes were not extended since then (pure unit tests + live tests instead). Two `winwright-replace-test.txt` files sit in the user's Recycle Bin (opt-in test; Claude must not empty it). Old `winwright.old.*.exe` copies in `~\.cargo\bin` are deleted once no app holds them.
@@ -38,7 +38,7 @@
   web/Notion/sub-agent/third-party MCP tool), every allowed desktop change needs the native
   confirmation until a new conversation or Re-enable. Unit-tested on both sides
   (`node --test bridge/taint.test.mjs`). The bridge was deleted 2026-10-04, so nothing writes the
-  marker today: ROADMAP Phase 19 (opt-in Claude Code hook).
+  marker today; the opt-in hook (ROADMAP Phase 19) was dropped by the user 2026-10-05.
 - Tests: all workspace tests pass; clippy `-D warnings` clean. Live after the audit fixes
   (2026-10-03): `live_fixture` 7/7, `mcp_stdio` 2/2, `live_confirm` 2/2, `live_desktop` 3/3.
 - Phase 7 live (2026-10-03, user OK'd): `live_canvas` 1/1 twice (click, right-click,
@@ -60,7 +60,7 @@
 - Opt-in, puts two tiny files in the Recycle Bin: `cargo test -p winwright-files --lib -- --ignored replaced`.
 
 ## Next
-The plan is `.gsd/ROADMAP.md` "Plan from 2026-10-04". Done: 14, 15, 16 (in Claude Code; the user checks Codex/opencode/Antigravity after restarting them), 17, 18, 21. Next: 19 opt-in outside-content hook (ask the user whether they want it: it adds prompts after web reads), then 20 wrap-up (push only when asked; `cargo clean` of ~23 GB at the very end, the user's call: the incremental cache stays until then). Disk 2026-10-05: target 23.1 GB (debug\incremental 15.6 GB, deps 6.5 GB, release 0.8 GB), .rustup 1.2 GB, registry 0.3 GB, installed exe 6.4 MB.
+The plan is `.gsd/ROADMAP.md` "Plan from 2026-10-04". Done: 14, 15, 16 (in Claude Code; the user checks Codex/opencode/Antigravity after restarting them), 17, 18, 21. 19 dropped (user, 2026-10-05). Next: 20 wrap-up (push only when asked; `cargo clean` of ~23 GB at the very end, the user's call: the incremental cache stays until then). Disk 2026-10-05: target 23.1 GB (debug\incremental 15.6 GB, deps 6.5 GB, release 0.8 GB), .rustup 1.2 GB, registry 0.3 GB, installed exe 6.4 MB.
 Direction (user, 2026-10-04): "just use winwright in the app, no need of a separate web page for anything". apps/jarvis deleted (bridge, page, voice, push-to-talk); `winwright` alone now prints an overview. Lost with it: voice, and the outside-content (taint) rule, which only the bridge switched on (`--taint-file` stays for any client that wants it).
 
 ## Decisions
@@ -96,7 +96,7 @@ Direction (user, 2026-10-04): "just use winwright in the app, no need of a separ
 - Relaxed mode (2026-10-04): Sensitive is allowed; Destructive (now including spending and
   security phrases), file delete, process terminate and the shell still ask. The user's real
   config is `%APPDATA%\winwright\config.json` = relaxed + `allowShell: true` (2026-10-05).
-  The taint rule is off (nothing writes the marker; ROADMAP Phase 19).
+  The taint rule is off (nothing writes the marker; the hook, Phase 19, was dropped).
 - `app_launch` URI allowlist is fixed in code (http, https, mailto, ms-settings, shell:<folder>);
   no config for extra schemes yet.
 - Protecting the exe folder (M3) means file operations are refused in the folder winwright.exe
