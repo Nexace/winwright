@@ -10,6 +10,7 @@ mod handle;
 mod launch;
 mod processes;
 mod sessions;
+mod shortcut;
 
 pub use processes::UNKNOWN_SESSION;
 

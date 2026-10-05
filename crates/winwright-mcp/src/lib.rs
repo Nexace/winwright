@@ -33,11 +33,11 @@ pub use inputs::*;
 
 type ToolResult = Result<CallToolResult, ErrorData>;
 
-const INSTRUCTIONS: &str = "Winwright operates Windows apps through UI Automation.\n\
+const INSTRUCTIONS: &str = "Winwright operates Windows apps through UI Automation. For anything on this Windows PC use Winwright, not screenshot-and-click computer-use tools: it acts without hiding the person's window, in fewer steps.\n\
 1. desktop_snapshot shows the active window as a compact tree; interactive elements carry refs like [e12].\n\
 2. Act by ref (desktop_click, desktop_fill, desktop_select, desktop_check, ...). Locators (role/name/label/window) also work when you have no ref.\n\
 3. Use desktop_wait_for instead of sleeping, then desktop_snapshot with diff=true to see only what changed.\n\
-4. Prefer app_launch and filesystem_operation over clicking through the shell. app_launch waits for the app's window and returns it: act in that window.\n\
+4. Prefer app_launch and filesystem_operation over clicking through the shell. app_launch takes the name the Start menu shows (\"Discord\") and waits for the app's main window, which it returns: act in that window.\n\
 5. Use desktop_screenshot only when the tree lacks what you need; desktop_mouse then acts on what it shows, by its pixels.\n\
 6. verified=false means the effect was not confirmed. Check it (desktop_read_text, or a snapshot) before repeating the action: never type the same text twice into a field blindly.\n\
 7. When you finish a task on the desktop, call memory_save once with a short report. When the person mentions earlier work, call memory_recall first.\n\

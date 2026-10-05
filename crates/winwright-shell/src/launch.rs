@@ -78,10 +78,7 @@ impl Plan {
     /// What will be started, in full, for the person approving it: the program path, or the
     /// URI, folder or file the shell opens.
     pub(crate) fn target_text(&self) -> String {
-        match &self.target {
-            Target::Process(path) => path.display().to_string(),
-            Target::Shell(target) => target.to_string_lossy().into_owned(),
-        }
+        target_text(&self.target)
     }
 
     pub(crate) fn kind(&self) -> &'static str {
@@ -158,17 +155,49 @@ pub(crate) fn plan(request: &LaunchRequest) -> WinwrightResult<Plan> {
                 .to_owned(),
         });
     }
-    let target = classify(app, request.working_dir.as_deref())?;
-    if matches!(target, Target::Shell(_)) && !request.args.is_empty() {
+    let (target, args, working_dir) = match classify(app, request.working_dir.as_deref()) {
+        Ok(target) => (target, request.args.clone(), request.working_dir.clone()),
+        // A name as the Start menu shows it ("Discord", "Adobe Lightroom Classic"): what its
+        // shortcut starts, judged as that program.
+        Err(not_found) if is_bare_name(app) => match crate::shortcut::find(app)? {
+            Some(link) => {
+                let shown = link.target.display().to_string();
+                let target = classify(&shown, None)?;
+                let mut args = link.args;
+                args.extend(request.args.iter().cloned());
+                (target, args, request.working_dir.clone().or(link.dir))
+            }
+            None => return Err(not_found),
+        },
+        Err(e) => return Err(e),
+    };
+    if matches!(target, Target::Shell(_)) && !args.is_empty() {
         return Err(WinwrightError::invalid(format!(
             "arguments can only be passed to an executable; `{app}` opens with its default handler"
         )));
     }
+    if requests_elevation(&target_text(&target), &args) {
+        return Err(WinwrightError::ActionBlocked {
+            reason: "Winwright never requests elevation (runas); start elevated tools yourself"
+                .to_owned(),
+        });
+    }
     Ok(Plan {
         target,
-        args: request.args.clone(),
-        working_dir: request.working_dir.clone(),
+        args,
+        working_dir,
     })
+}
+
+fn is_bare_name(app: &str) -> bool {
+    !app.contains(['\\', '/', ':'])
+}
+
+fn target_text(target: &Target) -> String {
+    match target {
+        Target::Process(path) => path.display().to_string(),
+        Target::Shell(target) => target.to_string_lossy().into_owned(),
+    }
 }
 
 /// `scheme` of `scheme:rest` when it is a URI: at least two characters (so `C:\…` is a drive,
@@ -214,8 +243,8 @@ pub(crate) fn classify(app: &str, working_dir: Option<&Path>) -> WinwrightResult
         }
         // Never left to ShellExecute: its own search tries the current folder and `.bat`/`.lnk`.
         return Err(WinwrightError::invalid(format!(
-            "`{app}` was not found in System32, the Windows folder, PATH, or App Paths; pass \
-             its full path"
+            "`{app}` was not found in System32, the Windows folder, PATH, App Paths or the Start \
+             menu; pass its full path"
         )));
     }
 

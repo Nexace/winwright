@@ -923,7 +923,8 @@ impl SessionInput {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LaunchInput {
-    /// notepad.exe, msedge, a program path, a folder, or a document/image/media file. URIs:
+    /// A name as the Start menu shows it (Discord, Adobe Lightroom Classic), notepad.exe, msedge,
+    /// a program path, a folder, or a document/image/media file. URIs:
     /// http(s), mailto, ms-settings, shell:<folder>. Other files (shortcuts, scripts): start
     /// the program that opens them with the file in `args`.
     pub app: String,

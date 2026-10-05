@@ -209,7 +209,8 @@ fn with_args(args: &[String]) -> String {
 /// How long app_launch waits for the app's window, and then for the app to finish starting:
 /// keys sent the moment a window appears can land while it is still loading (Notepad
 /// restoring its tabs garbled typed text that way).
-const LAUNCH_WINDOW_WAIT: Duration = Duration::from_secs(5);
+/// Apps that check for updates first (Discord, Slack) take several seconds.
+const LAUNCH_WINDOW_WAIT: Duration = Duration::from_secs(12);
 const LAUNCH_SETTLE: Duration = Duration::from_millis(500);
 /// An app that reuses a window it already had (a new tab) opens no new one: after this long
 /// without one, its foreground window counts.
@@ -252,9 +253,10 @@ pub(crate) fn proposed(
 }
 
 impl Engine {
-    /// The window a launch opened: a new titled top-level window (the one in front, when
-    /// several appeared), or after a while the front window if it belongs to the launched
-    /// program. Waits a moment more once found, so the app is ready for input.
+    /// The window a launch opened: a new titled top-level window (the launched program's first,
+    /// then the one in front), or after a while the front window if it belongs to the launched
+    /// program. Waits a moment more once found, so the app is ready for input; a window gone by
+    /// then (an updater's splash) is passed over for the next one.
     async fn launched_window(
         &self,
         before: &HashSet<u64>,
@@ -263,13 +265,19 @@ impl Engine {
     ) -> Option<WindowInfo> {
         let started = Instant::now();
         let deadline = started + LAUNCH_WINDOW_WAIT.min(ctx.remaining());
+        let mut gone = HashSet::new();
         loop {
             let windows = self.windows.list_windows().unwrap_or_default();
             let mut opened: Vec<&WindowInfo> = windows
                 .iter()
-                .filter(|w| !before.contains(&w.hwnd) && !w.title.is_empty() && !w.minimized)
+                .filter(|w| {
+                    !before.contains(&w.hwnd)
+                        && !gone.contains(&w.hwnd)
+                        && !w.title.is_empty()
+                        && !w.minimized
+                })
                 .collect();
-            opened.sort_by_key(|w| !w.foreground);
+            opened.sort_by_key(|w| (program_stem(&w.process_name) != program, !w.foreground));
             let reused = || {
                 (started.elapsed() >= LAUNCH_REUSE_AFTER)
                     .then(|| {
@@ -282,7 +290,10 @@ impl Engine {
             if let Some(found) = opened.first().copied().or_else(reused) {
                 let hwnd = found.hwnd;
                 tokio::time::sleep(LAUNCH_SETTLE.min(ctx.remaining())).await;
-                return self.windows.window(hwnd).ok().flatten();
+                if let Some(window) = self.windows.window(hwnd).ok().flatten() {
+                    return Some(window);
+                }
+                gone.insert(hwnd);
             }
             if Instant::now() >= deadline || ctx.cancel.is_cancelled() {
                 return None;

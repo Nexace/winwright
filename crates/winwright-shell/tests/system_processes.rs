@@ -212,3 +212,35 @@ async fn launch_opens_a_settings_uri() {
         .unwrap();
     assert_eq!(result.method, "shell");
 }
+
+#[test]
+fn start_menu_names_resolve_to_the_program_their_shortcut_starts() {
+    let processes = SystemProcesses::new();
+    let resolve = |app: &str| {
+        processes.resolve_launch(&LaunchRequest {
+            app: app.to_owned(),
+            args: Vec::new(),
+            working_dir: None,
+        })
+    };
+    // Every Windows has these Start menu entries; none is a program file on PATH.
+    let found = [
+        "Windows PowerShell",
+        "Character Map",
+        "Task Manager",
+        "Discord",
+    ]
+    .into_iter()
+    .filter_map(|name| resolve(name).ok().map(|program| (name, program)))
+    .collect::<Vec<_>>();
+    // A bare build server may have none of them; this PC resolves them all.
+    eprintln!("resolved: {found:?}");
+    for (name, program) in &found {
+        assert!(
+            program.to_ascii_lowercase().ends_with(".exe"),
+            "{name} -> {program}"
+        );
+    }
+    let missing = resolve("No Such App 7f3a").unwrap_err().to_string();
+    assert!(missing.contains("Start menu"), "{missing}");
+}
