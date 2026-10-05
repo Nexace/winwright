@@ -94,7 +94,7 @@ fn render_snapshot(s: &DesktopSnapshot) -> String {
     out.push('\n');
     out.push_str(s.diff.as_deref().unwrap_or(&s.tree));
     if s.truncated {
-        out.push_str("(truncated)\n");
+        out.push_str("(truncated: snapshot a window or a ref's subtree, or raise maxNodes)\n");
     }
     for w in &s.warnings {
         out.push_str(&format!("warning: {w}\n"));
@@ -103,7 +103,15 @@ fn render_snapshot(s: &DesktopSnapshot) -> String {
 }
 
 fn render_found(f: &FindResult) -> String {
-    let mut out = format!("{} match(es)\n", f.count);
+    let shown = f.matches.len() as u32;
+    let mut out = if f.count > shown {
+        format!(
+            "{} match(es), first {shown} shown; narrow with role/name/window or raise limit\n",
+            f.count
+        )
+    } else {
+        format!("{} match(es)\n", f.count)
+    };
     for m in &f.matches {
         out.push_str(&format!("{} {}", m.reference, m.path));
         if !m.automation_id.is_empty() {
@@ -592,7 +600,9 @@ impl WinwrightMcp {
     }
 
     #[tool(
-        description = "Launch an app (notepad.exe), shell URI (ms-settings:display) or folder path. Prefer this over clicking through the Start menu."
+        description = "Launch an app by the name the Start menu shows (Discord, WhatsApp, Photos), a program (notepad.exe), \
+        a shell URI (ms-settings:display) or a folder. Waits for the app's main window and returns it: act in that window. \
+        Prefer this over clicking through the Start menu."
     )]
     async fn app_launch(&self, Parameters(input): Parameters<LaunchInput>) -> ToolResult {
         Ok(
@@ -633,12 +643,26 @@ impl WinwrightMcp {
         })
     }
 
-    #[tool(description = "List running processes (pid, name, integrity level).")]
-    async fn process_list(&self) -> ToolResult {
+    #[tool(
+        description = "List running processes (pid, name, integrity level), optionally only those whose name contains `name`."
+    )]
+    async fn process_list(&self, Parameters(input): Parameters<ProcessListInput>) -> ToolResult {
         self.activity.touch();
+        let wanted = input.name.as_deref().map(str::to_lowercase);
+        let limit = input.limit.unwrap_or(100).max(1);
         Ok(match self.engine.process_list() {
-            Ok(list) => text(
-                list.iter()
+            Ok(list) => {
+                let matching: Vec<_> = list
+                    .iter()
+                    .filter(|p| {
+                        wanted
+                            .as_deref()
+                            .is_none_or(|w| p.name.to_lowercase().contains(w))
+                    })
+                    .collect();
+                let mut lines: Vec<String> = matching
+                    .iter()
+                    .take(limit)
                     .map(|p| {
                         format!(
                             "{} {} {}",
@@ -647,9 +671,15 @@ impl WinwrightMcp {
                             p.integrity.as_deref().unwrap_or("-")
                         )
                     })
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            ),
+                    .collect();
+                if matching.len() > limit {
+                    lines.push(format!(
+                        "... {} more; pass `name` to narrow",
+                        matching.len() - limit
+                    ));
+                }
+                text(lines.join("\n"))
+            }
             Err(e) => fail(e),
         })
     }
@@ -794,7 +824,7 @@ pub async fn serve_stdio(
     engine: Arc<Engine>,
     idle: Option<Duration>,
 ) -> Result<Ended, Box<dyn std::error::Error + Send + Sync>> {
-    let server = WinwrightMcp::new(engine)?;
+    let server = WinwrightMcp::new(Arc::clone(&engine))?;
     let activity = Arc::clone(&server.activity);
     // The timer runs from the start: a client that connects and never sends anything (or
     // never connects at all) must not keep the process alive either.
@@ -805,7 +835,16 @@ pub async fn serve_stdio(
         loop {
             let idle_for = activity.idle_for();
             if idle_for >= limit {
-                return;
+                // Quitting would end the programs the person runs through process_session (a
+                // dev server): they keep it alive.
+                let running = engine
+                    .session_list()
+                    .is_ok_and(|sessions| sessions.iter().any(|s| s.running));
+                if !running {
+                    return;
+                }
+                activity.touch();
+                continue;
             }
             tokio::time::sleep((limit - idle_for).max(Duration::from_secs(1))).await;
         }

@@ -218,7 +218,16 @@ enum Named {
 /// The Start menu entry `app` names: shortcuts and Store apps together, so an exact name in
 /// either beats a partial one in the other.
 fn by_start_menu_name(app: &str) -> WinwrightResult<Option<Named>> {
-    let mut entries: Vec<(String, Named)> = crate::shortcut::links()
+    let links = crate::shortcut::links();
+    // The usual case, a shortcut's exact name, needs no look at the Store apps.
+    let wanted = app.trim();
+    if let Some((_, path)) = links
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(wanted))
+    {
+        return Ok(Some(Named::Link(path.clone())));
+    }
+    let mut entries: Vec<(String, Named)> = links
         .into_iter()
         .map(|(name, path)| (name, Named::Link(path)))
         .collect();

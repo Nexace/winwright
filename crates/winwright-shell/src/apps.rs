@@ -45,8 +45,30 @@ fn name(item: &IShellItem, kind: SIGDN) -> Option<String> {
     }
 }
 
+/// How long the app list is reused: one launch looks it up several times (the prompt, the
+/// launch), and installing an app is rare.
+const LIST_REUSE: std::time::Duration = std::time::Duration::from_secs(30);
+
+type AppList = Vec<(String, String)>;
+static LISTED: std::sync::Mutex<Option<(std::time::Instant, AppList)>> =
+    std::sync::Mutex::new(None);
+
 /// Every packaged app in the Start menu's "All apps": (display name, AppUserModelID).
-pub(crate) fn packaged_apps() -> WinwrightResult<Vec<(String, String)>> {
+pub(crate) fn packaged_apps() -> WinwrightResult<AppList> {
+    let mut listed = LISTED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((at, apps)) = listed.as_ref()
+        && at.elapsed() < LIST_REUSE
+    {
+        return Ok(apps.clone());
+    }
+    let apps = list_packaged_apps()?;
+    *listed = Some((std::time::Instant::now(), apps.clone()));
+    Ok(apps)
+}
+
+fn list_packaged_apps() -> WinwrightResult<AppList> {
     with_com(|| {
         // SAFETY: COM calls on interfaces owned by this thread.
         unsafe {

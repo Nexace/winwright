@@ -441,7 +441,7 @@ impl Worker {
             seen: HashSet::new(),
         };
         let mark = self.slots.mark();
-        let root = self.walk(root, 0, &mut walk).inspect_err(|_| {
+        let root = self.walk(root, None, 0, &mut walk).inspect_err(|_| {
             // A cancelled or failed walk drops its partial tree: free the slots it stored.
             self.slots.release_since(mark);
         })?;
@@ -453,13 +453,16 @@ impl Worker {
     }
 
     /// `el` must carry cached properties (and cached children, if it will be descended).
+    /// `known`: the element's properties when the caller has just read them (each is a set of
+    /// cross-process calls, so they are not read twice).
     fn walk(
         &mut self,
         el: IUIAutomationElement,
+        known: Option<UiProps>,
         depth: u32,
         walk: &mut Walk,
     ) -> WinwrightResult<UiNode> {
-        let mut props = read_props(&el);
+        let mut props = known.unwrap_or_else(|| read_props(&el));
         read_value(&el, &mut props);
         walk.count += 1;
         if !props.runtime_id.is_empty() {
@@ -522,7 +525,8 @@ impl Worker {
                     }
                 }
             };
-            node.children.push(self.walk(child, depth + 1, walk)?);
+            node.children
+                .push(self.walk(child, Some(child_props), depth + 1, walk)?);
         }
         // `children_total` is the provider's own count (offscreen and uncaptured included);
         // only the node budget, depth limit, or deadline mark the whole tree truncated.

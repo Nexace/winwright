@@ -916,6 +916,15 @@ impl GuideInput {
     }
 }
 
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcessListInput {
+    /// Only processes whose name contains this (case-insensitive), e.g. "discord".
+    pub name: Option<String>,
+    /// At most this many lines (default 100).
+    pub limit: Option<usize>,
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TerminateInput {
