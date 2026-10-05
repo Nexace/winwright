@@ -1304,7 +1304,7 @@ impl Engine {
         if let Some(w) = r.window
             && self.windows.foreground_window()?.map(|f| f.hwnd) != Some(w)
         {
-            let _ = self.windows.focus_window(w);
+            let _ = self.focus_window_off_thread(w).await;
         }
         let out = self.pattern(r, UiPatternAction::SetFocus, ctx).await?;
         if let Some(after) = out.props_after.filter(|a| a.focused) {
@@ -1913,7 +1913,7 @@ impl Engine {
             && let Some(window) = r.window
             && self.windows.foreground_window()?.map(|w| w.hwnd) != Some(window)
         {
-            let _ = self.windows.focus_window(window);
+            let _ = self.focus_window_off_thread(window).await;
         }
         if was_collapsed {
             // Many combo boxes only materialize their items while open.
@@ -2237,7 +2237,7 @@ impl Engine {
         let hwnd = window.hwnd;
         let mut warnings = Vec::new();
         match &action {
-            WindowAction::Focus { .. } => self.windows.focus_window(hwnd)?,
+            WindowAction::Focus { .. } => self.focus_window_off_thread(hwnd).await?,
             WindowAction::Move { .. }
             | WindowAction::Resize { .. }
             | WindowAction::SetBounds { .. } => self

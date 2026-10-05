@@ -360,6 +360,18 @@ impl Engine {
         }
     }
 
+    /// Brings a window forward on a blocking thread: Windows may refuse at first, and the retries
+    /// wait, which must not hold up the server's single async thread.
+    pub(crate) async fn focus_window_off_thread(&self, hwnd: u64) -> WinwrightResult<()> {
+        let windows = Arc::clone(&self.windows);
+        tokio::task::spawn_blocking(move || windows.focus_window(hwnd))
+            .await
+            .map_err(|e| WinwrightError::BackendUnavailable {
+                backend: "windows".into(),
+                reason: format!("focusing a window failed: {e}"),
+            })?
+    }
+
     /// Overlays are refused while a confirmation dialog is open: one could cover it, or label
     /// its buttons to steer the answer.
     pub(crate) fn ensure_no_confirmation_open(&self) -> WinwrightResult<()> {
