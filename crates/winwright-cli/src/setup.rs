@@ -495,8 +495,8 @@ mod tests {
         assert!(edit_codex("", Some(r"C:\it's\winwright.exe")).is_err());
 
         // A header with spacing or a comment is still found and replaced, never duplicated.
-        let commented = format!("[ mcp_servers.\"winwright\" ] # mine\ncommand = 'old.exe'\n");
-        let fixed = written(edit_codex(&commented, Some(EXE)));
+        let commented = "[ mcp_servers.\"winwright\" ] # mine\ncommand = 'old.exe'\n";
+        let fixed = written(edit_codex(commented, Some(EXE)));
         assert_eq!(fixed.matches("winwright]").count(), 1, "{fixed}");
         // Dotted keys are not parsed: refused rather than doubled.
         let dotted = "mcp_servers.winwright.command = 'old.exe'\n";
