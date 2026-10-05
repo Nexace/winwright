@@ -158,7 +158,7 @@ fn load(file: &Path) -> WinwrightResult<(String, Encoding)> {
 /// The person is asked before secrets are read or written, judging the path as requested. One
 /// that reaches a secret only through a link or junction is refused, so the question is asked
 /// about the real path.
-fn no_hidden_secret(requested: &Path, resolved: &Path) -> WinwrightResult<()> {
+pub(crate) fn no_hidden_secret(requested: &Path, resolved: &Path) -> WinwrightResult<()> {
     if is_secret_path(resolved) && !is_secret_path(requested) {
         return Err(WinwrightError::ActionBlocked {
             reason: format!(
@@ -342,7 +342,9 @@ pub(crate) fn grep(
         if !secret_root && is_secret_path(path) {
             return Walk::SkipFolder;
         }
+        // A file link is read through to its target, past the secret and size checks.
         if is_directory(meta)
+            || is_reparse_point(meta)
             || meta.len() > MAX_TEXT_FILE_BYTES
             || glob.as_ref().is_some_and(|g| {
                 !g.matches(&path.file_name().unwrap_or_default().to_string_lossy())

@@ -40,6 +40,15 @@ const DESTRUCTIVE: &[&str] = &[
     "deactivate",
     "cancel subscription",
     "unpublish",
+    // Ending the session loses everyone's unsaved work.
+    "shut down",
+    "shutdown",
+    "restart",
+    "restart now",
+    "sign out",
+    "log off",
+    "log out",
+    "hibernate",
 ];
 
 /// Phrases that spend money or change security. Judged with the destructive ones, so even
@@ -215,8 +224,24 @@ fn split_camel(id: &str) -> String {
 
 /// Folders whose contents are secrets wherever they are copied: browser profiles and app
 /// tokens (AppData), SSH, cloud and cluster credentials.
+/// Also the AI apps' own settings (an MCP server or hook entry there runs code) and PowerShell
+/// profiles (they run at every start), so writing them always asks.
 const SECRET_FOLDERS: &[&str] = &[
-    "appdata", ".ssh", ".aws", ".azure", ".gnupg", ".kube", ".docker",
+    "appdata",
+    ".ssh",
+    ".aws",
+    ".azure",
+    ".gnupg",
+    ".kube",
+    ".docker",
+    ".claude",
+    ".codex",
+    ".cursor",
+    ".gemini",
+    ".codeium",
+    "opencode",
+    "powershell",
+    "windowspowershell",
 ];
 /// File names that hold credentials.
 const SECRET_FILES: &[&str] = &[
@@ -249,7 +274,7 @@ pub fn transfer_risk(from: &Path, to: &Path) -> ActionRisk {
         .components()
         .filter(|c| matches!(c, Component::Normal(_)))
         .count();
-    if !same_volume || is_secret_path(from) || depth <= 2 {
+    if !same_volume || is_secret_path(from) || is_secret_path(to) || depth <= 2 {
         ActionRisk::Sensitive
     } else {
         ActionRisk::Normal
@@ -462,6 +487,29 @@ pub fn opened_capability(process: &str, name: &str) -> Option<Capability> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn ai_app_settings_and_shell_profiles_count_as_secret() {
+        for path in [
+            r"C:\Users\a\.claude\settings.json",
+            r"C:\Users\a\.codex\config.toml",
+            r"C:\Users\a\.cursor\mcp.json",
+            r"C:\Users\a\.config\opencode\opencode.json",
+            r"C:\Users\a\Documents\PowerShell\Microsoft.PowerShell_profile.ps1",
+        ] {
+            assert!(is_secret_path(Path::new(path)), "{path}");
+        }
+        assert!(!is_secret_path(Path::new(
+            r"C:\Users\a\Documents\notes.txt"
+        )));
+        // Copying into one is judged by where it goes too.
+        let to_ssh = transfer_risk(
+            Path::new(r"C:\Users\a\Documents\work\x"),
+            Path::new(r"C:\Users\a\.ssh\authorized_keys"),
+        );
+        assert_eq!(to_ssh, ActionRisk::Sensitive);
+    }
+
     use super::*;
 
     #[test]

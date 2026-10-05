@@ -315,6 +315,11 @@ pub trait ProcessService: Send + Sync {
 
     /// What `launch` would start, without starting it: the resolved program path, or the URI,
     /// folder or file the shell opens. Fails as `launch` would.
+    /// Every argument a launch passes, a Start menu shortcut's own included, for the prompt.
+    fn launch_args(&self, request: &LaunchRequest) -> WinwrightResult<Vec<String>> {
+        Ok(request.args.clone())
+    }
+
     fn resolve_launch(&self, request: &LaunchRequest) -> WinwrightResult<String> {
         Ok(request.app.clone())
     }

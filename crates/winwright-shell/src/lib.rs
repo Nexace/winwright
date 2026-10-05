@@ -80,6 +80,10 @@ impl ProcessService for SystemProcesses {
         launch::plan(request).map(|plan| plan.target_text())
     }
 
+    fn launch_args(&self, request: &LaunchRequest) -> WinwrightResult<Vec<String>> {
+        launch::plan(request).map(|plan| plan.args().to_vec())
+    }
+
     fn resolve_program(&self, request: &ExecRequest) -> WinwrightResult<String> {
         exec::resolve_program(request).map(|path| path.display().to_string())
     }

@@ -232,11 +232,11 @@ fn hotkey_registration_reports_conflicts() {
     let taken = other.hotkeys.register(&chord, Box::new(|| {})).unwrap();
     other.hotkeys.unregister(taken).unwrap();
 
-    let stop = ui
-        .hotkeys
-        .register_emergency_stop(None, Box::new(|| {}))
-        .unwrap();
-    ui.hotkeys.unregister(stop).unwrap();
+    // A running `winwright mcp` (an AI app's) rightly holds the emergency stop already.
+    match ui.hotkeys.register_emergency_stop(None, Box::new(|| {})) {
+        Ok(stop) => ui.hotkeys.unregister(stop).unwrap(),
+        Err(err) => assert!(err.to_string().contains("another application"), "{err}"),
+    }
 
     let bad = ui
         .hotkeys

@@ -126,7 +126,37 @@ fn shown_input(text: &str) -> String {
 }
 
 /// What a file operation needs and how risky it is.
+/// A share (`\\server\share`): touching it hands the server the person's sign-in.
+fn on_share(path: &std::path::Path) -> bool {
+    let text = path.as_os_str().to_string_lossy();
+    text.starts_with(r"\\") || text.starts_with("//")
+}
+
 fn file_risk(op: &FileOperation) -> (Capability, ActionRisk) {
+    let (capability, risk) = file_risk_by_kind(op);
+    let paths: Vec<&std::path::Path> = match op {
+        FileOperation::Copy { from, to, .. } | FileOperation::Move { from, to, .. } => {
+            vec![from, to]
+        }
+        FileOperation::KnownFolder { .. } => Vec::new(),
+        FileOperation::Search { root, .. } | FileOperation::Grep { root, .. } => vec![root],
+        FileOperation::List { path, .. }
+        | FileOperation::Metadata { path }
+        | FileOperation::Rename { path, .. }
+        | FileOperation::Delete { path }
+        | FileOperation::CreateDirectory { path }
+        | FileOperation::Read { path, .. }
+        | FileOperation::Write { path, .. }
+        | FileOperation::Edit { path, .. } => vec![path],
+    };
+    if paths.into_iter().any(on_share) {
+        (capability, ActionRisk::Destructive)
+    } else {
+        (capability, risk)
+    }
+}
+
+fn file_risk_by_kind(op: &FileOperation) -> (Capability, ActionRisk) {
     match op {
         // A secret shown to the model cannot be taken back: always ask.
         FileOperation::Read { path, .. } | FileOperation::Grep { root: path, .. }
@@ -156,6 +186,15 @@ fn file_risk(op: &FileOperation) -> (Capability, ActionRisk) {
         }
         FileOperation::Copy { overwrite, .. } | FileOperation::Move { overwrite, .. }
             if *overwrite =>
+        {
+            (Capability::FileWrite, ActionRisk::Destructive)
+        }
+        // Into a secret place (`.ssh\authorized_keys`, `.aws\credentials`): as risky as writing it.
+        FileOperation::Copy { to, .. } | FileOperation::Move { to, .. } if is_secret_path(to) => {
+            (Capability::FileWrite, ActionRisk::Destructive)
+        }
+        FileOperation::Rename { path, new_name }
+            if is_secret_path(path) || is_secret_path(&path.with_file_name(new_name)) =>
         {
             (Capability::FileWrite, ActionRisk::Destructive)
         }
@@ -503,7 +542,14 @@ impl Engine {
             Some(request.app.clone()),
         );
         let target = action.target.clone();
-        let summary = format!("Launch {shown}{}", with_args(&request.args));
+        // Arguments a shortcut adds are shown too: the person approves the whole command line.
+        let args = match self.processes.as_deref() {
+            Some(p) => p
+                .launch_args(&request)
+                .unwrap_or_else(|_| request.args.clone()),
+            None => request.args.clone(),
+        };
+        let summary = format!("Launch {shown}{}", with_args(&args));
         let program = LaunchedNames::new(shown, &request.app);
         let before: HashSet<u64> = self
             .windows
@@ -975,6 +1021,24 @@ mod tests {
         let long = "x".repeat(MAX_PROMPT_ARGS + 5);
         let shown = shown_input(&long);
         assert!(shown.ends_with("(5 more characters)"), "{shown}");
+    }
+
+    #[test]
+    fn secret_destinations_and_shares_always_ask() {
+        let risk = |json: &str| super::file_risk(&serde_json::from_str(json).unwrap()).1;
+        for json in [
+            r#"{"op":"copy","from":"C:\\Users\\a\\Documents\\work\\k","to":"C:\\Users\\a\\.ssh\\authorized_keys"}"#,
+            r#"{"op":"move","from":"C:\\Users\\a\\Documents\\work\\k","to":"C:\\Users\\a\\.claude\\settings.json"}"#,
+            r#"{"op":"rename","path":"C:\\Users\\a\\Documents\\x.txt","newName":".env"}"#,
+            r#"{"op":"read","path":"\\\\server\\share\\notes.txt"}"#,
+            r#"{"op":"list","path":"\\\\server\\share"}"#,
+        ] {
+            assert_eq!(risk(json), ActionRisk::Destructive, "{json}");
+        }
+        assert_eq!(
+            risk(r#"{"op":"read","path":"C:\\Users\\a\\Documents\\notes.txt"}"#),
+            ActionRisk::ReadOnly
+        );
     }
 
     #[test]

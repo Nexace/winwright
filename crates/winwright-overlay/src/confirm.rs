@@ -43,14 +43,14 @@ use windows::Win32::UI::WindowsAndMessaging::{
     BN_CLICKED, BS_DEFPUSHBUTTON, BS_PUSHBUTTON, CreateWindowExW, DC_HASDEFID, DM_GETDEFID,
     DefWindowProcW, DestroyIcon, DestroyWindow, DispatchMessageW, FLASHW_ALL, FLASHW_TIMERNOFG,
     FLASHWINFO, FlashWindowEx, GetCursorPos, GetForegroundWindow, GetMessageW, HICON, HMENU,
-    ICON_BIG, ICON_SMALL, IDCANCEL, IsDialogMessageW, KillTimer, MSG, PostMessageW,
-    PostQuitMessage, SM_CXICON, SM_CXSMICON, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOZORDER,
-    SendMessageW, SetTimer, SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage,
-    WA_INACTIVE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_CLOSE, WM_COMMAND, WM_DESTROY,
-    WM_DPICHANGED, WM_DRAWITEM, WM_ERASEBKGND, WM_KEYDOWN, WM_KEYFIRST, WM_KEYLAST, WM_MOUSEFIRST,
-    WM_MOUSELAST, WM_NOTIFY, WM_PAINT, WM_SETFONT, WM_SETICON, WM_SYSKEYDOWN, WM_TIMER, WS_CAPTION,
-    WS_CHILD, WS_CLIPCHILDREN, WS_EX_APPWINDOW, WS_EX_TOPMOST, WS_OVERLAPPED, WS_SYSMENU,
-    WS_TABSTOP, WS_VISIBLE,
+    HWND_TOPMOST, ICON_BIG, ICON_SMALL, IDCANCEL, InSendMessageEx, IsDialogMessageW, KillTimer,
+    MSG, PostMessageW, PostQuitMessage, SM_CXICON, SM_CXSMICON, SW_SHOWNORMAL, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SendMessageW, SetTimer, SetWindowPos, SetWindowTextW,
+    ShowWindow, TranslateMessage, WA_INACTIVE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE,
+    WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_DPICHANGED, WM_DRAWITEM, WM_ERASEBKGND, WM_KEYDOWN,
+    WM_KEYFIRST, WM_KEYLAST, WM_MOUSEFIRST, WM_MOUSELAST, WM_NOTIFY, WM_PAINT, WM_SETFONT,
+    WM_SETICON, WM_SYSKEYDOWN, WM_TIMER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_EX_APPWINDOW,
+    WS_EX_TOPMOST, WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 use windows::core::{HSTRING, PCWSTR, w};
 use winwright_contracts::WinwrightResult;
@@ -62,7 +62,7 @@ use winwright_win32::Win32Windows;
 use crate::platform;
 use crate::theme::{self, ButtonKind, ButtonState, Fonts, Palette, glyph};
 
-const CLASS: PCWSTR = w!("WinwrightConfirm");
+pub(crate) const CLASS: PCWSTR = w!("WinwrightConfirm");
 const TITLE: PCWSTR = w!("Winwright: confirm action");
 /// IDCANCEL, so Esc denies through IsDialogMessage.
 const ID_DENY: i32 = IDCANCEL.0;
@@ -1033,7 +1033,13 @@ unsafe extern "system" fn dialog_proc(
                     ID_ALLOW
                         if with_dialog(|d| {
                             let from_allow = lparam.0 == d.allow.0 as isize;
-                            allow_counts(d.armed, code, from_allow, KEYS.get(), ORIGIN.get())
+                            // A click another thread sent (BM_CLICK, a forged WM_COMMAND) while a
+                            // real input's modal loop runs (a title-bar drag) inherits its
+                            // hardware origin; a real click is never inside another thread's send.
+                            // SAFETY: no arguments; reads this thread's message state.
+                            let sent = unsafe { InSendMessageEx(None) } != 0;
+                            !sent
+                                && allow_counts(d.armed, code, from_allow, KEYS.get(), ORIGIN.get())
                         }) == Some(true) =>
                     {
                         finish(hwnd, true)
@@ -1048,6 +1054,21 @@ unsafe extern "system" fn dialog_proc(
                     TIMER_TICK => {
                         if with_dialog(Dialog::tick) == Some(true) {
                             finish(hwnd, false);
+                        } else {
+                            // Stay above anything topmost that appeared since (overlays of
+                            // another Winwright process, which cannot see this dialog).
+                            // SAFETY: our own window; nothing moves, resizes or activates.
+                            let _ = unsafe {
+                                SetWindowPos(
+                                    hwnd,
+                                    Some(HWND_TOPMOST),
+                                    0,
+                                    0,
+                                    0,
+                                    0,
+                                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                                )
+                            };
                         }
                     }
                     TIMER_ARM => {

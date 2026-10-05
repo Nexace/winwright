@@ -15,10 +15,10 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DestroyWindow, HWND_TOPMOST, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOSIZE, SWP_SHOWWINDOW, SetWindowPos, ShowWindow, ULW_ALPHA, UpdateLayeredWindow,
-    WINDOW_EX_STYLE, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_EX_TRANSPARENT, WS_POPUP,
+    CreateWindowExW, DestroyWindow, FindWindowW, HWND_TOPMOST, IsWindowVisible, SW_SHOWNOACTIVATE,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SetWindowPos, ShowWindow, ULW_ALPHA,
+    UpdateLayeredWindow, WINDOW_EX_STYLE, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 use windows::core::{PCWSTR, w};
 use winwright_contracts::geometry::{PhysicalPoint, PhysicalRect};
@@ -276,6 +276,15 @@ pub fn create_overlay(
     request: &OverlayRequest,
     glide_from: Option<PhysicalPoint>,
 ) -> WinwrightResult<Option<Created>> {
+    // Nothing is drawn while any Winwright process asks the person: an overlay could cover or
+    // label the dialog's text (each process only knows its own dialogs).
+    // SAFETY: looks a window up by class; nothing is kept.
+    if let Ok(dialog) = unsafe { FindWindowW(crate::confirm::CLASS, PCWSTR::null()) }
+        // SAFETY: any handle value is accepted.
+        && unsafe { IsWindowVisible(dialog) }.as_bool()
+    {
+        return Ok(None);
+    }
     let geometry = monitor_geometry(request.rect)?;
     let metrics = Metrics::for_dpi(geometry.dpi);
     let dc = MemoryDc::new()?;

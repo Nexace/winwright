@@ -83,6 +83,10 @@ impl Plan {
         target_text(&self.target)
     }
 
+    pub(crate) fn args(&self) -> &[String] {
+        &self.args
+    }
+
     pub(crate) fn kind(&self) -> &'static str {
         match self.target {
             Target::Shell(_) => "shell",
@@ -150,6 +154,10 @@ pub(crate) fn plan(request: &LaunchRequest) -> WinwrightResult<Plan> {
             return Err(WinwrightError::invalid(
                 "workingDir must not contain NUL characters",
             ));
+        }
+        // Even a folder check sends a server the person's credentials, before anyone approved.
+        if on_network(dir) {
+            return Err(remote_executable(dir));
         }
         if !dir.is_absolute() || !dir.is_dir() {
             return Err(WinwrightError::invalid(format!(
@@ -309,8 +317,9 @@ pub(crate) fn classify(app: &str, working_dir: Option<&Path>) -> WinwrightResult
         path = dir.join(path);
     }
     let path = std::path::absolute(&path).unwrap_or(path);
-    // Refused before touching the path: even a metadata read sends a server our credentials.
-    if on_network(&path) && is_executable(app) {
+    // Refused before touching the path: even a metadata read sends a server our credentials
+    // (this runs before the person is asked), and a document there can be anything.
+    if on_network(&path) {
         return Err(remote_executable(&path));
     }
     classify_path(path, app)
@@ -390,7 +399,8 @@ pub(crate) fn on_network(path: &Path) -> bool {
 pub(crate) fn remote_executable(path: &Path) -> WinwrightError {
     WinwrightError::ActionBlocked {
         reason: format!(
-            "{} is on a network share or drive; Winwright only starts programs from local disks",
+            "{} is on a network share or drive; Winwright only starts programs and opens files \
+             from local disks",
             path.display()
         ),
     }

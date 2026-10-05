@@ -160,6 +160,12 @@ fn validate(request: &ExecRequest) -> WinwrightResult<()> {
     for arg in &request.args {
         reject_nul("exec arguments", arg)?;
     }
+    // Even a folder check sends a server the person's credentials, before anyone approved.
+    if let Some(dir) = &request.working_dir
+        && on_network(dir)
+    {
+        return Err(remote_executable(dir));
+    }
     if let Some(dir) = &request.working_dir
         && !dir.is_dir()
     {

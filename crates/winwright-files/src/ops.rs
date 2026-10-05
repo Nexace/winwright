@@ -238,6 +238,21 @@ fn file_error(operation: &str, dest: &Path, err: &windows::core::Error) -> Winwr
     }
 }
 
+/// Where `dest` really lands once links in its folder are followed (it may not exist yet).
+fn landing(dest: &Path) -> PathBuf {
+    dest.parent()
+        .and_then(|parent| fs::canonicalize(parent).ok())
+        .zip(dest.file_name())
+        .map_or_else(|| dest.to_path_buf(), |(parent, name)| parent.join(name))
+}
+
+/// A link must not turn a plain-looking path into a secret one, at either end: the policy
+/// judged the paths as they were written.
+fn no_hidden_secrets(from: &Path, source: &Path, to: &Path, dest: &Path) -> WinwrightResult<()> {
+    crate::text::no_hidden_secret(from, source)?;
+    crate::text::no_hidden_secret(to, &landing(dest))
+}
+
 fn copy(
     from: &Path,
     to: &Path,
@@ -256,6 +271,7 @@ fn copy(
         .ok_or_else(|| WinwrightError::invalid("the source has no file name"))?;
     let dest = destination(to, name)?;
     protected.check(&dest)?;
+    no_hidden_secrets(from, &source, to, &dest)?;
     if fs::canonicalize(&dest).is_ok_and(|existing| key(&existing) == key(&source)) {
         return Err(WinwrightError::invalid(
             "source and destination are the same file",
@@ -300,6 +316,7 @@ fn move_entry(
         .to_owned();
     let dest = destination(to, &name)?;
     protected.check(&dest)?;
+    no_hidden_secrets(from, &source, to, &dest)?;
     let (source_key, dest_key) = (key(&source), key(&dest));
     if source_key == dest_key && source.file_name() == dest.file_name() {
         return Err(WinwrightError::invalid(
@@ -334,6 +351,7 @@ fn rename(path: &Path, new_name: &str, protected: &Protected) -> WinwrightResult
         .ok_or_else(|| WinwrightError::invalid("a drive root cannot be renamed"))?;
     let dest = parent.join(new_name);
     protected.check(&dest)?;
+    no_hidden_secrets(path, &source, &path.with_file_name(new_name), &dest)?;
     if source.file_name() == Some(OsStr::new(new_name)) {
         return Ok(FileResult::Path {
             path: display(&source),
