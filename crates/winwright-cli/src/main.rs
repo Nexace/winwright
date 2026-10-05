@@ -248,47 +248,144 @@ async fn serve_mcp(
     } else {
         engine
     });
-    // Weak: callbacks must not keep the engine (and its UI thread) alive.
-    let weak = Arc::downgrade(&engine);
-    let tray = native.tray.clone();
-    let tray_for_hotkey = native.tray.clone();
-    let weak_for_hotkey = Arc::downgrade(&engine);
-    if let Err(err) = native.tray.show(
-        tray_state(false),
-        Box::new(move |id| {
-            let Some(engine) = weak.upgrade() else {
-                return;
-            };
-            match id {
-                TRAY_STOP => {
-                    engine.emergency_stop();
-                    tray.update(tray_state(true));
-                }
-                TRAY_REARM => {
-                    engine.rearm();
-                    tray.update(tray_state(false));
-                }
-                TRAY_INSPECTOR => open_inspector(),
-                TRAY_AUDIT if !open_audit_log() => tray.notify(
-                    "No audit log yet",
-                    "Winwright records every AI action here once an assistant acts.",
-                ),
-                _ => {}
+    // Every AI app (and every session of one) starts its own `winwright mcp`; they share one
+    // emergency stop, and one tray icon and hotkey held by whichever runs first.
+    let stop = Arc::new(winwright_win32::shared::StopSignal::open()?);
+    let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let leader = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let coordinator = {
+        let (engine, stop, done, leader) = (
+            Arc::downgrade(&engine),
+            Arc::clone(&stop),
+            Arc::clone(&done),
+            Arc::clone(&leader),
+        );
+        let (tray, hotkeys) = (native.tray.clone(), native.hotkeys.clone());
+        std::thread::Builder::new()
+            .name("winwright-coordinator".into())
+            .spawn(move || coordinate(&engine, &stop, &done, &leader, &tray, &hotkeys))
+            .map_err(|e| WinwrightError::BackendUnavailable {
+                backend: "mcp".into(),
+                reason: format!("cannot start the coordinator thread: {e}"),
+            })?
+    };
+    let served = winwright_mcp::serve_stdio(Arc::clone(&engine), mcp_idle_timeout())
+        .await
+        .map_err(|e| WinwrightError::BackendUnavailable {
+            backend: "mcp".into(),
+            reason: e.to_string(),
+        });
+    done.store(true, std::sync::atomic::Ordering::SeqCst);
+    let _ = coordinator.join();
+    // Also on a failed handshake: an icon left behind stays in the tray until hovered.
+    if leader.load(std::sync::atomic::Ordering::SeqCst) {
+        native.tray.remove();
+    }
+    native.hotkeys.shutdown();
+    if matches!(served, Ok(winwright_mcp::Ended::Idle)) {
+        // The pending stdin read would keep the runtime from shutting down.
+        std::process::exit(0);
+    }
+    served.map(|_| ())
+}
+
+/// How often a non-leading process checks whether it should lead (the leader exited).
+const LEAD_RETRY: std::time::Duration = std::time::Duration::from_secs(2);
+/// How quickly every process follows a stop or resume.
+const STOP_POLL: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// Follows the shared stop signal in this process and, while it leads, shows the tray icon and
+/// owns the emergency-stop hotkey. Returns once `done` is set; the lead goes with it.
+fn coordinate(
+    engine: &std::sync::Weak<Engine>,
+    stop: &Arc<winwright_win32::shared::StopSignal>,
+    done: &std::sync::atomic::AtomicBool,
+    leader: &std::sync::atomic::AtomicBool,
+    tray: &winwright_overlay::TrayHost,
+    hotkeys: &winwright_overlay::HotkeyHost,
+) {
+    use std::sync::atomic::Ordering;
+    let mut lock = None;
+    let mut last_try: Option<std::time::Instant> = None;
+    let mut stopped = false;
+    while !done.load(Ordering::SeqCst) {
+        let Some(e) = engine.upgrade() else { return };
+        let now = stop.is_stopped();
+        if now != stopped {
+            stopped = now;
+            if stopped {
+                e.emergency_stop();
+            } else {
+                e.rearm();
             }
+            if lock.is_some() {
+                tray.update(tray_state(stopped));
+                if stopped {
+                    tray.notify(
+                        "Winwright stopped",
+                        "All AI actions are blocked in every app. Choose Resume in the tray menu to allow them again.",
+                    );
+                }
+            }
+        }
+        drop(e);
+        if lock.is_none() && last_try.is_none_or(|t| t.elapsed() >= LEAD_RETRY) {
+            last_try = Some(std::time::Instant::now());
+            if let Some(l) = winwright_win32::shared::LeaderLock::try_acquire() {
+                lead(engine, stop, tray, hotkeys, stopped);
+                leader.store(true, Ordering::SeqCst);
+                lock = Some(l);
+            }
+        }
+        std::thread::sleep(STOP_POLL);
+    }
+}
+
+/// The tray icon and the hotkey for every Winwright process: both act through the shared stop
+/// signal (and at once in this process).
+fn lead(
+    engine: &std::sync::Weak<Engine>,
+    stop: &Arc<winwright_win32::shared::StopSignal>,
+    tray: &winwright_overlay::TrayHost,
+    hotkeys: &winwright_overlay::HotkeyHost,
+    stopped: bool,
+) {
+    tracing::info!("leading: the tray icon and emergency stop for every Winwright process");
+    let (weak, signal, menu_tray) = (engine.clone(), Arc::clone(stop), tray.clone());
+    if let Err(err) = tray.show(
+        tray_state(stopped),
+        Box::new(move |id| match id {
+            TRAY_STOP => {
+                signal.stop();
+                if let Some(engine) = weak.upgrade() {
+                    engine.emergency_stop();
+                }
+                menu_tray.update(tray_state(true));
+            }
+            TRAY_REARM => {
+                signal.resume();
+                if let Some(engine) = weak.upgrade() {
+                    engine.rearm();
+                }
+                menu_tray.update(tray_state(false));
+            }
+            TRAY_INSPECTOR => open_inspector(),
+            TRAY_AUDIT if !open_audit_log() => menu_tray.notify(
+                "No audit log yet",
+                "Winwright records every AI action here once an assistant acts.",
+            ),
+            _ => {}
         }),
     ) {
         tracing::warn!(%err, "tray icon unavailable");
     }
-    match native.hotkeys.register_emergency_stop(
+    let (weak, signal) = (engine.clone(), Arc::clone(stop));
+    match hotkeys.register_emergency_stop(
         None,
         Box::new(move || {
-            if let Some(engine) = weak_for_hotkey.upgrade() {
+            signal.stop();
+            if let Some(engine) = weak.upgrade() {
                 engine.emergency_stop();
-                tray_for_hotkey.update(tray_state(true));
-                tray_for_hotkey.notify(
-                    "Winwright stopped",
-                    "All AI actions are blocked. Choose Resume in the tray menu to allow them again.",
-                );
             }
         }),
     ) {
@@ -298,20 +395,6 @@ async fn serve_mcp(
         ),
         Err(err) => tracing::warn!(%err, "emergency-stop hotkey unavailable"),
     }
-    let served = winwright_mcp::serve_stdio(Arc::clone(&engine), mcp_idle_timeout())
-        .await
-        .map_err(|e| WinwrightError::BackendUnavailable {
-            backend: "mcp".into(),
-            reason: e.to_string(),
-        });
-    // Also on a failed handshake: an icon left behind stays in the tray until hovered.
-    native.tray.remove();
-    native.hotkeys.shutdown();
-    if matches!(served, Ok(winwright_mcp::Ended::Idle)) {
-        // The pending stdin read would keep the runtime from shutting down.
-        std::process::exit(0);
-    }
-    served.map(|_| ())
 }
 
 /// Idle shutdown for `winwright mcp`: `WINWRIGHT_IDLE_MINUTES` (default 10, 0 = never), so

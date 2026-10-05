@@ -411,6 +411,7 @@ impl OverlayService for NativeOverlay {
 /// [`NativeOverlay::window_handle`] return `INVALID_REQUEST` there instead of deadlocking.
 /// A callback that owns a [`NativeUi`] handle keeps the thread alive; call `shutdown`
 /// explicitly in that case.
+#[derive(Clone)]
 pub struct HotkeyHost {
     ui: Arc<UiThread>,
 }

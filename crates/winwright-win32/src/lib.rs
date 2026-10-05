@@ -4,6 +4,7 @@
 mod control;
 mod dpi;
 mod process;
+pub mod shared;
 mod windows_enum;
 
 pub use control::current_integrity;
