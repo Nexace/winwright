@@ -27,10 +27,7 @@ fn entry(flavor: Flavor, exe: &str) -> Value {
 }
 
 /// The object that holds the servers, created when missing.
-fn servers<'a>(
-    root: &'a mut Map<String, Value>,
-    flavor: Flavor,
-) -> Option<&'a mut Map<String, Value>> {
+fn servers(root: &mut Map<String, Value>, flavor: Flavor) -> Option<&mut Map<String, Value>> {
     let key = match flavor {
         Flavor::McpServers => "mcpServers",
         Flavor::Opencode => "mcp",
