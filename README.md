@@ -34,7 +34,7 @@ To uninstall: `winwright setup --remove`, then delete `%LOCALAPPDATA%\Programs\W
 
 ## Use it
 
-Just ask your AI app: "open Notepad and write a shopping list", "rename the photos in
+Just ask your AI app: "open Discord and message Sam that I'm late", "rename the photos in
 Downloads by date", "what is this error dialog saying?", "show me where the export button is",
 "teach me to add a filter in Excel". The app starts `winwright mcp` itself and stops it when it
 closes: no service, no startup entry. It also quits after 10 minutes without a tool call
@@ -76,6 +76,7 @@ under `mcpServers`:
 </details>
 
 Tools: `desktop_snapshot` (use `diff: true` after actions), `desktop_find`, `desktop_click`,
+`desktop_batch` (several known steps in one call, stopping at the first that fails),
 `desktop_fill`, `desktop_type`, `desktop_press`, `desktop_select`, `desktop_check`,
 `desktop_expand`, `desktop_scroll`, `desktop_focus`, `desktop_read_text`, `desktop_wait_for`,
 `desktop_inspect`, `desktop_windows`, `window_control`, `desktop_screenshot`, `desktop_mouse`
@@ -84,7 +85,7 @@ under the point is judged like a click on it),
 `overlay_highlight` (shows you where something is: a pointer with a caption bubble at an
 element or at a spot on a screenshot), `desktop_guide` (teaches you: points at each step in
 turn and waits until you click it, or press the keys it names; it never clicks for you; while
-it waits it sees only your mouse clicks, never your keys), `overlay_clear`, `app_launch`,
+it waits it sees only your mouse clicks, never your keys), `overlay_clear`, `app_launch` (any app by the name the Start menu shows, Store apps too),
 `process_list`, `process_session` (run a
 program in the background, send it input, read its output; starting and every input ask, and
 need `allowShell`; the emergency stop ends them all), `process_terminate`
