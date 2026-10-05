@@ -11,6 +11,7 @@ use winwright_contracts::action::{
 use winwright_contracts::capture::{ImageFormat, ScreenshotRequest, ScreenshotTarget};
 use winwright_contracts::geometry::{PhysicalPoint, PhysicalRect};
 use winwright_contracts::input::MouseButton;
+use winwright_contracts::input::parse_chord;
 use winwright_contracts::locator::{ElementLocator, FindRequest, MatchMode};
 use winwright_contracts::overlay::{
     DEFAULT_SPOT_SIDE, GuideRequest, GuideStep, GuideTarget, GuideWait, HighlightRequest,
@@ -383,6 +384,73 @@ pub struct PressInput {
     pub keys: String,
     #[serde(flatten)]
     pub target: TargetFields,
+}
+
+impl PressInput {
+    pub fn action(&self) -> Result<DesktopAction> {
+        let keys = parse_chord(&self.keys).map_err(WinwrightError::invalid)?;
+        Ok(DesktopAction::Press {
+            target: self.target.optional()?,
+            keys,
+        })
+    }
+}
+
+impl FocusInput {
+    pub fn action(&self) -> Result<DesktopAction> {
+        Ok(DesktopAction::Focus {
+            target: self.target.required()?,
+        })
+    }
+}
+
+/// One step of desktop_batch: `do` names the tool, the other fields are that tool's.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(tag = "do", rename_all = "camelCase")]
+pub enum BatchStep {
+    Click(ClickInput),
+    Fill(FillInput),
+    Type(TypeInput),
+    Press(PressInput),
+    Select(SelectInput),
+    Check(CheckInput),
+    Expand(ExpandInput),
+    Scroll(ScrollInput),
+    Focus(FocusInput),
+    ReadText(ReadTextInput),
+    Mouse(MouseInput),
+    WaitFor(WaitInput),
+}
+
+pub enum BatchCall {
+    Act(Result<DesktopAction>),
+    Wait(Result<WaitRequest>),
+}
+
+impl BatchStep {
+    pub fn call(&self) -> BatchCall {
+        BatchCall::Act(match self {
+            Self::Click(i) => i.action(),
+            Self::Fill(i) => i.action(),
+            Self::Type(i) => i.action(),
+            Self::Press(i) => i.action(),
+            Self::Select(i) => i.action(),
+            Self::Check(i) => i.action(),
+            Self::Expand(i) => i.action(),
+            Self::Scroll(i) => i.action(),
+            Self::Focus(i) => i.action(),
+            Self::ReadText(i) => i.action(),
+            Self::Mouse(i) => i.action(),
+            Self::WaitFor(i) => return BatchCall::Wait(i.request()),
+        })
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchInput {
+    /// 1 to 20 steps, run in order.
+    pub steps: Vec<BatchStep>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -996,6 +1064,30 @@ mod tests {
         assert!(matches!(target.scope, SnapshotTarget::Window(_)));
         let bad: FocusInput = serde_json::from_str(r#"{}"#).unwrap();
         assert!(bad.target.required().is_err());
+    }
+
+    #[test]
+    fn batch_steps_are_the_single_tools_inputs_tagged_by_do() {
+        let batch: BatchInput = serde_json::from_str(
+            r#"{"steps": [
+                {"do": "fill", "label": "Message", "value": "hi"},
+                {"do": "press", "keys": "Enter"},
+                {"do": "waitFor", "state": "exists", "name": "hi"},
+                {"do": "click", "ref": "e3"}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(batch.steps.len(), 4);
+        assert!(matches!(
+            batch.steps[0].call(),
+            BatchCall::Act(Ok(DesktopAction::Fill { .. }))
+        ));
+        assert!(matches!(
+            batch.steps[1].call(),
+            BatchCall::Act(Ok(DesktopAction::Press { .. }))
+        ));
+        assert!(matches!(batch.steps[2].call(), BatchCall::Wait(Ok(_))));
+        assert!(serde_json::from_str::<BatchInput>(r#"{"steps": [{"do": "explode"}]}"#).is_err());
     }
 
     #[test]

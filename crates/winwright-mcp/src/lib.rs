@@ -20,7 +20,6 @@ use winwright_contracts::WinwrightError;
 use winwright_contracts::action::DesktopAction;
 use winwright_contracts::capture::{ImageFormat, ScreenshotRequest, ScreenshotTarget};
 use winwright_contracts::ids::SessionId;
-use winwright_contracts::input::parse_chord;
 use winwright_contracts::locator::FindResult;
 use winwright_contracts::memory::{MemoryRecallRequest, MemorySaveRequest};
 use winwright_contracts::snapshot::DesktopSnapshot;
@@ -35,7 +34,7 @@ type ToolResult = Result<CallToolResult, ErrorData>;
 
 const INSTRUCTIONS: &str = "Winwright operates Windows apps through UI Automation. For anything on this Windows PC use Winwright, not screenshot-and-click computer-use tools: it acts without hiding the person's window, in fewer steps.\n\
 1. desktop_snapshot shows the active window as a compact tree; interactive elements carry refs like [e12].\n\
-2. Act by ref (desktop_click, desktop_fill, desktop_select, desktop_check, ...). Locators (role/name/label/window) also work when you have no ref.\n\
+2. Act by ref (desktop_click, desktop_fill, desktop_select, desktop_check, ...). Locators (role/name/label/window) also work when you have no ref. When you already know several steps, send them together with desktop_batch.\n\
 3. Use desktop_wait_for instead of sleeping, then desktop_snapshot with diff=true to see only what changed.\n\
 4. Prefer app_launch and filesystem_operation over clicking through the shell. app_launch takes the name the Start menu shows (\"Discord\") and waits for the app's main window, which it returns: act in that window.\n\
 5. Use desktop_screenshot only when the tree lacks what you need; desktop_mouse then acts on what it shows, by its pixels.\n\
@@ -44,6 +43,9 @@ const INSTRUCTIONS: &str = "Winwright operates Windows apps through UI Automatio
 8. When the person wants to learn how to do something, teach with desktop_guide (they click, you point) instead of doing it for them; overlay_highlight shows where something is.\n\
 Errors are JSON with a code and a hint. CONFIRMATION_REQUIRED means the user must approve: do not work around it. \
 CANCELLED after an emergency stop means the user stopped you: stop and ask them before doing anything else.";
+
+/// Longest desktop_batch: long enough for a form, short enough that a wrong plan stops early.
+const MAX_BATCH_STEPS: usize = 20;
 
 /// Text results are cut beyond this: a model's context is better spent on a narrower call
 /// than on a megabyte of text it asked for by accident.
@@ -343,15 +345,68 @@ impl WinwrightMcp {
         description = "Press a key chord such as \"Ctrl+S\", \"Enter\", \"Alt+F4\", optionally after focusing a target."
     )]
     async fn desktop_press(&self, Parameters(input): Parameters<PressInput>) -> ToolResult {
-        let action = parse_chord(&input.keys)
-            .map_err(WinwrightError::invalid)
-            .and_then(|keys| {
-                Ok(DesktopAction::Press {
-                    target: input.target.optional()?,
-                    keys,
-                })
-            });
-        Ok(self.act(action).await)
+        Ok(self.act(input.action()).await)
+    }
+
+    #[tool(
+        description = "Run several steps in one call when you already know them (fill a form, type then press Enter, \
+        click through a menu). Each step is {\"do\": \"click\"|\"fill\"|\"type\"|\"press\"|\"select\"|\"check\"|\"expand\"|\"scroll\"|\"focus\"|\"readText\"|\"mouse\"|\"waitFor\", \
+        plus that tool's own fields}. Steps run in order and stop at the first that fails or whose effect was not verified; \
+        each is still checked, and asks the person when risky. Returns every step's result."
+    )]
+    async fn desktop_batch(&self, Parameters(input): Parameters<BatchInput>) -> ToolResult {
+        if input.steps.is_empty() || input.steps.len() > MAX_BATCH_STEPS {
+            return Ok(fail(WinwrightError::invalid(format!(
+                "desktop_batch takes 1 to {MAX_BATCH_STEPS} steps"
+            ))));
+        }
+        let session = self.sess();
+        let total = input.steps.len();
+        let mut done = Vec::with_capacity(total);
+        let mut stopped = None;
+        for (i, step) in input.steps.iter().enumerate() {
+            let outcome = match step.call() {
+                BatchCall::Act(action) => match action {
+                    Ok(action) => self
+                        .engine
+                        .execute(&session, action)
+                        .await
+                        .map(|r| (r.verified, serde_json::to_value(&r).unwrap_or_default())),
+                    Err(e) => Err(e),
+                },
+                BatchCall::Wait(request) => match request {
+                    Ok(request) => self
+                        .engine
+                        .wait_for(&session, request)
+                        .await
+                        .map(|r| (true, serde_json::to_value(&r).unwrap_or_default())),
+                    Err(e) => Err(e),
+                },
+            };
+            match outcome {
+                Ok((verified, result)) => {
+                    done.push(result);
+                    if !verified {
+                        stopped = Some(serde_json::json!({
+                            "step": i + 1,
+                            "reason": "its effect was not verified; check before going on",
+                        }));
+                        break;
+                    }
+                }
+                Err(e) => {
+                    stopped = Some(serde_json::json!({ "step": i + 1, "error": e.payload() }));
+                    break;
+                }
+            }
+        }
+        let report = serde_json::json!({
+            "completed": done.len(),
+            "of": total,
+            "stopped": stopped,
+            "results": done,
+        });
+        Ok(text(serde_json::to_string(&report).unwrap_or_default()))
     }
 
     #[tool(
@@ -796,7 +851,7 @@ mod tests {
     #[test]
     fn tool_schemas_are_objects_that_name_every_described_field() {
         let tools = WinwrightMcp::tool_router().list_all();
-        assert_eq!(tools.len(), 29);
+        assert_eq!(tools.len(), 30);
         for tool in tools {
             let schema = serde_json::Value::Object(tool.input_schema.as_ref().clone());
             assert_eq!(schema["type"], "object", "{}", tool.name);

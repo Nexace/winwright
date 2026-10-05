@@ -117,7 +117,7 @@ fn lists_tools_with_object_schemas() {
         assert!(names.contains(&expected), "missing {expected}: {names:?}");
     }
     assert!(
-        names.len() <= 29,
+        names.len() <= 30,
         "keep the tool surface small: {}",
         names.len()
     );
@@ -181,6 +181,32 @@ fn model_style_session_on_the_fixture() {
     assert!(!err, "{diff}");
     assert!(diff.contains("DIFF s_1 -> s_2"), "{diff}");
     assert!(diff.contains("Target clicked 1"), "{diff}");
+
+    // Known steps in one call: fill, click, then wait for the app to show the click.
+    let (err, batch) = c.call(
+        "desktop_batch",
+        json!({"steps": [
+            {"do": "fill", "label": "Name", "role": "Edit", "value": "Grace", "window": window},
+            {"do": "click", "ref": target_ref},
+            {"do": "waitFor", "state": "text", "automationId": "140", "value": "Target clicked 2", "window": window, "timeoutMs": 5000}
+        ]}),
+    );
+    assert!(!err, "{batch}");
+    let batch: Value = serde_json::from_str(&batch).unwrap();
+    assert_eq!(
+        (batch["completed"].as_u64(), batch["of"].as_u64()),
+        (Some(3), Some(3)),
+        "{batch}"
+    );
+    assert!(batch["stopped"].is_null(), "{batch}");
+    // A step that cannot run stops the batch there.
+    let (_, stopped) = c.call(
+        "desktop_batch",
+        json!({"steps": [{"do": "click", "name": "No such button 7f", "window": window}, {"do": "click", "ref": target_ref}]}),
+    );
+    let stopped: Value = serde_json::from_str(&stopped).unwrap();
+    assert_eq!(stopped["completed"].as_u64(), Some(0), "{stopped}");
+    assert_eq!(stopped["stopped"]["step"].as_u64(), Some(1), "{stopped}");
 
     let (err, bad) = c.call("desktop_click", json!({}));
     assert!(err && bad.contains("INVALID_REQUEST"), "{bad}");
