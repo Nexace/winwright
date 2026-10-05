@@ -107,7 +107,10 @@ impl Engine {
                 return Err(WinwrightError::Cancelled);
             }
             checks += 1;
-            match self.check_wait(session, &request, &ctx).await {
+            let checked = Instant::now();
+            let outcome = self.check_wait(session, &request, &ctx).await;
+            let took = checked.elapsed();
+            match outcome {
                 Ok(Check::Done { element, window }) => {
                     return Ok(WaitResult {
                         state: request.state,
@@ -139,7 +142,9 @@ impl Engine {
                     elapsed_ms: started.elapsed().as_millis() as u64,
                 });
             }
-            let nap = interval.min(remaining);
+            // A check of a big tree (a browser, an IDE) can take longer than the interval: wait at
+            // least twice as long as it took, so the app is not scanned without a break.
+            let nap = interval.max(took * 2).min(remaining);
             match events_rx.as_mut() {
                 Some(sub) => {
                     tokio::select! {
@@ -194,12 +199,22 @@ impl Engine {
             });
         }
 
+        let gone_counts = matches!(req.state, WaitState::Missing | WaitState::Hidden);
+        let done_gone = || Check::Done {
+            element: None,
+            window: None,
+        };
         if let Some(reference) = &req.reference {
-            let entry = session
+            let entry = match session
                 .state()
                 .refs
-                .get_live(reference, self.uia.worker_epoch())?
-                .clone();
+                .get_live(reference, self.uia.worker_epoch())
+            {
+                Ok(entry) => entry.clone(),
+                // Its element is gone for good: that is what Missing and Hidden wait for.
+                Err(WinwrightError::ElementStale { .. }) if gone_counts => return Ok(done_gone()),
+                Err(e) => return Err(e),
+            };
             return Ok(match self.uia.refresh(entry.key, ctx).await {
                 Ok(props) if req.state == WaitState::Missing => {
                     Check::Pending(format!("{} still exists", props.label()))
@@ -245,9 +260,19 @@ impl Engine {
             }
             (scope, _) => scope.clone(),
         };
-        let captured = self
+        let captured = match self
             .capture_scope(session, &scope, search_limits(!locator.visible_only), ctx)
-            .await?;
+            .await
+        {
+            Ok(captured) => captured,
+            // The window it was looked for in has closed: nothing of it is left to show.
+            Err(WinwrightError::WindowNotFound { .. })
+                if gone_counts && matches!(scope, SnapshotTarget::Window(_)) =>
+            {
+                return Ok(done_gone());
+            }
+            Err(e) => return Err(e),
+        };
         let roots: Vec<&UiNode> = captured.trees.iter().map(|(t, _)| &t.root).collect();
         let mut matches = find_matches(&compiled, &roots);
         // `nth` narrows every state to that one match (document order), presence states too.

@@ -573,7 +573,15 @@ impl Engine {
                 {
                     warnings.push(format!("skipped a window: {err}"));
                 }
-                Err(err) => return Err(err),
+                Err(err) => {
+                    // The windows already captured hold worker slots nobody will use.
+                    let mut keys = Vec::new();
+                    for (tree, _) in &trees {
+                        crate::find::all_keys(&tree.root, &mut keys);
+                    }
+                    self.release(keys).await;
+                    return Err(err);
+                }
             }
         }
         tracing::debug!(
@@ -625,7 +633,7 @@ impl Engine {
                 .max_nodes
                 .saturating_mul(RAW_NODE_FACTOR)
                 .clamp(request.max_nodes, RAW_NODE_LIMIT.max(request.max_nodes)),
-            max_children: (request.max_list_items + 30).max(50),
+            max_children: request.max_list_items.saturating_add(30).max(50),
             include_offscreen: request.include_offscreen,
         };
         let Captured {

@@ -101,7 +101,9 @@ impl Default for SecurityConfig {
             allow_powershell: false,
             allow_clipboard_secrets: false,
             audit: true,
-            confirmation_timeout_seconds: 60,
+            // Below the 60 s many AI apps allow a tool call, so a late answer cannot land after the
+            // app has already told the model the call failed.
+            confirmation_timeout_seconds: 45,
         }
     }
 }

@@ -242,12 +242,15 @@ pub fn run(
                 }
             }
             Command::Release { keys } => worker.release(&keys),
-            Command::Refresh { key, reply } => {
+            // A caller that gave up (an emergency stop, a timeout) while this waited in the queue
+            // must not have its action done after all.
+            Command::Refresh { key, reply } if !reply.is_closed() => {
                 let _ = reply.send(worker.refresh(key));
             }
-            Command::Execute { key, action, reply } => {
+            Command::Execute { key, action, reply } if !reply.is_closed() => {
                 let _ = reply.send(worker.execute(key, &action));
             }
+            Command::Refresh { .. } | Command::Execute { .. } => {}
             Command::SyncEvents => {}
         }
         events.reconcile(&worker.automation, &worker.root);

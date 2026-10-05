@@ -6,7 +6,7 @@ use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_ABANDONED, WAIT_OBJEC
 use windows::Win32::System::Threading::{
     CreateEventW, CreateMutexW, ReleaseMutex, ResetEvent, SetEvent, WaitForSingleObject,
 };
-use windows::core::w;
+use windows::core::{PCWSTR, w};
 use winwright_contracts::{WinwrightError, WinwrightResult};
 
 /// Set while the person has stopped Winwright (hotkey or tray); every process follows it.
@@ -18,14 +18,23 @@ unsafe impl Send for StopSignal {}
 unsafe impl Sync for StopSignal {}
 
 impl StopSignal {
+    /// The shared signal, or one of this process's own when it cannot be opened (an elevated
+    /// Winwright created it): then the stop reaches this process only.
     pub fn open() -> WinwrightResult<Self> {
         // SAFETY: a named manual-reset event, created unsignaled or opened if it exists.
-        unsafe { CreateEventW(None, true, false, w!("Local\\Winwright.EmergencyStop")) }
-            .map(Self)
-            .map_err(|e| WinwrightError::Platform {
-                operation: "CreateEventW".into(),
-                hresult: e.code().0,
-            })
+        match unsafe { CreateEventW(None, true, false, w!("Local\\Winwright.EmergencyStop")) } {
+            Ok(handle) => Ok(Self(handle)),
+            Err(err) => {
+                tracing::warn!(%err, "shared emergency stop unavailable; this process stops alone");
+                // SAFETY: an unnamed manual-reset event, owned by this process alone.
+                unsafe { CreateEventW(None, true, false, PCWSTR::null()) }
+                    .map(Self)
+                    .map_err(|e| WinwrightError::Platform {
+                        operation: "CreateEventW".into(),
+                        hresult: e.code().0,
+                    })
+            }
+        }
     }
 
     pub fn stop(&self) {

@@ -55,7 +55,7 @@ Codex (`~\.codex\config.toml`). Codex passes only the environment variables you 
 [mcp_servers.winwright]
 command = 'C:\Users\you\AppData\Local\Programs\Winwright\winwright.exe'
 args = ["mcp"]
-tool_timeout_sec = 120   # the Allow/Deny dialog waits up to 60 s
+tool_timeout_sec = 120   # the Allow/Deny dialog waits up to 45 s
 env_vars = ["APPDATA", "LOCALAPPDATA", "USERPROFILE", "SystemRoot", "WINWRIGHT_NOTION_TOKEN", "WINWRIGHT_NOTION_PARENT"]
 ```
 

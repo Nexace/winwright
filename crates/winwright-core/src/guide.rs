@@ -42,8 +42,11 @@ const MISS_COLOR: u32 = 0x00E5_484D;
 fn centered(center: PhysicalPoint, width: u32, height: u32) -> PhysicalRect {
     let w = width.clamp(1, MAX_SPOT_SIDE) as i32;
     let h = height.clamp(1, MAX_SPOT_SIDE) as i32;
-    let (left, top) = (center.x - w / 2, center.y - h / 2);
-    PhysicalRect::new(left, top, left + w, top + h)
+    let (left, top) = (
+        center.x.saturating_sub(w / 2),
+        center.y.saturating_sub(h / 2),
+    );
+    PhysicalRect::new(left, top, left.saturating_add(w), top.saturating_add(h))
 }
 
 /// The step's caption after a click elsewhere.

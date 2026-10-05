@@ -249,6 +249,15 @@ pub(crate) fn edit(
         )));
     }
     let (text, encoding) = load(&file)?;
+    // Text that does not turn back into the same bytes (invalid UTF-8, a legacy code page) would
+    // be changed outside the edit too.
+    let original = fs::read(&file).map_err(|e| missing(&file, &e))?;
+    if encode(&text, encoding) != original {
+        return Err(WinwrightError::invalid(format!(
+            "{} is not valid UTF-8 or UTF-16 text; editing it would change other bytes too",
+            display(&file).display()
+        )));
+    }
     let edited = replace_exact(&text, old, new, count)?;
     replace(&file, &encode(&edited, encoding))?;
     Ok(FileResult::Path {
@@ -408,6 +417,17 @@ mod tests {
         assert_eq!(lines(text, -1, 10), ("d".to_owned(), 3, 4, false));
         assert_eq!(lines(text, -10, 1), ("a".to_owned(), 0, 4, true));
         assert_eq!(lines(text, 99, 1), (String::new(), 4, 4, false));
+    }
+
+    #[test]
+    fn only_text_that_round_trips_may_be_edited() {
+        // Windows-1252 "café": the é byte is not UTF-8, so a rewrite would change it.
+        let legacy = b"caf\xe9 au lait";
+        let (text, encoding) = decode(legacy).unwrap();
+        assert_ne!(encode(&text, encoding), legacy.to_vec());
+        let utf8 = "caf\u{e9}".as_bytes();
+        let (text, encoding) = decode(utf8).unwrap();
+        assert_eq!(encode(&text, encoding), utf8.to_vec());
     }
 
     #[test]

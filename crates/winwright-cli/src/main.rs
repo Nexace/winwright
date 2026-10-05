@@ -277,7 +277,7 @@ async fn serve_mcp(
         });
     done.store(true, std::sync::atomic::Ordering::SeqCst);
     let _ = coordinator.join();
-    // Also on a failed handshake: an icon left behind stays in the tray until hovered.
+    // The coordinator removed its icon and hotkey; this also covers a failed handshake.
     if leader.load(std::sync::atomic::Ordering::SeqCst) {
         native.tray.remove();
     }
@@ -305,11 +305,14 @@ fn coordinate(
     hotkeys: &winwright_overlay::HotkeyHost,
 ) {
     use std::sync::atomic::Ordering;
-    let mut lock = None;
+    let mut lead_state: Option<(
+        winwright_win32::shared::LeaderLock,
+        winwright_overlay::HotkeyId,
+    )> = None;
     let mut last_try: Option<std::time::Instant> = None;
     let mut stopped = false;
     while !done.load(Ordering::SeqCst) {
-        let Some(e) = engine.upgrade() else { return };
+        let Some(e) = engine.upgrade() else { break };
         let now = stop.is_stopped();
         if now != stopped {
             stopped = now;
@@ -318,7 +321,7 @@ fn coordinate(
             } else {
                 e.rearm();
             }
-            if lock.is_some() {
+            if lead_state.is_some() {
                 tray.update(tray_state(stopped));
                 if stopped {
                     tray.notify(
@@ -329,28 +332,57 @@ fn coordinate(
             }
         }
         drop(e);
-        if lock.is_none() && last_try.is_none_or(|t| t.elapsed() >= LEAD_RETRY) {
+        if lead_state.is_none() && last_try.is_none_or(|t| t.elapsed() >= LEAD_RETRY) {
             last_try = Some(std::time::Instant::now());
-            if let Some(l) = winwright_win32::shared::LeaderLock::try_acquire() {
-                lead(engine, stop, tray, hotkeys, stopped);
-                leader.store(true, Ordering::SeqCst);
-                lock = Some(l);
+            if let Some(lock) = winwright_win32::shared::LeaderLock::try_acquire() {
+                // Leading without the hotkey (an older Winwright still holds it) would leave
+                // nobody able to stop everything: let the lock go and try again later.
+                if let Some(hotkey) = lead(engine, stop, tray, hotkeys, stopped) {
+                    leader.store(true, Ordering::SeqCst);
+                    lead_state = Some((lock, hotkey));
+                }
             }
         }
         std::thread::sleep(STOP_POLL);
     }
+    // Hand over cleanly: icon and hotkey go before the lock, so the next leader can take both.
+    if let Some((lock, hotkey)) = lead_state {
+        tray.remove();
+        let _ = hotkeys.unregister(hotkey);
+        leader.store(false, Ordering::SeqCst);
+        drop(lock);
+    }
 }
 
-/// The tray icon and the hotkey for every Winwright process: both act through the shared stop
-/// signal (and at once in this process).
+/// The hotkey and the tray icon for every Winwright process: both act through the shared stop
+/// signal (and at once in this process). `None`, with nothing shown, when the hotkey is taken.
 fn lead(
     engine: &std::sync::Weak<Engine>,
     stop: &Arc<winwright_win32::shared::StopSignal>,
     tray: &winwright_overlay::TrayHost,
     hotkeys: &winwright_overlay::HotkeyHost,
     stopped: bool,
-) {
-    tracing::info!("leading: the tray icon and emergency stop for every Winwright process");
+) -> Option<winwright_overlay::HotkeyId> {
+    let (weak, signal) = (engine.clone(), Arc::clone(stop));
+    let hotkey = match hotkeys.register_emergency_stop(
+        None,
+        Box::new(move || {
+            signal.stop();
+            if let Some(engine) = weak.upgrade() {
+                engine.emergency_stop();
+            }
+        }),
+    ) {
+        Ok(id) => id,
+        Err(err) => {
+            tracing::debug!(%err, "emergency-stop hotkey taken; not leading yet");
+            return None;
+        }
+    };
+    tracing::info!(
+        "leading: the tray icon and emergency stop ({}) for every Winwright process",
+        winwright_overlay::EMERGENCY_STOP_DEFAULT
+    );
     let (weak, signal, menu_tray) = (engine.clone(), Arc::clone(stop), tray.clone());
     if let Err(err) = tray.show(
         tray_state(stopped),
@@ -379,22 +411,7 @@ fn lead(
     ) {
         tracing::warn!(%err, "tray icon unavailable");
     }
-    let (weak, signal) = (engine.clone(), Arc::clone(stop));
-    match hotkeys.register_emergency_stop(
-        None,
-        Box::new(move || {
-            signal.stop();
-            if let Some(engine) = weak.upgrade() {
-                engine.emergency_stop();
-            }
-        }),
-    ) {
-        Ok(_) => tracing::info!(
-            "emergency stop: {}",
-            winwright_overlay::EMERGENCY_STOP_DEFAULT
-        ),
-        Err(err) => tracing::warn!(%err, "emergency-stop hotkey unavailable"),
-    }
+    Some(hotkey)
 }
 
 /// Idle shutdown for `winwright mcp`: `WINWRIGHT_IDLE_MINUTES` (default 10, 0 = never), so

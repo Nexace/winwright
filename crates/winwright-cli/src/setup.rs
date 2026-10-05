@@ -91,16 +91,29 @@ fn edit_json(text: &str, flavor: Flavor, exe: Option<&str>) -> Result<Edit, Stri
 
 fn codex_section(exe: &str) -> String {
     format!(
-        "{CODEX_HEADER}\ncommand = '{exe}'\nargs = [\"mcp\"]\n# The Allow/Deny dialog waits up to 60 s.\n\
+        "{CODEX_HEADER}\ncommand = '{exe}'\nargs = [\"mcp\"]\n# The Allow/Deny dialog waits up to 45 s.\n\
          tool_timeout_sec = 120\nenv_vars = [\"APPDATA\", \"LOCALAPPDATA\", \"USERPROFILE\", \
          \"SystemRoot\", \"WINWRIGHT_NOTION_TOKEN\", \"WINWRIGHT_NOTION_PARENT\"]\n"
     )
 }
 
+/// `[mcp_servers.winwright]`, with any spacing or a trailing comment.
+fn is_codex_header(line: &str) -> bool {
+    let line = line.split('#').next().unwrap_or_default().trim();
+    let Some(inner) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) else {
+        return false;
+    };
+    let parts: Vec<String> = inner
+        .split('.')
+        .map(|p| p.trim().trim_matches('"').trim_matches('\'').to_owned())
+        .collect();
+    parts == ["mcp_servers", "winwright"]
+}
+
 /// Line ranges of the Winwright tables (`[mcp_servers.winwright]` and its sub-tables).
 fn codex_block(text: &str) -> Option<(usize, usize)> {
     let lines: Vec<&str> = text.split_inclusive('\n').collect();
-    let start = lines.iter().position(|l| l.trim() == CODEX_HEADER)?;
+    let start = lines.iter().position(|l| is_codex_header(l))?;
     let end = lines[start + 1..]
         .iter()
         .position(|l| {
@@ -139,6 +152,11 @@ fn edit_codex(text: &str, exe: Option<&str>) -> Result<Edit, String> {
                 &text[..a],
                 &text[b..]
             )))
+        }
+        // Written in a form not parsed here (dotted keys, an inline table): a second table would
+        // make the whole file invalid, so leave it to the person.
+        (Some(_), None) if text.contains("winwright") && text.contains("mcp_servers") => {
+            Err("it already mentions winwright in a form setup cannot edit safely".into())
         }
         (Some(exe), None) => {
             let mut out = text.to_owned();
@@ -249,7 +267,11 @@ fn write_config(path: &Path, text: &str) -> std::io::Result<()> {
     if path.exists() {
         let mut backup = path.as_os_str().to_owned();
         backup.push(".winwright-backup");
-        std::fs::copy(path, PathBuf::from(backup))?;
+        let backup = PathBuf::from(backup);
+        // The first backup is the person's own file: later runs must not replace it.
+        if !backup.exists() {
+            std::fs::copy(path, backup)?;
+        }
     } else if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -257,7 +279,9 @@ fn write_config(path: &Path, text: &str) -> std::io::Result<()> {
     tmp.push(".winwright-tmp");
     let tmp = PathBuf::from(tmp);
     std::fs::write(&tmp, text)?;
-    std::fs::rename(&tmp, path)
+    std::fs::rename(&tmp, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
 }
 
 /// Where winwright.exe lives once installed: next to cargo's own binaries for a source
@@ -469,5 +493,13 @@ mod tests {
         assert_eq!(removed, before);
         assert_eq!(edit_codex(before, None), Ok(Edit::Unchanged));
         assert!(edit_codex("", Some(r"C:\it's\winwright.exe")).is_err());
+
+        // A header with spacing or a comment is still found and replaced, never duplicated.
+        let commented = format!("[ mcp_servers.\"winwright\" ] # mine\ncommand = 'old.exe'\n");
+        let fixed = written(edit_codex(&commented, Some(EXE)));
+        assert_eq!(fixed.matches("winwright]").count(), 1, "{fixed}");
+        // Dotted keys are not parsed: refused rather than doubled.
+        let dotted = "mcp_servers.winwright.command = 'old.exe'\n";
+        assert!(edit_codex(dotted, Some(EXE)).is_err());
     }
 }

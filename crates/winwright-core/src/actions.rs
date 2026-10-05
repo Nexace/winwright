@@ -91,6 +91,20 @@ use crate::find::{Resolved, all_keys};
 use crate::session::Session;
 
 /// How long an action may take to show an observable effect before we report "unverified".
+/// Time for an action: typing waits for each keystroke to show, so text gets time per character
+/// on top of the usual budget (at most two minutes).
+fn action_timeout(base: Duration, action: &DesktopAction) -> Duration {
+    const PER_CHAR: Duration = Duration::from_millis(40);
+    const MAX: Duration = Duration::from_secs(120);
+    let chars = match action {
+        DesktopAction::TypeText { text, .. } | DesktopAction::Fill { text, .. } => {
+            text.chars().count()
+        }
+        _ => 0,
+    };
+    (base + PER_CHAR * u32::try_from(chars).unwrap_or(u32::MAX)).min(MAX.max(base))
+}
+
 const SETTLE: Duration = Duration::from_millis(600);
 const SETTLE_POLL: Duration = Duration::from_millis(60);
 const MAX_TEXT_CHARS: usize = 10_000;
@@ -834,7 +848,7 @@ impl Engine {
         confirmed: &mut bool,
     ) -> WinwrightResult<ActionResult> {
         let started = Instant::now();
-        let ctx = session.operation(self.timeout())?;
+        let ctx = session.operation(action_timeout(self.timeout(), &action))?;
         // Mouse input at a point acts on whatever is there: that element is the target.
         let mut pointer = None;
         let resolved = match action.target() {
@@ -919,7 +933,7 @@ impl Engine {
         *confirmed = self.permit(session, proposed, summary, &mut lease).await?;
         // A confirmation may have taken a while: give the action its own full deadline.
         let ctx = if *confirmed {
-            session.operation(self.timeout())?
+            session.operation(action_timeout(self.timeout(), &action))?
         } else {
             ctx
         };
@@ -1449,8 +1463,16 @@ impl Engine {
         let input = self.input()?;
         let strokes = keystrokes(text);
         let mut seen = before.to_owned();
+        // Out of time part-way: report how far it got (the caller warns with the count), so
+        // the model continues from there instead of typing everything again.
+        let partial = |err: WinwrightError, done: usize| match err {
+            WinwrightError::Timeout { .. } => Ok(Some(done)),
+            other => Err(other),
+        };
         for (done, stroke) in strokes.iter().enumerate() {
-            input.type_text(stroke, ctx).await?;
+            if let Err(err) = input.type_text(stroke, ctx).await {
+                return partial(err, done);
+            }
             let deadline = std::time::Instant::now() + KEYSTROKE_WAIT;
             let shown = loop {
                 match self.watched_text(r, ctx).await {
@@ -1463,7 +1485,9 @@ impl Engine {
                     Some(_) => {}
                 }
                 tokio::time::sleep(KEYSTROKE_POLL).await;
-                ctx.check("type_text")?;
+                if let Err(err) = ctx.check("type_text") {
+                    return partial(err, done);
+                }
             };
             if shown {
                 continue;
@@ -1471,7 +1495,9 @@ impl Engine {
             // A field that never shows the first key (some update only when left) cannot be
             // watched: type the rest at once and let the final check judge.
             if done == 0 {
-                input.type_text(&strokes[1..].concat(), ctx).await?;
+                if let Err(err) = input.type_text(&strokes[1..].concat(), ctx).await {
+                    return partial(err, 0);
+                }
                 return Ok(None);
             }
             return Ok(Some(done));

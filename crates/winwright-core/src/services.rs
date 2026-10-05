@@ -551,16 +551,17 @@ impl Engine {
         };
         let summary = format!("Launch {shown}{}", with_args(&args));
         let program = LaunchedNames::new(shown, &request.app);
-        let before: HashSet<u64> = self
-            .windows
-            .list_windows()
-            .map(|ws| ws.into_iter().map(|w| w.hwnd).collect())
-            .unwrap_or_default();
         let mut lease = None;
         let mut confirmed = false;
         let result = async {
             resolved?;
             confirmed = self.permit(session, action, summary, &mut lease).await?;
+            // Taken after the person answered: windows they opened meanwhile are not the app's.
+            let before: HashSet<u64> = self
+                .windows
+                .list_windows()
+                .map(|ws| ws.into_iter().map(|w| w.hwnd).collect())
+                .unwrap_or_default();
             let processes = self
                 .processes
                 .as_deref()
