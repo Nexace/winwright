@@ -20,6 +20,7 @@ use winwright_core::Engine;
 const BOX: (i32, i32) = (200, 100);
 /// Long enough for an overlay to be composed onto the screen.
 const SETTLE: Duration = Duration::from_millis(300);
+const ATTEMPTS: u32 = 3;
 
 /// The highlight's border at `dpi`, as the overlay draws it (3 px at 100 %).
 fn border(dpi: u32) -> i32 {
@@ -110,47 +111,61 @@ async fn check_monitor(
     );
     let target = centered_box(m.work_area);
     let want = expected(target, m);
-    let before = shot(capture, want, ctx).await;
-    let shown = overlay.show(OverlayRequest {
-        rect: target,
-        style: OverlayStyle::Highlight,
-        label: None,
-        step: None,
-        color: 0x00FF_00FF,
-        duration_ms: Some(5_000),
-    });
-    let id = match shown {
-        Ok(id) => id,
-        Err(e) => return report.check("overlay", Err(e.to_string())),
-    };
-    let placed = match overlay.window_rect(id) {
-        Ok(Some(got)) if got == want => Ok(format!(
-            "drawn exactly in place with a {} px border",
-            border(m.dpi)
-        )),
-        Ok(Some(got)) => Err(format!("drawn at {got:?}, expected {want:?}")),
-        Ok(None) => Err("nothing was drawn".into()),
-        Err(e) => Err(e.to_string()),
-    };
-    report.check("overlay", placed);
-    tokio::time::sleep(SETTLE).await;
-    let with_box = shot(capture, want, ctx).await;
-    let _ = overlay.clear(Some(id));
-    tokio::time::sleep(SETTLE).await;
-    let after = shot(capture, want, ctx).await;
-    let seen = match (before, with_box, after) {
-        (Ok(before), Ok(with_box), Ok(after)) => {
-            if before != after {
-                Err("the screen changed during the check; run it again".into())
-            } else if with_box == before {
-                Err("a screenshot of that spot does not show the box".into())
-            } else {
-                Ok("a screenshot of that spot shows the box".into())
-            }
+    let mut placed = false;
+    // Something else may be moving under the box (a video, streaming text): try a few times.
+    for attempt in 1..=ATTEMPTS {
+        let before = shot(capture, want, ctx).await;
+        let id = match overlay.show(OverlayRequest {
+            rect: target,
+            style: OverlayStyle::Highlight,
+            label: None,
+            step: None,
+            color: 0x00FF_00FF,
+            duration_ms: Some(5_000),
+        }) {
+            Ok(id) => id,
+            Err(e) => return report.check("overlay", Err(e.to_string())),
+        };
+        if !placed {
+            placed = true;
+            let at = match overlay.window_rect(id) {
+                Ok(Some(got)) if got == want => Ok(format!(
+                    "drawn exactly in place with a {} px border",
+                    border(m.dpi)
+                )),
+                Ok(Some(got)) => Err(format!("drawn at {got:?}, expected {want:?}")),
+                Ok(None) => Err("nothing was drawn".into()),
+                Err(e) => Err(e.to_string()),
+            };
+            report.check("overlay", at);
         }
-        (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => Err(e),
-    };
-    report.check("screenshot", seen);
+        tokio::time::sleep(SETTLE).await;
+        let with_box = shot(capture, want, ctx).await;
+        let _ = overlay.clear(Some(id));
+        tokio::time::sleep(SETTLE).await;
+        let after = shot(capture, want, ctx).await;
+        let seen = match (before, with_box, after) {
+            (Ok(before), Ok(with_box), Ok(after)) => {
+                if before != after {
+                    if attempt < ATTEMPTS {
+                        continue;
+                    }
+                    println!(
+                        "  skipped screenshot: the screen kept changing at the middle of this \
+                         monitor; move busy windows aside and run it again"
+                    );
+                    return;
+                }
+                if with_box == before {
+                    Err("a screenshot of that spot does not show the box".into())
+                } else {
+                    Ok("a screenshot of that spot shows the box".into())
+                }
+            }
+            (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => Err(e),
+        };
+        return report.check("screenshot", seen);
+    }
 }
 
 pub async fn run(config: Config) -> Result<(), WinwrightError> {
