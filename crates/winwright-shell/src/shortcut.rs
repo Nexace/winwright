@@ -1,5 +1,5 @@
-//! Start menu shortcuts: `app_launch("Discord")` finds the shortcut named Discord and reads the
-//! program, arguments and folder it starts. The shortcut itself is never opened: the program it
+//! Start menu shortcuts: `app_launch("Discord")` finds the shortcut named Discord (see
+//! `names`) and reads the program, arguments and folder it starts. The shortcut itself is never opened: the program it
 //! names is launched and judged like any other, so one that hides a command line still asks.
 
 use std::path::{Path, PathBuf};
@@ -57,53 +57,23 @@ fn collect(dir: &Path, depth: u32, out: &mut Vec<PathBuf>) {
     }
 }
 
-fn stem(path: &Path) -> String {
-    path.file_stem()
-        .map(|s| s.to_string_lossy().to_lowercase())
-        .unwrap_or_default()
-}
-
-/// The one shortcut `name` means among `links`: the same name, else the only one containing it
-/// (uninstallers aside). `Err` lists the candidates when several fit.
-pub(crate) fn pick(name: &str, links: &[PathBuf]) -> WinwrightResult<Option<PathBuf>> {
-    let want = name.trim().to_lowercase();
-    if let Some(exact) = links.iter().find(|l| stem(l) == want) {
-        return Ok(Some(exact.clone()));
-    }
-    let partial: Vec<&PathBuf> = links
-        .iter()
-        .filter(|l| {
-            let s = stem(l);
-            s.contains(&want) && !s.starts_with("uninstall")
-        })
-        .collect();
-    match partial.as_slice() {
-        [] => Ok(None),
-        [one] => Ok(Some((*one).clone())),
-        many => Err(WinwrightError::invalid(format!(
-            "`{name}` matches several Start menu entries: {}; use the full name",
-            many.iter()
-                .map(|l| l
-                    .file_stem()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ))),
-    }
-}
-
-/// The Start menu shortcut called `name`, read. `None` when there is none.
-pub(crate) fn find(name: &str) -> WinwrightResult<Option<Shortcut>> {
-    let mut links = Vec::new();
+/// Every Start menu shortcut, this user's first, with the name the Start menu shows.
+pub(crate) fn links() -> Vec<(String, PathBuf)> {
+    let mut found = Vec::new();
     for root in start_menus() {
-        collect(&root, 3, &mut links);
+        collect(&root, 3, &mut found);
     }
-    let Some(link) = pick(name, &links)? else {
-        return Ok(None);
-    };
-    read(&link).map(Some)
+    found
+        .into_iter()
+        .map(|p| {
+            let name = p
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+            (name, p)
+        })
+        .collect()
 }
 
 /// Splits a shortcut's argument string the way the program will see it.
@@ -134,7 +104,7 @@ fn text(buf: &[u16]) -> String {
 }
 
 /// Reads a shortcut through the shell's own parser, on a thread of its own (COM apartment).
-fn read(link: &Path) -> WinwrightResult<Shortcut> {
+pub(crate) fn read(link: &Path) -> WinwrightResult<Shortcut> {
     let path = wide(link.as_os_str());
     let label = link.display().to_string();
     let read = std::thread::spawn(move || {
@@ -188,37 +158,6 @@ fn read(link: &Path) -> WinwrightResult<Shortcut> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn links(names: &[&str]) -> Vec<PathBuf> {
-        names
-            .iter()
-            .map(|n| PathBuf::from(format!(r"C:\Start\{n}.lnk")))
-            .collect()
-    }
-
-    #[test]
-    fn a_name_finds_its_shortcut_exactly_or_as_the_only_one_containing_it() {
-        let all = links(&[
-            "Discord",
-            "Discord PTB",
-            "Uninstall Adobe Lightroom",
-            "Adobe Lightroom Classic",
-        ]);
-        assert_eq!(pick("discord", &all).unwrap(), Some(all[0].clone()));
-        // Uninstallers never count as the app.
-        assert_eq!(pick("Lightroom", &all).unwrap(), Some(all[3].clone()));
-        assert_eq!(pick("Spotify", &all).unwrap(), None);
-        let err = pick(
-            "Adobe",
-            &links(&["Adobe Photoshop", "Adobe Lightroom Classic"]),
-        )
-        .unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("Adobe Photoshop, Adobe Lightroom Classic"),
-            "{err}"
-        );
-    }
 
     #[test]
     fn shortcut_arguments_split_like_a_command_line() {

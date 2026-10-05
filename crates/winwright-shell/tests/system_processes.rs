@@ -214,7 +214,7 @@ async fn launch_opens_a_settings_uri() {
 }
 
 #[test]
-fn start_menu_names_resolve_to_the_program_their_shortcut_starts() {
+fn app_names_resolve_to_what_the_start_menu_would_start() {
     let processes = SystemProcesses::new();
     let resolve = |app: &str| {
         processes.resolve_launch(&LaunchRequest {
@@ -223,21 +223,24 @@ fn start_menu_names_resolve_to_the_program_their_shortcut_starts() {
             working_dir: None,
         })
     };
-    // Every Windows has these Start menu entries; none is a program file on PATH.
+    // Start menu shortcuts and Store apps on most Windows PCs; none is a program file on PATH.
     let found = [
-        "Windows PowerShell",
         "Character Map",
         "Task Manager",
         "Discord",
+        "Calculator",
+        "Photos",
     ]
     .into_iter()
     .filter_map(|name| resolve(name).ok().map(|program| (name, program)))
     .collect::<Vec<_>>();
-    // A bare build server may have none of them; this PC resolves them all.
+    // A bare build server may have none of them.
     eprintln!("resolved: {found:?}");
     for (name, program) in &found {
+        let p = program.to_ascii_lowercase();
+        // A program file, or a Store app activated by its id.
         assert!(
-            program.to_ascii_lowercase().ends_with(".exe"),
+            p.ends_with(".exe") || (p.starts_with("shell:appsfolder\\") && p.contains('!')),
             "{name} -> {program}"
         );
     }

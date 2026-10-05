@@ -5,9 +5,11 @@
 //! enforces hard invariants: no elevation, no NUL smuggling, no implicit `cmd.exe`, bounded
 //! time and output, and no process left behind by `exec`.
 
+mod apps;
 mod exec;
 mod handle;
 mod launch;
+mod names;
 mod processes;
 mod sessions;
 mod shortcut;

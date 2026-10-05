@@ -228,6 +228,38 @@ fn program_stem(program: &str) -> String {
     name.strip_suffix(".exe").unwrap_or(&name).to_owned()
 }
 
+/// Process names a launched app's windows may have: the program that started, and the name it
+/// was asked for (a Start menu shortcut may start a launcher; Store apps have no program file).
+struct LaunchedNames {
+    program: String,
+    asked: String,
+}
+
+impl LaunchedNames {
+    fn new(shown: &str, asked: &str) -> Self {
+        let squash = |s: &str| {
+            s.chars()
+                .filter(|c| c.is_alphanumeric())
+                .collect::<String>()
+        };
+        Self {
+            program: program_stem(shown),
+            asked: squash(&program_stem(asked)),
+        }
+    }
+
+    fn owns(&self, process_name: &str) -> bool {
+        let stem = program_stem(process_name);
+        stem == self.program
+            || (self.asked.len() >= 3
+                && stem
+                    .chars()
+                    .filter(|c| c.is_alphanumeric())
+                    .collect::<String>()
+                    .contains(&self.asked))
+    }
+}
+
 pub(crate) fn unavailable(backend: &str) -> WinwrightError {
     WinwrightError::BackendUnavailable {
         backend: backend.into(),
@@ -260,7 +292,7 @@ impl Engine {
     async fn launched_window(
         &self,
         before: &HashSet<u64>,
-        program: &str,
+        program: &LaunchedNames,
         ctx: &OperationContext,
     ) -> Option<WindowInfo> {
         let started = Instant::now();
@@ -277,13 +309,13 @@ impl Engine {
                         && !w.minimized
                 })
                 .collect();
-            opened.sort_by_key(|w| (program_stem(&w.process_name) != program, !w.foreground));
+            opened.sort_by_key(|w| (!program.owns(&w.process_name), !w.foreground));
             let reused = || {
                 (started.elapsed() >= LAUNCH_REUSE_AFTER)
                     .then(|| {
                         windows
                             .iter()
-                            .find(|w| w.foreground && program_stem(&w.process_name) == program)
+                            .find(|w| w.foreground && program.owns(&w.process_name))
                     })
                     .flatten()
             };
@@ -472,7 +504,7 @@ impl Engine {
         );
         let target = action.target.clone();
         let summary = format!("Launch {shown}{}", with_args(&request.args));
-        let program = program_stem(shown);
+        let program = LaunchedNames::new(shown, &request.app);
         let before: HashSet<u64> = self
             .windows
             .list_windows()
@@ -894,6 +926,22 @@ impl Engine {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn launched_windows_belong_to_the_program_or_the_name_asked_for() {
+        let shortcut =
+            super::LaunchedNames::new(r"C:\Users\a\AppData\Local\Discord\Update.exe", "Discord");
+        assert!(shortcut.owns("Discord.exe") && shortcut.owns("Update.exe"));
+        assert!(!shortcut.owns("explorer.exe"));
+        let store = super::LaunchedNames::new(
+            r"shell:AppsFolder\5319275A.WhatsAppDesktop_cv1g1gvanyjgm!App",
+            "WhatsApp",
+        );
+        assert!(store.owns("WhatsApp.exe") && store.owns("WhatsApp.Root.exe"));
+        let spaced = super::LaunchedNames::new(r"C:\x\lightroom.exe", "Adobe Lightroom");
+        assert!(spaced.owns("lightroom.exe") && !spaced.owns("notepad.exe"));
+    }
+
     use super::*;
 
     fn op(json: &str) -> FileOperation {

@@ -64,6 +64,8 @@ pub(crate) enum Target {
     Shell(OsString),
     /// `CreateProcessW` with this image path.
     Process(PathBuf),
+    /// A Store (packaged) app, activated by its AppUserModelID as the Start menu does.
+    App(String),
 }
 
 /// A validated launch: nothing has touched the desktop yet.
@@ -85,6 +87,7 @@ impl Plan {
         match self.target {
             Target::Shell(_) => "shell",
             Target::Process(_) => "process",
+            Target::App(_) => "app",
         }
     }
 
@@ -93,6 +96,7 @@ impl Plan {
     pub(crate) fn log_label(&self) -> String {
         match &self.target {
             Target::Process(path) => file_name(path),
+            Target::App(id) => id.clone(),
             Target::Shell(target) => {
                 let text = target.to_string_lossy();
                 match uri_scheme(&text) {
@@ -122,6 +126,11 @@ impl Plan {
                     window: None,
                 })
             }
+            Target::App(id) => Ok(LaunchResult {
+                process_id: Some(crate::apps::activate(&id)?),
+                method: "app".to_owned(),
+                window: None,
+            }),
         }
     }
 }
@@ -159,19 +168,22 @@ pub(crate) fn plan(request: &LaunchRequest) -> WinwrightResult<Plan> {
         Ok(target) => (target, request.args.clone(), request.working_dir.clone()),
         // A name as the Start menu shows it ("Discord", "Adobe Lightroom Classic"): what its
         // shortcut starts, judged as that program.
-        Err(not_found) if is_bare_name(app) => match crate::shortcut::find(app)? {
-            Some(link) => {
+        Err(not_found) if is_bare_name(app) => match by_start_menu_name(app)? {
+            Some(Named::Link(link)) => {
+                let link = crate::shortcut::read(&link)?;
                 let shown = link.target.display().to_string();
                 let target = classify(&shown, None)?;
                 let mut args = link.args;
                 args.extend(request.args.iter().cloned());
                 (target, args, request.working_dir.clone().or(link.dir))
             }
+            // A Store app ("WhatsApp", "Photos"): no program file; activated by its id.
+            Some(Named::App(id)) => (Target::App(id), request.args.clone(), None),
             None => return Err(not_found),
         },
         Err(e) => return Err(e),
     };
-    if matches!(target, Target::Shell(_)) && !args.is_empty() {
+    if matches!(target, Target::Shell(_) | Target::App(_)) && !args.is_empty() {
         return Err(WinwrightError::invalid(format!(
             "arguments can only be passed to an executable; `{app}` opens with its default handler"
         )));
@@ -189,6 +201,38 @@ pub(crate) fn plan(request: &LaunchRequest) -> WinwrightResult<Plan> {
     })
 }
 
+/// What a Start menu name stands for.
+enum Named {
+    Link(PathBuf),
+    App(String),
+}
+
+/// The Start menu entry `app` names: shortcuts and Store apps together, so an exact name in
+/// either beats a partial one in the other.
+fn by_start_menu_name(app: &str) -> WinwrightResult<Option<Named>> {
+    let mut entries: Vec<(String, Named)> = crate::shortcut::links()
+        .into_iter()
+        .map(|(name, path)| (name, Named::Link(path)))
+        .collect();
+    // An unreadable app list must not break shortcuts.
+    match crate::apps::packaged_apps() {
+        Ok(apps) => entries.extend(apps.into_iter().map(|(name, id)| (name, Named::App(id)))),
+        Err(err) => tracing::debug!(%err, "Store app list unavailable"),
+    }
+    let Some(index) = crate::names::pick(
+        app,
+        &entries
+            .iter()
+            .enumerate()
+            .map(|(i, (n, _))| (n.clone(), i))
+            .collect::<Vec<_>>(),
+    )?
+    .copied() else {
+        return Ok(None);
+    };
+    Ok(Some(entries.swap_remove(index).1))
+}
+
 fn is_bare_name(app: &str) -> bool {
     !app.contains(['\\', '/', ':'])
 }
@@ -196,6 +240,7 @@ fn is_bare_name(app: &str) -> bool {
 fn target_text(target: &Target) -> String {
     match target {
         Target::Process(path) => path.display().to_string(),
+        Target::App(id) => format!("shell:AppsFolder\\{id}"),
         Target::Shell(target) => target.to_string_lossy().into_owned(),
     }
 }
