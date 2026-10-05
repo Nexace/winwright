@@ -1,80 +1,79 @@
 # Winwright
 
-Semantic Windows desktop automation for AI agents — *Playwright for the Windows desktop,
-exposed through MCP*. Winwright reads the UI Automation tree, turns it into a compact
-snapshot with short element refs, and acts through control patterns before ever falling back
-to coordinates.
+Give your AI apps hands on the Windows desktop, with you in charge. Winwright is an
+[MCP](https://modelcontextprotocol.io) server: Claude, Codex, Cursor, Windsurf, opencode or
+Antigravity can see and use any Windows app through it, and it asks you before anything risky.
 
-Status: early development. See [.gsd/SPEC.md](.gsd/SPEC.md) for the full build spec and
-[.gsd/ROADMAP.md](.gsd/ROADMAP.md) for phase status.
+- **Sees apps the way screen readers do.** It reads Windows UI Automation into a compact tree
+  with short element refs (`[e12]`), and acts through the app's own controls before it ever
+  falls back to the mouse.
+- **You stay in charge.** Risky steps (deleting, paying, closing programs, running commands)
+  show Winwright's own Allow/Deny dialog that only your real mouse or keyboard can answer.
+  Ctrl+Alt+Esc stops everything; every action goes to a local audit log.
+- **It can teach you.** Ask "teach me how to crop a photo in Lightroom": a pointer glides to
+  each step with a caption and waits for *your* click, saying "Not there" if you miss.
+- **Works where there is no UI tree** (games, canvases, custom-drawn apps) by screenshot pixels.
 
-## Build
+Windows 10 or 11, 64-bit. Tested on Windows 11.
 
-Requires Windows 11, the pinned Rust MSVC toolchain (`rust-toolchain.toml`), and the
-Windows SDK / C++ Build Tools.
+## Install
 
-```powershell
-cargo build -p winwright-cli
-cargo test --workspace
-# Real-desktop tests are opt-in and read-only:
-cargo test -p winwright-uia -- --ignored --test-threads=1
-```
+1. Download `winwright-<version>-windows-x64.zip` from
+   [Releases](https://github.com/Nexace/winwright/releases) and unzip it.
+2. Run `winwright setup` in that folder (in Terminal: `.\winwright setup`). It copies itself to
+   `%LOCALAPPDATA%\Programs\Winwright` and registers itself in every AI app it finds (Claude
+   Desktop, Cursor, Windsurf, Antigravity, opencode, Codex), backing up each config first. For
+   Claude Code it prints the one command to run. `--dry-run` shows what it would change.
+3. Restart your AI apps, then run `winwright doctor` once to check this PC.
 
-## Try it
+Windows may warn that the download is from an unknown publisher (the exe is not code-signed
+yet): choose *More info*, then *Run anyway*. Each release lists the zip's SHA-256 so you can
+check it (`Get-FileHash winwright-*.zip`).
 
-```powershell
-winwright windows                         # * marks the foreground window
-winwright snapshot                        # active window, compact semantic tree
-winwright snapshot --window "Notepad" --json
-winwright snapshot --process explorer --bounds --patterns
-winwright inspect --under-cursor          # or --focused, --at X,Y
-```
+To uninstall: `winwright setup --remove`, then delete `%LOCALAPPDATA%\Programs\Winwright`.
 
-Example (Save As dialog):
+## Use it
 
-```text
-DIALOG "Save As" [e1]
-  EDIT "File name:" value="" [e3]
-  BUTTON "Save" [e4]
-  BUTTON "Cancel" [e5]
-```
+Just ask your AI app: "open Notepad and write a shopping list", "rename the photos in
+Downloads by date", "what is this error dialog saying?", "show me where the export button is",
+"teach me to add a filter in Excel". The app starts `winwright mcp` itself and stops it when it
+closes: no service, no startup entry. It also quits after 10 minutes without a tool call
+(`WINWRIGHT_IDLE_MINUTES`, `0` = never). Typing `winwright` alone explains this and lists the
+commands.
 
-## Use it from your AI apps (MCP)
-
-Winwright has no app of its own: it is a tool inside the AI apps you already use. Install it
-once (`cargo install --path crates/winwright-cli --locked` puts `winwright` in `~\.cargo\bin`),
-then add it to each app. The app starts `winwright mcp` itself and stops it when it closes:
-no service, no startup entry. It also quits after 10 minutes without a tool call
-(`WINWRIGHT_IDLE_MINUTES`, `0` = never); an app that does not restart it needs a restart. Typing `winwright` alone explains this and lists the commands.
+<details><summary>Registering by hand</summary>
 
 Claude Code (all projects):
 
 ```powershell
-claude mcp add winwright --scope user -- "C:\Users\you\.cargo\bin\winwright.exe" mcp
+claude mcp add winwright --scope user -- "$env:LOCALAPPDATA\Programs\Winwright\winwright.exe" mcp
 ```
 
 Codex (`~\.codex\config.toml`). Codex passes only the environment variables you list:
 
 ```toml
 [mcp_servers.winwright]
-command = 'C:\Users\you\.cargo\bin\winwright.exe'
+command = 'C:\Users\you\AppData\Local\Programs\Winwright\winwright.exe'
 args = ["mcp"]
 tool_timeout_sec = 120   # the Allow/Deny dialog waits up to 60 s
 env_vars = ["APPDATA", "LOCALAPPDATA", "USERPROFILE", "SystemRoot", "WINWRIGHT_NOTION_TOKEN", "WINWRIGHT_NOTION_PARENT"]
 ```
 
-opencode v2 (`~\.config\opencode\opencode.json`, under `mcp.servers`):
+opencode (`~\.config\opencode\opencode.json`, under `mcp`):
 
 ```json
-"winwright": { "type": "local", "command": ["C:\\Users\\you\\.cargo\\bin\\winwright.exe", "mcp"] }
+"winwright": { "type": "local", "command": ["C:\\Users\\you\\AppData\\Local\\Programs\\Winwright\\winwright.exe", "mcp"], "enabled": true }
 ```
 
-Antigravity (`~\.gemini\config\mcp_config.json`) and Claude Desktop
-(`claude_desktop_config.json`), under `mcpServers`:
+Claude Desktop (`claude_desktop_config.json`), Cursor (`~\.cursor\mcp.json`), Windsurf
+(`~\.codeium\windsurf\mcp_config.json`) and Antigravity (`~\.gemini\config\mcp_config.json`),
+under `mcpServers`:
 
 ```json
-"winwright": { "command": "C:\\Users\\you\\.cargo\\bin\\winwright.exe", "args": ["mcp"] }
+"winwright": { "command": "C:\\Users\\you\\AppData\\Local\\Programs\\Winwright\\winwright.exe", "args": ["mcp"] }
 ```
+
+</details>
 
 Tools: `desktop_snapshot` (use `diff: true` after actions), `desktop_find`, `desktop_click`,
 `desktop_fill`, `desktop_type`, `desktop_press`, `desktop_select`, `desktop_check`,
@@ -115,17 +114,28 @@ each report is also copied to Notion. `WINWRIGHT_MEMORY=0` turns memory off.
 with `winwright mcp --taint-file <path>` (it creates the file then); from that point every
 desktop change needs your yes. Apps that do not do this get the normal rules.
 
-## Layout
+## Build from source
 
-| Crate | Role |
-|---|---|
-| `winwright-contracts` | Owned DTOs, typed errors with stable wire codes, backend traits |
-| `winwright-core` | Engine, sessions, per-session refs, snapshot compression, lease, config |
-| `winwright-security` | Default-deny policy, sensitive-field detection, redaction |
-| `winwright-win32` | Top-level windows, processes, cursor, Per-Monitor-V2 DPI |
-| `winwright-uia` | Raw UI Automation COM on a dedicated MTA worker thread |
-| `winwright-cli` | `winwright.exe` |
+Needs the Rust toolchain pinned in `rust-toolchain.toml` (MSVC) and the Windows SDK / C++
+Build Tools.
 
-App-by-app results live in [docs/app-compatibility.md](docs/app-compatibility.md).
+```powershell
+cargo install --path crates/winwright-cli --locked   # puts winwright.exe in ~\.cargo\bin
+scripts\check.ps1                                    # format, lint, tests
+scripts\check.ps1 -Live                              # also the real-desktop tests (hands off)
+```
 
-Logs go to stderr; set `WINWRIGHT_LOG=debug` for detail.
+The command line drives the same engine: `winwright windows`, `winwright snapshot`,
+`winwright inspect --under-cursor`, `winwright find --role Button --name Save`, and more
+(`winwright --help`). Logs go to stderr; set `WINWRIGHT_LOG=debug` for detail. Design notes
+live in [.gsd](.gsd) and app-by-app results in [docs/app-compatibility.md](docs/app-compatibility.md).
+
+## Security
+
+Winwright acts on your desktop with your rights, so treat the AI app driving it as you would a
+person at your keyboard. Report vulnerabilities privately: see [SECURITY.md](SECURITY.md).
+
+## License
+
+Licensed under either of [Apache License 2.0](LICENSE-APACHE) or [MIT](LICENSE-MIT), at your
+option. Contributions are accepted under the same terms.

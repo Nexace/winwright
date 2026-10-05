@@ -1,0 +1,36 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain (pinned in rust-toolchain.toml)
+        run: rustup show
+      - run: cargo test --workspace --locked
+      - run: cargo build --release --locked -p winwright-cli
+      - name: Package
+        shell: pwsh
+        run: |
+          $name = "winwright-${{ github.ref_name }}-windows-x64"
+          New-Item -ItemType Directory $name | Out-Null
+          Copy-Item target/release/winwright.exe, README.md, SECURITY.md, LICENSE-MIT, LICENSE-APACHE $name
+          Compress-Archive $name "$name.zip"
+          $hash = (Get-FileHash "$name.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $name.zip" | Out-File -Encoding ascii "$name.zip.sha256"
+          "NAME=$name" >> $env:GITHUB_ENV
+          "HASH=$hash" >> $env:GITHUB_ENV
+      - name: Publish
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $notes = "Download $env:NAME.zip, unzip it and run ``winwright setup``. SHA-256: ``$env:HASH``"
+          gh release create "${{ github.ref_name }}" "$env:NAME.zip" "$env:NAME.zip.sha256" --title "Winwright ${{ github.ref_name }}" --notes $notes --generate-notes
