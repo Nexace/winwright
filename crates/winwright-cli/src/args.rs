@@ -101,6 +101,20 @@ pub enum Command {
     /// Check this PC: each monitor's size and scaling, an overlay drawn and captured on each,
     /// UI Automation and the click watcher. Shows a small box per monitor; takes no input.
     Doctor,
+    /// Install winwright.exe in a folder of its own and register it in every AI app found
+    /// (Claude Desktop, Cursor, Windsurf, Antigravity, opencode, Codex; Claude Code gets the
+    /// command to run). Each changed config is backed up first.
+    Setup(SetupArgs),
+}
+
+#[derive(Args)]
+pub struct SetupArgs {
+    /// Show what would change without changing anything.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Take Winwright out of every app's config instead.
+    #[arg(long)]
+    pub remove: bool,
 }
 
 #[derive(Args)]

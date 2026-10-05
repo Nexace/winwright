@@ -1,6 +1,7 @@
 mod args;
 mod doctor;
 mod lazy;
+mod setup;
 
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -444,6 +445,7 @@ async fn run(cli: Cli) -> Result<(), WinwrightError> {
             return Ok(());
         }
         Command::Doctor => return doctor::run(config).await,
+        Command::Setup(s) => return setup::run(s.dry_run, s.remove),
         Command::Mcp(m) => {
             check_mcp_enabled(&config)?;
             return serve_mcp(config, m.taint_file).await;
@@ -480,6 +482,7 @@ async fn run(cli: Cli) -> Result<(), WinwrightError> {
         | Command::Mcp(_)
         | Command::Audit(_)
         | Command::Doctor
+        | Command::Setup(_)
         | Command::Inspector => unreachable!("handled above"),
         Command::Windows => {
             let windows = engine.list_windows()?;
