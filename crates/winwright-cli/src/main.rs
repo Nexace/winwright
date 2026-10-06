@@ -14,6 +14,7 @@ use winwright_contracts::element::ElementDetails;
 use winwright_contracts::ids::SessionId;
 use winwright_contracts::input::{MouseButton, parse_chord};
 use winwright_contracts::locator::FindResult;
+use winwright_contracts::security::{ConfirmationPrompt, Confirmer};
 use winwright_contracts::snapshot::SnapshotRequest;
 use winwright_contracts::window::WindowInfo;
 use winwright_core::{Engine, InspectRequest};
@@ -261,9 +262,12 @@ async fn serve_mcp(
             Arc::clone(&leader),
         );
         let (tray, hotkeys) = (native.tray.clone(), native.hotkeys.clone());
+        let runtime = tokio::runtime::Handle::current();
         std::thread::Builder::new()
             .name("winwright-coordinator".into())
-            .spawn(move || coordinate(&engine, &stop, &done, &leader, &tray, &hotkeys))
+            .spawn(move || {
+                coordinate(&engine, &stop, &done, &leader, &tray, &hotkeys, &runtime);
+            })
             .map_err(|e| WinwrightError::BackendUnavailable {
                 backend: "mcp".into(),
                 reason: format!("cannot start the coordinator thread: {e}"),
@@ -303,6 +307,7 @@ fn coordinate(
     leader: &std::sync::atomic::AtomicBool,
     tray: &winwright_overlay::TrayHost,
     hotkeys: &winwright_overlay::HotkeyHost,
+    runtime: &tokio::runtime::Handle,
 ) {
     use std::sync::atomic::Ordering;
     let mut lead_state: Option<(
@@ -337,7 +342,7 @@ fn coordinate(
             if let Some(lock) = winwright_win32::shared::LeaderLock::try_acquire() {
                 // Leading without the hotkey (an older Winwright still holds it) would leave
                 // nobody able to stop everything: let the lock go and try again later.
-                if let Some(hotkey) = lead(engine, stop, tray, hotkeys, stopped) {
+                if let Some(hotkey) = lead(engine, stop, tray, hotkeys, runtime, stopped) {
                     leader.store(true, Ordering::SeqCst);
                     lead_state = Some((lock, hotkey));
                 }
@@ -361,6 +366,7 @@ fn lead(
     stop: &Arc<winwright_win32::shared::StopSignal>,
     tray: &winwright_overlay::TrayHost,
     hotkeys: &winwright_overlay::HotkeyHost,
+    runtime: &tokio::runtime::Handle,
     stopped: bool,
 ) -> Option<winwright_overlay::HotkeyId> {
     let (weak, signal) = (engine.clone(), Arc::clone(stop));
@@ -384,6 +390,7 @@ fn lead(
         winwright_overlay::EMERGENCY_STOP_DEFAULT
     );
     let (weak, signal, menu_tray) = (engine.clone(), Arc::clone(stop), tray.clone());
+    let runtime = runtime.clone();
     if let Err(err) = tray.show(
         tray_state(stopped),
         Box::new(move |id| match id {
@@ -395,11 +402,26 @@ fn lead(
                 menu_tray.update(tray_state(true));
             }
             TRAY_REARM => {
-                signal.resume();
-                if let Some(engine) = weak.upgrade() {
-                    engine.rearm();
-                }
-                menu_tray.update(tray_state(false));
+                // A program clicking this menu must not undo the person's stop: resuming asks
+                // through the dialog only real mouse or keyboard input can answer.
+                let (signal, weak, tray) = (Arc::clone(&signal), weak.clone(), menu_tray.clone());
+                runtime.spawn(async move {
+                    let prompt = ConfirmationPrompt {
+                        summary: "Resume AI actions in every app".into(),
+                        target: None,
+                        reason: "You stopped Winwright. Resuming lets AI apps use this PC again."
+                            .into(),
+                        timeout_ms: 45_000,
+                    };
+                    let confirmer = winwright_overlay::NativeConfirmer::new();
+                    if matches!(confirmer.confirm(prompt).await, Ok(true)) {
+                        signal.resume();
+                        if let Some(engine) = weak.upgrade() {
+                            engine.rearm();
+                        }
+                        tray.update(tray_state(false));
+                    }
+                });
             }
             TRAY_INSPECTOR => open_inspector(),
             TRAY_AUDIT if !open_audit_log() => menu_tray.notify(

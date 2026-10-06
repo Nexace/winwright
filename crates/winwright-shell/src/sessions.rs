@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::{ChildStdin, Command};
 use tokio::sync::Notify;
-use windows::Win32::System::Threading::CREATE_NO_WINDOW;
+use windows::Win32::System::Threading::{CREATE_NO_WINDOW, CREATE_SUSPENDED};
 use winwright_contracts::system::{ExecRequest, SessionInfo, SessionOutput, SessionStart};
 use winwright_contracts::{WinwrightError, WinwrightResult};
 
@@ -154,13 +154,15 @@ impl Sessions {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .creation_flags(CREATE_NO_WINDOW.0)
+            // Suspended until it is in the kill-on-close job (see `exec`).
+            .creation_flags(CREATE_NO_WINDOW.0 | CREATE_SUSPENDED.0)
             .kill_on_drop(true);
         if let Some(dir) = &request.working_dir {
             command.current_dir(dir);
         }
         let mut child = command.spawn().map_err(|e| spawn_error(&program, &e))?;
         let job = KillOnCloseJob::assign(&child);
+        crate::exec::resume(child.id());
         let id = self.next.fetch_add(1, Ordering::Relaxed) + 1;
         let session = Arc::new(Running {
             id,

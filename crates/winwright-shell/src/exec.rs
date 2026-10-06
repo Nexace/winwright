@@ -11,12 +11,17 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::{Child, Command};
 use tokio::task::JoinHandle;
 use windows::Win32::Foundation::{ERROR_ELEVATION_REQUIRED, HANDLE};
+use windows::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
+};
 use windows::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
     SetInformationJobObject, TerminateJobObject,
 };
-use windows::Win32::System::Threading::CREATE_NO_WINDOW;
+use windows::Win32::System::Threading::{
+    CREATE_NO_WINDOW, CREATE_SUSPENDED, OpenThread, ResumeThread, THREAD_SUSPEND_RESUME,
+};
 use windows::core::PCWSTR;
 use winwright_contracts::backend::OperationContext;
 use winwright_contracts::system::{ExecRequest, ExecResult};
@@ -84,7 +89,9 @@ pub(crate) async fn exec(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .creation_flags(CREATE_NO_WINDOW.0)
+        // Suspended until it is in the kill-on-close job: a child it starts at once must
+        // not escape the job.
+        .creation_flags(CREATE_NO_WINDOW.0 | CREATE_SUSPENDED.0)
         .kill_on_drop(true);
     if let Some(dir) = &request.working_dir {
         command.current_dir(dir);
@@ -94,6 +101,7 @@ pub(crate) async fn exec(
     let deadline = (started + Duration::from_millis(request.timeout_ms)).min(ctx.deadline);
     let mut child = command.spawn().map_err(|e| spawn_error(&program, &e))?;
     let job = KillOnCloseJob::assign(&child);
+    resume(child.id());
 
     let stdout = Arc::new(Mutex::new(Capture::new(request.max_output_bytes)));
     let stderr = Arc::new(Mutex::new(Capture::new(request.max_output_bytes)));
@@ -329,6 +337,32 @@ pub(crate) fn incomplete_utf8_tail(bytes: &[u8]) -> usize {
 
 /// Job object that kills every process in it when terminated or when its handle closes.
 pub(crate) struct KillOnCloseJob(OwnedHandle);
+
+/// Lets a process created suspended run: resumes the threads it has (just its first one).
+pub(crate) fn resume(pid: Option<u32>) {
+    let Some(pid) = pid else { return };
+    // SAFETY: a thread snapshot owned below; each thread handle is closed after use.
+    unsafe {
+        let Ok(raw) = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) else {
+            return;
+        };
+        let snapshot = OwnedHandle(raw);
+        let mut entry = THREADENTRY32 {
+            dwSize: size_of::<THREADENTRY32>() as u32,
+            ..Default::default()
+        };
+        let mut more = Thread32First(snapshot.0, &mut entry).is_ok();
+        while more {
+            if entry.th32OwnerProcessID == pid
+                && let Ok(thread) = OpenThread(THREAD_SUSPEND_RESUME, false, entry.th32ThreadID)
+            {
+                let thread = OwnedHandle(thread);
+                ResumeThread(thread.0);
+            }
+            more = Thread32Next(snapshot.0, &mut entry).is_ok();
+        }
+    }
+}
 
 impl KillOnCloseJob {
     /// Best effort: without a job, timeouts still kill the direct child.

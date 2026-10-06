@@ -502,7 +502,25 @@ impl Engine {
             DesktopAction::ClickAt { .. } => focused.or(target.map(|r| &r.props)),
             _ => target.map(|r| &r.props).or(focused),
         };
-        if !activates || !receiver.is_some_and(|p| is_affirmative(&p.name)) {
+        // Y, N, or Alt+Y outside a text field press the dialog button with that mnemonic.
+        let in_text = focused.is_some_and(|p| {
+            matches!(
+                p.role,
+                ControlRole::Edit | ControlRole::Document | ControlRole::ComboBox
+            )
+        });
+        let mnemonic = match action {
+            DesktopAction::Press { keys, .. } => {
+                !in_text
+                    && keys
+                        .iter()
+                        .any(|k| matches!(k, Key::Char(c) if c.is_ascii_alphabetic()))
+                    && !keys.iter().any(|k| matches!(k, Key::Ctrl | Key::Win))
+            }
+            _ => false,
+        };
+        let answers = activates && receiver.is_some_and(|p| is_affirmative(&p.name));
+        if !answers && !mnemonic {
             return None;
         }
         let window = match target {
@@ -551,10 +569,15 @@ impl Engine {
                     }
                     walk(dialog, &mut text, &mut fields);
                 }
+                let found = scope.is_some();
                 let mut keys = Vec::new();
                 all_keys(&tree.root, &mut keys);
                 self.release(keys).await;
-                scope?;
+                if !found {
+                    // A modal deep in a web app's tree, beyond the search's reach: judge it by
+                    // the name of the dialog around the button, often its question.
+                    text.push(self.dialog_ancestor_name(target, ctx).await?);
+                }
             }
             // Without the tree a dialog window's title still says a lot ("Delete File").
             Err(_) if separate => text.push(window.title.clone()),
@@ -572,6 +595,28 @@ impl Engine {
             risk: classify_activation(&text.join("\n"), ""),
             command,
         })
+    }
+
+    /// The name of the nearest dialog around `target` (or the focused element).
+    async fn dialog_ancestor_name(
+        &self,
+        target: Option<&Resolved>,
+        ctx: &OperationContext,
+    ) -> Option<String> {
+        let inspected = match target {
+            Some(r) => self.uia.inspect(InspectTarget::Element(r.key), ctx).await,
+            None => self.uia.inspect(InspectTarget::Focused, ctx).await,
+        }
+        .ok()?;
+        if target.is_none_or(|r| r.key != inspected.key) {
+            self.release(vec![inspected.key]).await;
+        }
+        inspected
+            .ancestors
+            .iter()
+            .rev()
+            .find(|a| a.role == ControlRole::Dialog && !a.name.trim().is_empty())
+            .map(|a| a.name.clone())
     }
 
     /// `focused` is the element keys without a target would reach; `dialog` is what an
