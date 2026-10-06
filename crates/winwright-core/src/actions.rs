@@ -468,11 +468,13 @@ impl Engine {
             })
     }
 
+    /// Top-level windows, without Winwright's own (its overlays are not the app's windows).
     fn window_set(&self) -> WindowSet {
         self.windows
             .list_windows()
             .map(|ws| {
                 ws.into_iter()
+                    .filter(|w| !w.process_name.eq_ignore_ascii_case("winwright.exe"))
                     .map(|w| (w.hwnd, window_label(&w.title, &w.process_name)))
                     .collect()
             })

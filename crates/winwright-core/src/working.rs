@@ -13,6 +13,22 @@ use crate::services::DEFAULT_OVERLAY_COLOR;
 const LINGER: Duration = Duration::from_millis(1_500);
 /// Upper bound for one frame, should an action hang.
 const MAX_SHOWN_MS: u64 = 120_000;
+/// The highlight draws its border just outside the rect it is given; a maximized window's
+/// edges are the screen's, where that border would be off-screen. Inset so it lies inside.
+const INSET: i32 = 10;
+
+/// `bounds` shrunk by [`INSET`] on every side (unchanged when too small for that).
+fn inside(bounds: PhysicalRect) -> PhysicalRect {
+    if bounds.width() <= 4 * INSET || bounds.height() <= 4 * INSET {
+        return bounds;
+    }
+    PhysicalRect::new(
+        bounds.left + INSET,
+        bounds.top + INSET,
+        bounds.right - INSET,
+        bounds.bottom - INSET,
+    )
+}
 
 #[derive(Default)]
 pub(crate) struct Working {
@@ -46,7 +62,7 @@ impl Working {
     ) -> Shown {
         let id = overlay
             .show(OverlayRequest {
-                rect: bounds,
+                rect: inside(bounds),
                 style: OverlayStyle::Highlight,
                 label: None,
                 step: None,
@@ -135,6 +151,14 @@ mod tests {
 
     fn up(frames: &Frames) -> Vec<u64> {
         frames.0.lock().unwrap().1.clone()
+    }
+
+    #[test]
+    fn the_frame_sits_inside_the_windows_edge() {
+        let maximized = PhysicalRect::new(0, 0, 1920, 1152);
+        assert_eq!(inside(maximized), PhysicalRect::new(10, 10, 1910, 1142));
+        let tiny = PhysicalRect::new(0, 0, 30, 30);
+        assert_eq!(inside(tiny), tiny);
     }
 
     #[tokio::test(start_paused = true)]
