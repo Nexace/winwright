@@ -950,6 +950,7 @@ impl Engine {
         }
         if let Some(overlay) = self.overlay.as_deref() {
             let _ = overlay.clear(None);
+            overlay.hush();
         }
         tracing::warn!("emergency stop: all sessions cancelled");
     }

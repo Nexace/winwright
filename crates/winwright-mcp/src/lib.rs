@@ -549,7 +549,7 @@ impl WinwrightMcp {
         for keys they press), then shows the next step. Steps point at a ref, or at x/y in pixels of `window`'s \
         desktop_screenshot (width/height = the spot, default 48). Nothing is clicked for them. A click outside the spot \
         shows \"Not there\" and keeps waiting; the third one on a step stops the guide. After 8 s without a click the \
-        pointer glides to the spot again. Returns how far they got, their \
+        pointer glides to the spot again; speak=true also reads each caption aloud. Returns how far they got, their \
         clicks and a screenshot: when it stopped on clicks elsewhere, look and help; when time ran out, call again with \
         the steps left."
     )]

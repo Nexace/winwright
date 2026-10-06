@@ -898,6 +898,8 @@ pub struct GuideInput {
     /// How long to wait for the person in all (default 50000 ms, at most 300000; some apps end
     /// tool calls after 60 s).
     pub timeout_ms: Option<u64>,
+    /// Also read each step's caption aloud with the Windows voice (default false).
+    pub speak: Option<bool>,
 }
 
 impl GuideInput {
@@ -912,6 +914,7 @@ impl GuideInput {
             style: self.style.unwrap_or(OverlayStyle::Pointer),
             color: None,
             timeout_ms: self.timeout_ms.unwrap_or(50_000),
+            speak: self.speak.unwrap_or(false),
         })
     }
 }
@@ -1122,6 +1125,10 @@ mod tests {
             Some("Lightroom")
         );
         assert_eq!(req.steps[2].wait, GuideWait::Change);
+        assert!(!req.speak, "speaking is opt-in");
+        let spoken: GuideInput =
+            serde_json::from_str(r#"{"steps":[{"caption":"x","ref":"e1"}],"speak":true}"#).unwrap();
+        assert!(spoken.request().unwrap().speak);
 
         let both: GuideInput =
             serde_json::from_str(r#"{"steps":[{"caption":"x","ref":"e1","x":1,"y":2}]}"#).unwrap();

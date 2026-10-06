@@ -152,6 +152,9 @@ pub struct GuideRequest {
     pub color: Option<u32>,
     /// For the whole guide.
     pub timeout_ms: u64,
+    /// Each step's caption is also read aloud with the Windows voice.
+    #[serde(default)]
+    pub speak: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -242,6 +245,19 @@ pub trait OverlayService: Send + Sync {
             reason: "this overlay service cannot watch the pointer".into(),
         })
     }
+
+    /// Reads `text` aloud with the Windows voice, cutting off whatever it was still saying.
+    /// Returns at once; the speech goes on by itself.
+    fn speak(&self, text: &str) -> WinwrightResult<()> {
+        let _ = text;
+        Err(WinwrightError::BackendUnavailable {
+            backend: "overlay".into(),
+            reason: "this overlay service cannot speak".into(),
+        })
+    }
+
+    /// Stops any speech at once. Never blocks.
+    fn hush(&self) {}
 }
 
 /// A global hotkey bound with `RegisterHotKey`. Conflicts are reported, never ignored.

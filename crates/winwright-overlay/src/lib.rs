@@ -34,6 +34,7 @@ mod render;
 pub mod theme;
 mod thread;
 mod tray;
+mod voice;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender, SyncSender};
@@ -265,6 +266,7 @@ impl NativeUi {
         Ok(Self {
             overlay: NativeOverlay {
                 ui: Arc::clone(&ui),
+                voice: voice::Voice::default(),
             },
             tray: TrayHost {
                 ui: Arc::clone(&ui),
@@ -321,6 +323,7 @@ impl TrayHost {
 /// Click-through, never-activating overlays ([`OverlayService`]).
 pub struct NativeOverlay {
     ui: Arc<UiThread>,
+    voice: voice::Voice,
 }
 
 impl NativeOverlay {
@@ -400,6 +403,15 @@ impl OverlayService for NativeOverlay {
         Ok(PointerWatch::new(move || {
             let _ = ui.submit(Command::UnwatchPointer { id });
         }))
+    }
+
+    /// SAPI on its own thread, started on first use.
+    fn speak(&self, text: &str) -> WinwrightResult<()> {
+        self.voice.speak(text)
+    }
+
+    fn hush(&self) {
+        self.voice.hush();
     }
 }
 

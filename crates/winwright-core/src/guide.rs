@@ -239,6 +239,15 @@ impl Drop for Drawn<'_> {
     }
 }
 
+/// Stops the voice when dropped, however the guide ends.
+struct Hush<'a>(&'a dyn OverlayService);
+
+impl Drop for Hush<'_> {
+    fn drop(&mut self) {
+        self.0.hush();
+    }
+}
+
 impl Engine {
     /// A spot's screen area, the origin of its pixels, and the element under its center (with
     /// a ref). Winwright's own windows are refused.
@@ -337,6 +346,8 @@ impl Engine {
             warnings: Vec::new(),
         };
         let color = request.color.unwrap_or(DEFAULT_OVERLAY_COLOR);
+        let mut speaking = request.speak;
+        let _hush = speaking.then_some(Hush(overlay));
         let mut missed = None;
         'steps: for (i, step) in request.steps.iter().enumerate() {
             self.ensure_no_confirmation_open()?;
@@ -360,6 +371,12 @@ impl Engine {
                 overlay,
                 id: show(caption.to_owned(), color)?,
             };
+            if speaking && let Err(err) = overlay.speak(caption) {
+                result
+                    .warnings
+                    .push(format!("captions are not read aloud: {err}"));
+                speaking = false;
+            }
             match step.wait {
                 GuideWait::Click => {
                     let mut misses = 0;
@@ -582,6 +599,7 @@ mod tests {
             style: OverlayStyle::Pointer,
             color: None,
             timeout_ms: 1_000,
+            speak: false,
         }
     }
 
