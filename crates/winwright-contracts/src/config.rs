@@ -11,6 +11,8 @@ pub struct Config {
     pub capture: CaptureConfig,
     pub security: SecurityConfig,
     pub overlay: OverlayConfig,
+    pub notifications: NotificationsConfig,
+    pub updates: UpdatesConfig,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -112,16 +114,52 @@ impl Default for SecurityConfig {
     }
 }
 
+/// The look of Winwright's own windows (tray menu, dialogs, Inspector). `WINWRIGHT_THEME`
+/// overrides it, and Windows' high-contrast mode overrides both.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum ThemeChoice {
+    /// Follow the Windows app mode.
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", default, deny_unknown_fields)]
 pub struct OverlayConfig {
     pub enabled: bool,
+    pub theme: ThemeChoice,
 }
 
 impl Default for OverlayConfig {
     fn default() -> Self {
-        Self { enabled: true }
+        Self {
+            enabled: true,
+            theme: ThemeChoice::System,
+        }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
+pub struct NotificationsConfig {
+    /// A Windows notification when an AI app reports a finished task.
+    pub task_done: bool,
+}
+
+impl Default for NotificationsConfig {
+    fn default() -> Self {
+        Self { task_done: true }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
+pub struct UpdatesConfig {
+    /// At most once a day, ask GitHub whether a newer release exists (off unless turned on).
+    pub check: bool,
 }
 
 #[cfg(test)]
@@ -150,6 +188,19 @@ mod tests {
         assert_eq!(cfg.automation.reference_ttl_seconds, 30);
         assert!(!cfg.security.allow_shell && cfg.security.block_password_read);
         assert!(!cfg.server.http, "HTTP is opt-in");
+    }
+
+    #[test]
+    fn everyday_settings_have_their_names_and_defaults() {
+        let cfg = Config::default();
+        assert!(cfg.security.allow_for_a_while && cfg.notifications.task_done);
+        assert!(!cfg.updates.check, "update checks are opt-in");
+        assert_eq!(cfg.overlay.theme, ThemeChoice::System);
+        let json = r#"{"security":{"allowForAWhile":false},"overlay":{"theme":"dark"},
+            "notifications":{"taskDone":false},"updates":{"check":true}}"#;
+        let cfg: Config = serde_json::from_str(json).unwrap();
+        assert!(!cfg.security.allow_for_a_while && !cfg.notifications.task_done);
+        assert!(cfg.updates.check && cfg.overlay.theme == ThemeChoice::Dark);
     }
 
     #[test]

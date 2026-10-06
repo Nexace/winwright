@@ -31,6 +31,7 @@ mod layout;
 mod paint;
 mod pointer;
 mod render;
+mod settings;
 pub mod theme;
 mod thread;
 mod tray;
@@ -54,6 +55,7 @@ use winwright_contracts::{WinwrightError, WinwrightResult};
 use crate::thread::{Callback, Command, Signals, WM_APP_WAKE};
 
 pub use crate::confirm::{NativeConfirmer, dialog_text};
+pub use crate::settings::{SaveSettings, Settings, open_settings};
 pub use crate::tray::{TrayMenuItem, TrayState};
 
 /// Default emergency-stop chord (spec §22). The engine binds it to `cancel_all`.

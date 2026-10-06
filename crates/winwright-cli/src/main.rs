@@ -2,6 +2,8 @@ mod args;
 mod doctor;
 mod lazy;
 mod setup;
+mod tray_menu;
+mod update;
 
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -425,15 +427,33 @@ fn lead(
                 });
             }
             TRAY_INSPECTOR => open_inspector(),
-            TRAY_AUDIT if !open_audit_log() => menu_tray.notify(
-                "No audit log yet",
-                "Winwright records every AI action here once an assistant acts.",
+            TRAY_SETTINGS => tray_menu::open_settings(&menu_tray),
+            TRAY_CHECK => tray_menu::check_this_pc(&menu_tray),
+            TRAY_UPDATE => {
+                if let Some(release) = update::available() {
+                    spawn_detached(std::process::Command::new("explorer.exe").arg(release.url));
+                }
+            }
+            TRAY_AUDIT if !open_recent_activity() => menu_tray.notify(
+                "No activity yet",
+                "Winwright lists every AI action here once an assistant acts (unless the activity log is off in Settings).",
             ),
             _ => {}
         }),
     ) {
         tracing::warn!(%err, "tray icon unavailable");
     }
+    let (found_tray, menu_tray, signal) = (tray.clone(), tray.clone(), Arc::clone(stop));
+    update::start(
+        tray_menu::updates_enabled,
+        move |release| {
+            found_tray.notify(
+                &format!("Winwright {} available", release.label()),
+                "Choose \"Get Winwright\" in the tray menu to open the release page.",
+            )
+        },
+        move || menu_tray.update(tray_state(signal.is_stopped())),
+    );
     Some(hotkey)
 }
 
@@ -452,6 +472,9 @@ const TRAY_STOP: u32 = 1;
 const TRAY_REARM: u32 = 2;
 const TRAY_INSPECTOR: u32 = 3;
 const TRAY_AUDIT: u32 = 4;
+const TRAY_SETTINGS: u32 = 5;
+const TRAY_CHECK: u32 = 6;
+const TRAY_UPDATE: u32 = 7;
 
 fn tray_state(stopped: bool) -> winwright_overlay::TrayState {
     use winwright_overlay::theme::glyph;
@@ -463,7 +486,7 @@ fn tray_state(stopped: bool) -> winwright_overlay::TrayState {
         glyph: Some(glyph),
         separator_before,
     };
-    TrayState {
+    let mut state = TrayState {
         tooltip: if stopped {
             "Winwright \u{00B7} stopped (AI actions are blocked)".into()
         } else {
@@ -487,9 +510,18 @@ fn tray_state(stopped: bool) -> winwright_overlay::TrayState {
                 )
             },
             item(TRAY_INSPECTOR, "Open Inspector", glyph::SEARCH, true),
-            item(TRAY_AUDIT, "View audit log", glyph::HISTORY, false),
+            item(TRAY_AUDIT, "Recent activity", glyph::HISTORY, false),
+            item(TRAY_CHECK, "Check this PC", glyph::DIAGNOSTIC, false),
+            item(TRAY_SETTINGS, "Settings", glyph::SETTINGS, true),
         ],
+    };
+    if let Some(release) = update::available() {
+        let label = format!("Get Winwright {}", release.label());
+        state
+            .items
+            .push(item(TRAY_UPDATE, &label, glyph::DOWNLOAD, false));
     }
+    state
 }
 
 /// Starts a program for the user without waiting for it. Its stdio is never the MCP pipes:
@@ -513,16 +545,33 @@ fn open_inspector() {
     }
 }
 
-/// Opens the audit log in Notepad (the user's own click from the tray menu). False when
-/// there is no log yet.
-fn open_audit_log() -> bool {
-    let Some(path) = winwright_core::audit::AuditLog::default_path() else {
+/// How many of the latest audit events "Recent activity" lists.
+const RECENT_ACTIVITY: usize = 200;
+
+/// Opens the latest audit events as a plain list in Notepad (the user's own click from the tray
+/// menu). False when nothing is recorded yet.
+fn open_recent_activity() -> bool {
+    use winwright_core::audit::{AuditLog, readable};
+    let Some(log) = AuditLog::default_path() else {
         return false;
     };
-    if !path.exists() {
+    let lines = AuditLog::tail(&log, RECENT_ACTIVITY).unwrap_or_default();
+    if lines.is_empty() {
         return false;
     }
-    spawn_detached(std::process::Command::new("notepad.exe").arg(&path));
+    let text = format!(
+        "Winwright: what your AI apps did on this PC, newest first (the last {RECENT_ACTIVITY} \
+         actions).\nTyped text and field values are never recorded.\nFull log: {}\n\n{}",
+        log.display(),
+        readable(&lines, winwright_memory::local_ms)
+    );
+    let list = std::env::temp_dir().join("winwright-recent-activity.txt");
+    if let Err(err) = std::fs::write(&list, text) {
+        tracing::warn!(%err, "cannot write the activity list; opening the raw log");
+        spawn_detached(std::process::Command::new("notepad.exe").arg(&log));
+        return true;
+    }
+    spawn_detached(std::process::Command::new("notepad.exe").arg(&list));
     true
 }
 
@@ -545,6 +594,8 @@ async fn act(engine: &Engine, action: DesktopAction, json: bool) -> Result<(), W
 
 async fn run(cli: Cli) -> Result<(), WinwrightError> {
     let config = winwright_core::config::load_config(cli.config.as_deref())?;
+    winwright_overlay::theme::set_choice(config.overlay.theme);
+    tray_menu::remember_config_path(cli.config.clone());
     let json = cli.json;
     let Some(command) = cli.command else {
         unreachable!("main answers a missing command itself")
@@ -954,6 +1005,7 @@ fn print_overview() {
 
 fn run_inspector(config: Option<&std::path::Path>) -> Result<(), WinwrightError> {
     let config = winwright_core::config::load_config(config)?;
+    winwright_overlay::theme::set_choice(config.overlay.theme);
     let engine = Engine::new(
         config,
         Arc::new(winwright_win32::Win32Windows),
