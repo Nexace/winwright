@@ -2,6 +2,7 @@ mod args;
 mod doctor;
 mod lazy;
 mod setup;
+mod tray_menu;
 
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -424,9 +425,10 @@ fn lead(
                 });
             }
             TRAY_INSPECTOR => open_inspector(),
+            TRAY_SETTINGS => tray_menu::open_settings(&menu_tray),
             TRAY_AUDIT if !open_recent_activity() => menu_tray.notify(
                 "No activity yet",
-                "Winwright lists every AI action here once an assistant acts (unless the audit log is off).",
+                "Winwright lists every AI action here once an assistant acts (unless the activity log is off in Settings).",
             ),
             _ => {}
         }),
@@ -451,6 +453,7 @@ const TRAY_STOP: u32 = 1;
 const TRAY_REARM: u32 = 2;
 const TRAY_INSPECTOR: u32 = 3;
 const TRAY_AUDIT: u32 = 4;
+const TRAY_SETTINGS: u32 = 5;
 
 fn tray_state(stopped: bool) -> winwright_overlay::TrayState {
     use winwright_overlay::theme::glyph;
@@ -487,6 +490,7 @@ fn tray_state(stopped: bool) -> winwright_overlay::TrayState {
             },
             item(TRAY_INSPECTOR, "Open Inspector", glyph::SEARCH, true),
             item(TRAY_AUDIT, "Recent activity", glyph::HISTORY, false),
+            item(TRAY_SETTINGS, "Settings", glyph::SETTINGS, true),
         ],
     }
 }
@@ -562,6 +566,7 @@ async fn act(engine: &Engine, action: DesktopAction, json: bool) -> Result<(), W
 async fn run(cli: Cli) -> Result<(), WinwrightError> {
     let config = winwright_core::config::load_config(cli.config.as_deref())?;
     winwright_overlay::theme::set_choice(config.overlay.theme);
+    tray_menu::remember_config_path(cli.config.clone());
     let json = cli.json;
     let Some(command) = cli.command else {
         unreachable!("main answers a missing command itself")

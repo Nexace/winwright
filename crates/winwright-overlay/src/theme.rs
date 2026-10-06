@@ -62,6 +62,11 @@ pub mod glyph {
     pub const CHEVRON_DOWN: char = '\u{E70D}';
     pub const WINDOW: char = '\u{E737}';
     pub const LOCK: char = '\u{E72E}';
+    pub const SETTINGS: char = '\u{E713}';
+    pub const ADD: char = '\u{E710}';
+    pub const REMOVE: char = '\u{E738}';
+    pub const DIAGNOSTIC: char = '\u{E9D9}';
+    pub const DOWNLOAD: char = '\u{E896}';
 }
 
 /// Colors as `0xRRGGBB`.

@@ -674,7 +674,7 @@ fn child(parent: HWND, class: PCWSTR, text: &str, style: u32, id: i32) -> Winwri
     .map_err(|e| platform("CreateWindowExW(confirm child)", &e))
 }
 
-fn cursor_monitor_dpi_and_work_area() -> (u32, RECT) {
+pub(crate) fn cursor_monitor_dpi_and_work_area() -> (u32, RECT) {
     // SAFETY: plain cursor/monitor queries with local out-parameters.
     unsafe {
         let mut pt = POINT::default();
@@ -707,7 +707,7 @@ fn dialog_ex_style() -> WINDOW_EX_STYLE {
     WINDOW_EX_STYLE(WS_EX_TOPMOST.0 | WS_EX_APPWINDOW.0)
 }
 
-fn set_icons(hwnd: HWND, dpi: u32) -> Vec<HICON> {
+pub(crate) fn set_icons(hwnd: HWND, dpi: u32) -> Vec<HICON> {
     let mut icons = Vec::new();
     // SAFETY: metric queries and WM_SETICON with icons that live until the window closes.
     unsafe {
