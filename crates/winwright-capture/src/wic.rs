@@ -4,7 +4,8 @@
 use windows::Win32::Graphics::Imaging::{
     CLSID_WICImagingFactory, GUID_ContainerFormatJpeg, GUID_ContainerFormatPng,
     GUID_WICPixelFormat24bppBGR, GUID_WICPixelFormat32bppBGRA, IWICBitmapFrameEncode,
-    IWICImagingFactory, WICBitmapEncoderNoCache, WICConvertBitmapSource,
+    IWICBitmapSource, IWICImagingFactory, WICBitmapEncoderNoCache,
+    WICBitmapInterpolationModeHighQualityCubic, WICConvertBitmapSource,
     WICDecodeMetadataCacheOnDemand,
 };
 use windows::Win32::System::Com::StructuredStorage::{IPropertyBag2, PROPBAG2};
@@ -48,10 +49,12 @@ impl Wic {
         Ok(Self { factory })
     }
 
-    /// Encodes tightly packed BGRA pixels. Alpha is ignored (captures are forced opaque).
+    /// Encodes tightly packed BGRA pixels, scaled to `size` (width, height) when it differs.
+    /// Alpha is ignored (captures are forced opaque).
     pub fn encode(
         &self,
         image: &Bgra,
+        size: (u32, u32),
         format: ImageFormat,
         quality: u8,
     ) -> WinwrightResult<Vec<u8>> {
@@ -82,7 +85,7 @@ impl Wic {
                 .Initialize(options.as_ref())
                 .map_err(err("IWICBitmapFrameEncode::Initialize"))?;
             frame
-                .SetSize(image.width, image.height)
+                .SetSize(size.0, size.1)
                 .map_err(err("IWICBitmapFrameEncode::SetSize"))?;
             // The encoder may substitute the closest format it supports; convert to whatever
             // it chose rather than assuming.
@@ -100,8 +103,24 @@ impl Wic {
                     &image.pixels,
                 )
                 .map_err(err("IWICImagingFactory::CreateBitmapFromMemory"))?;
+            let mut pixels: IWICBitmapSource = bitmap.into();
+            if size != (image.width, image.height) {
+                let scaler = self
+                    .factory
+                    .CreateBitmapScaler()
+                    .map_err(err("IWICImagingFactory::CreateBitmapScaler"))?;
+                scaler
+                    .Initialize(
+                        &pixels,
+                        size.0,
+                        size.1,
+                        WICBitmapInterpolationModeHighQualityCubic,
+                    )
+                    .map_err(err("IWICBitmapScaler::Initialize"))?;
+                pixels = scaler.into();
+            }
             let source =
-                WICConvertBitmapSource(&chosen, &bitmap).map_err(err("WICConvertBitmapSource"))?;
+                WICConvertBitmapSource(&chosen, &pixels).map_err(err("WICConvertBitmapSource"))?;
             frame
                 .WriteSource(&source, std::ptr::null())
                 .map_err(err("IWICBitmapFrameEncode::WriteSource"))?;
@@ -232,7 +251,9 @@ mod tests {
         let _com = ComApartment::ensure().unwrap();
         let wic = Wic::new().unwrap();
         let img = checker(37, 21);
-        let png = wic.encode(&img, ImageFormat::Png, 0).unwrap();
+        let png = wic
+            .encode(&img, (img.width, img.height), ImageFormat::Png, 0)
+            .unwrap();
         assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
         let back = wic.decode(&png).unwrap();
         assert_eq!(back, img);
@@ -243,8 +264,9 @@ mod tests {
         let _com = ComApartment::ensure().unwrap();
         let wic = Wic::new().unwrap();
         let img = checker(64, 64);
-        let low = wic.encode(&img, ImageFormat::Jpeg, 5).unwrap();
-        let high = wic.encode(&img, ImageFormat::Jpeg, 100).unwrap();
+        let size = (img.width, img.height);
+        let low = wic.encode(&img, size, ImageFormat::Jpeg, 5).unwrap();
+        let high = wic.encode(&img, size, ImageFormat::Jpeg, 100).unwrap();
         assert_eq!(&low[..3], &[0xFF, 0xD8, 0xFF]);
         assert!(low.len() < high.len(), "{} !< {}", low.len(), high.len());
         let back = wic.decode(&high).unwrap();

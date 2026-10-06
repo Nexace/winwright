@@ -818,6 +818,7 @@ impl ScreenshotArgs {
                 ImageFormat::Png
             },
             quality: Some(self.quality),
+            fit: false,
         })
     }
 }

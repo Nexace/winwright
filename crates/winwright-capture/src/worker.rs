@@ -148,12 +148,19 @@ impl Worker {
         let timestamp_ms = now_ms();
         deadline.check("capture")?;
         force_opaque(&mut image.pixels);
-        let bytes = self.wic.encode(&image, request.format, request.quality)?;
+        let (width, height) = request.fit.map_or((image.width, image.height), |fit| {
+            fit.size(image.width, image.height)
+        });
+        let bytes = self
+            .wic
+            .encode(&image, (width, height), request.format, request.quality)?;
         Ok(CapturedImage {
             bytes,
             format: request.format,
-            width: image.width,
-            height: image.height,
+            width,
+            height,
+            physical_width: image.width,
+            physical_height: image.height,
             origin,
             dpi: monitors::dpi_at(origin),
             timestamp_ms,

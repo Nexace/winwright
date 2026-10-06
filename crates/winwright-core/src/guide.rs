@@ -475,6 +475,7 @@ impl Engine {
         let shot = || {
             capture.capture(
                 CaptureRequest {
+                    fit: None,
                     target: CaptureTarget::Region(rect),
                     format: ImageFormat::Png,
                     quality: 100,

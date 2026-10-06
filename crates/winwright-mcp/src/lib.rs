@@ -328,8 +328,8 @@ impl WinwrightMcp {
     #[tool(
         description = "Real mouse input at a point, for what has no UI tree (games, canvases, video) or to point \
         something out: move the pointer, click, drag to toX/toY, or scroll the wheel. With `window`, x/y are pixels of that \
-        window's desktop_screenshot; without it, screen pixels. The element under the point is judged and confirmed like a \
-        click on it. Prefer desktop_click when the element has a ref."
+        window's desktop_screenshot; without it, screen pixels. When the screenshot was scaled down, pass its scale. The \
+        element under the point is judged and confirmed like a click on it. Prefer desktop_click when the element has a ref."
     )]
     async fn desktop_mouse(&self, Parameters(input): Parameters<MouseInput>) -> ToolResult {
         Ok(self.act(input.action()).await)
@@ -511,16 +511,7 @@ impl WinwrightMcp {
                     base64::engine::general_purpose::STANDARD.encode(&img.bytes),
                     mime,
                 ),
-                ContentBlock::text(format!(
-                    "{}x{} at {},{} ({} dpi); pixel (0,0) = desktop ({},{})",
-                    img.width,
-                    img.height,
-                    img.origin.x,
-                    img.origin.y,
-                    img.dpi,
-                    img.origin.x,
-                    img.origin.y
-                )),
+                ContentBlock::text(shot_note(&img)),
             ]),
             Err(e) => fail(e),
         })
@@ -576,15 +567,19 @@ impl WinwrightMcp {
             target,
             format: ImageFormat::Jpeg,
             quality: Some(80),
+            fit: true,
         };
         let mut content = vec![ContentBlock::text(
             serde_json::to_string(&result).unwrap_or_default(),
         )];
         match self.engine.screenshot(&session, shot).await {
-            Ok(img) => content.push(ContentBlock::image(
-                base64::engine::general_purpose::STANDARD.encode(&img.bytes),
-                "image/jpeg",
-            )),
+            Ok(img) => {
+                content.push(ContentBlock::image(
+                    base64::engine::general_purpose::STANDARD.encode(&img.bytes),
+                    "image/jpeg",
+                ));
+                content.push(ContentBlock::text(shot_note(&img)));
+            }
             Err(e) => content.push(ContentBlock::text(format!("no screenshot: {e}"))),
         }
         Ok(CallToolResult::success(content))
@@ -878,6 +873,24 @@ mod idle_tests {
         a.touch();
         assert!(a.idle_for() < Duration::from_secs(1));
     }
+}
+
+/// What a screenshot shows, and how to point into it.
+fn shot_note(img: &winwright_contracts::capture::CapturedImage) -> String {
+    let mut note = format!(
+        "{}x{} at {},{} ({} dpi); pixel (0,0) = desktop ({},{})",
+        img.width, img.height, img.origin.x, img.origin.y, img.dpi, img.origin.x, img.origin.y
+    );
+    if img.width != img.physical_width {
+        note.push_str(&format!(
+            "; scaled down from {}x{}: pass scale={:.4} with x/y read off this image \
+             (desktop_mouse, overlay_highlight, desktop_guide)",
+            img.physical_width,
+            img.physical_height,
+            img.scale()
+        ));
+    }
+    note
 }
 
 #[cfg(test)]

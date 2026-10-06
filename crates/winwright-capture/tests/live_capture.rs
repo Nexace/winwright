@@ -26,7 +26,7 @@ use windows::core::w;
 use winwright_capture::{WgcCapture, decode_bgra};
 use winwright_contracts::backend::OperationContext;
 use winwright_contracts::capture::{
-    CaptureRequest, CaptureService, CaptureTarget, CapturedImage, ImageFormat,
+    CaptureRequest, CaptureService, CaptureTarget, CapturedImage, Fit, ImageFormat,
 };
 use winwright_contracts::geometry::{PhysicalPoint, PhysicalRect};
 use winwright_contracts::ids::SessionId;
@@ -49,6 +49,7 @@ fn request(target: CaptureTarget, format: ImageFormat) -> CaptureRequest {
         target,
         format,
         quality: 90,
+        fit: None,
     }
 }
 
@@ -313,6 +314,26 @@ async fn a_resized_window_is_captured_at_its_new_size() {
     let resized = grab().await.unwrap();
     assert_eq!((resized.width as i32, resized.height as i32), (w, h));
     let (_, _, pixels) = decode(&resized);
+    assert_solid(&pixels, 2);
+}
+
+#[tokio::test]
+#[ignore = "needs an interactive desktop"]
+async fn a_fitted_capture_is_scaled_down_but_keeps_its_bounds() {
+    let (capture, window) = setup(SW_SHOWNOACTIVATE);
+    let mut req = request(CaptureTarget::Window(window.hwnd), ImageFormat::Png);
+    req.fit = Some(Fit {
+        max_edge: 120,
+        max_pixels: 1_000_000,
+    });
+    let image = capture
+        .capture(req, &ctx(Duration::from_secs(10)))
+        .await
+        .unwrap();
+    assert_eq!((image.width, image.height), (120, 80));
+    assert_eq!(image.bounds(), window.rect, "bounds stay physical");
+    assert!((image.scale() - 0.5).abs() < 1e-9);
+    let (_, _, pixels) = decode(&image);
     assert_solid(&pixels, 2);
 }
 

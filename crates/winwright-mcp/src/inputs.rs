@@ -290,6 +290,9 @@ pub struct MouseInput {
     /// Drag end, in the same pixels as x/y.
     pub to_x: Option<i32>,
     pub to_y: Option<i32>,
+    /// The `scale` a scaled-down desktop_screenshot reported: x/y (and toX/toY) are then that
+    /// image's pixels. Default 1.
+    pub scale: Option<f64>,
     /// Default left.
     pub button: Option<ButtonInput>,
     /// Double-click.
@@ -302,9 +305,10 @@ pub struct MouseInput {
 
 impl MouseInput {
     pub fn action(&self) -> Result<DesktopAction> {
-        let point = |x, y| ScreenPoint {
-            x,
-            y,
+        let scale = image_scale(self.scale)?;
+        let point = |x: i32, y: i32| ScreenPoint {
+            x: unscale(x, scale),
+            y: unscale(y, scale),
             window: self.window.as_ref().map(|title| WindowSelector {
                 title: Some(title.clone()),
                 ..Default::default()
@@ -756,8 +760,25 @@ impl ScreenshotInput {
             target,
             format: self.format.unwrap_or(ImageFormat::Jpeg),
             quality: Some(self.quality.unwrap_or(80)),
+            fit: true,
         })
     }
+}
+
+/// A screenshot's reported scale: in (0, 1], default 1.
+fn image_scale(scale: Option<f64>) -> Result<f64> {
+    match scale {
+        None => Ok(1.0),
+        Some(s) if s.is_finite() && s > 0.0 && s <= 1.0 => Ok(s),
+        Some(s) => Err(WinwrightError::invalid(format!(
+            "scale {s} must be in (0, 1]: pass the scale a desktop_screenshot reported"
+        ))),
+    }
+}
+
+/// A pixel of a scaled-down image to the physical pixel it shows.
+fn unscale(v: i32, scale: f64) -> i32 {
+    (f64::from(v) / scale).round() as i32
 }
 
 fn titled(window: &Option<String>) -> Option<WindowSelector> {
@@ -767,21 +788,29 @@ fn titled(window: &Option<String>) -> Option<WindowSelector> {
     })
 }
 
-/// A spot centered on x/y in the pixels of `window`'s screenshot (or the screen).
+/// A spot centered on x/y in the pixels of `window`'s screenshot (or the screen), shown at
+/// `scale` (from the screenshot; 1 when not scaled down).
 fn spot(
     (x, y): (i32, i32),
     (width, height): (Option<u32>, Option<u32>),
     window: &Option<String>,
-) -> ScreenSpot {
-    ScreenSpot {
+    scale: Option<f64>,
+) -> Result<ScreenSpot> {
+    let scale = image_scale(scale)?;
+    let side = |v: Option<u32>| {
+        v.map_or(DEFAULT_SPOT_SIDE, |v| {
+            u32::try_from(unscale(v.min(i32::MAX as u32) as i32, scale)).unwrap_or(1)
+        })
+    };
+    Ok(ScreenSpot {
         at: ScreenPoint {
-            x,
-            y,
+            x: unscale(x, scale),
+            y: unscale(y, scale),
             window: titled(window),
         },
-        width: width.unwrap_or(DEFAULT_SPOT_SIDE),
-        height: height.unwrap_or(DEFAULT_SPOT_SIDE),
-    }
+        width: side(width),
+        height: side(height),
+    })
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -796,6 +825,8 @@ pub struct HighlightInput {
     /// The spot's size around x/y (default 48 each).
     pub width: Option<u32>,
     pub height: Option<u32>,
+    /// The `scale` a scaled-down desktop_screenshot reported, when x/y come from it.
+    pub scale: Option<f64>,
     /// Text shown there, e.g. "Click here".
     pub caption: Option<String>,
     /// pointer (default: a pointer with the caption in a bubble), highlight (a box), arrow, or clickMarker.
@@ -823,7 +854,12 @@ impl HighlightInput {
             }))),
             (Some(x), Some(y)) if self.target.reference.is_none() && !self.target.has_locator() => {
                 Ok(Highlight::Spot(SpotHighlightRequest {
-                    spot: spot((x, y), (self.width, self.height), &self.target.window),
+                    spot: spot(
+                        (x, y),
+                        (self.width, self.height),
+                        &self.target.window,
+                        self.scale,
+                    )?,
                     style,
                     label: self.caption.clone(),
                     color: None,
@@ -854,6 +890,8 @@ pub struct GuideStepInput {
     pub height: Option<u32>,
     /// Title (substring) of the window x/y are relative to.
     pub window: Option<String>,
+    /// The `scale` a scaled-down desktop_screenshot reported, when x/y come from it.
+    pub scale: Option<f64>,
     /// click (default): wait for a click inside the spot. change: wait until the spot's pixels
     /// change, for a step done with the keyboard (name the keys in the caption).
     pub wait: Option<GuideWait>,
@@ -865,9 +903,12 @@ impl GuideStepInput {
             (Some(r), None, None) => {
                 GuideTarget::Element(Box::new(ElementTarget::by_ref(r.clone())))
             }
-            (None, Some(x), Some(y)) => {
-                GuideTarget::Spot(spot((x, y), (self.width, self.height), &self.window))
-            }
+            (None, Some(x), Some(y)) => GuideTarget::Spot(spot(
+                (x, y),
+                (self.width, self.height),
+                &self.window,
+                self.scale,
+            )?),
             (Some(_), _, _) => {
                 return Err(WinwrightError::invalid(format!(
                     "step {n}: give ref or x/y, not both"
@@ -1213,6 +1254,36 @@ mod tests {
             let i: InspectInput = serde_json::from_str(bad).unwrap();
             assert!(i.request().is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn points_on_a_scaled_screenshot_map_back_to_physical_pixels() {
+        let m: MouseInput = serde_json::from_str(
+            r#"{"action":"drag","x":100,"y":50,"toX":678,"toY":424,"scale":0.5}"#,
+        )
+        .unwrap();
+        let DesktopAction::Drag { from, to, .. } = m.action().unwrap() else {
+            panic!()
+        };
+        assert_eq!((from.x, from.y, to.x, to.y), (200, 100, 1356, 848));
+        for bad in ["0", "-1", "1.5"] {
+            let m: MouseInput = serde_json::from_str(&format!(
+                r#"{{"action":"click","x":1,"y":1,"scale":{bad}}}"#
+            ))
+            .unwrap();
+            assert!(m.action().is_err(), "scale {bad}");
+        }
+        let h: HighlightInput =
+            serde_json::from_str(r#"{"x":100,"y":100,"width":24,"scale":0.5}"#).unwrap();
+        let Highlight::Spot(s) = h.request().unwrap() else {
+            panic!()
+        };
+        assert_eq!((s.spot.at.x, s.spot.width, s.spot.height), (200, 48, 48));
+        let s: ScreenshotInput = serde_json::from_str("{}").unwrap();
+        assert!(
+            s.request().unwrap().fit,
+            "the model always gets a fitted image"
+        );
     }
 
     #[test]

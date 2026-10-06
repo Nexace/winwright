@@ -3,7 +3,7 @@
 
 use winwright_contracts::backend::OperationContext;
 use winwright_contracts::capture::{
-    CaptureRequest, CaptureTarget, CapturedImage, ScreenshotRequest, ScreenshotTarget,
+    CaptureRequest, CaptureTarget, CapturedImage, Fit, ScreenshotRequest, ScreenshotTarget,
 };
 use winwright_contracts::overlay::{
     HighlightRequest, HighlightResult, OverlayId, OverlayRequest, OverlayService,
@@ -441,6 +441,7 @@ impl Engine {
                     target,
                     format: request.format,
                     quality: request.quality.unwrap_or(85).clamp(1, 100),
+                    fit: request.fit.then_some(Fit::MODEL),
                 },
                 &ctx,
             )
