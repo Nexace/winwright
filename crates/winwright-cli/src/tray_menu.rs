@@ -1,8 +1,11 @@
 //! What the tray menu's everyday items do: Settings (the person's own click only; no MCP tool
-//! can change these).
+//! can change these) and Check this PC.
 
+use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde_json::json;
 use winwright_contracts::WinwrightError;
@@ -88,10 +91,103 @@ pub fn open_settings(tray: &TrayHost) {
     );
 }
 
+/// One check at a time.
+static CHECKING: AtomicBool = AtomicBool::new(false);
+
+/// Runs `winwright doctor` as a child process without a window, keeps what it printed in a
+/// temp text file and opens that in Notepad. Doctor draws a small box on each monitor for a
+/// moment: the notification says so.
+pub fn check_this_pc(tray: &TrayHost) {
+    if CHECKING.swap(true, Ordering::SeqCst) {
+        tray.notify(
+            "Already checking this PC",
+            "The result opens in Notepad when it is done.",
+        );
+        return;
+    }
+    tray.notify(
+        "Checking this PC",
+        "Winwright shows a small box on each screen for a moment. The result opens in Notepad.",
+    );
+    let tray = tray.clone();
+    let spawned = std::thread::Builder::new()
+        .name("winwright-check".into())
+        .spawn(move || {
+            let report = run_doctor();
+            CHECKING.store(false, Ordering::SeqCst);
+            let file = std::env::temp_dir().join("winwright-check.txt");
+            match std::fs::write(&file, report) {
+                Ok(()) => crate::spawn_detached(Command::new("notepad.exe").arg(&file)),
+                Err(err) => tray.notify("Check this PC", &format!("Cannot save the result: {err}")),
+            }
+        });
+    if spawned.is_err() {
+        CHECKING.store(false, Ordering::SeqCst);
+    }
+}
+
+fn run_doctor() -> String {
+    /// No console window for the child (Winwright itself may have none).
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let output = std::env::current_exe().and_then(|exe| {
+        let mut command = Command::new(exe);
+        if let Some(path) = config_path().filter(|p| p.exists()) {
+            command.arg("--config").arg(path);
+        }
+        command
+            .arg("doctor")
+            .stdin(Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+    });
+    match output {
+        Ok(out) => doctor_report(
+            &String::from_utf8_lossy(&out.stdout),
+            &String::from_utf8_lossy(&out.stderr),
+            out.status.success(),
+        ),
+        Err(err) => format!("Winwright could not run its check: {err}\n"),
+    }
+}
+
+/// What Notepad shows after a check: doctor's own lines, then a verdict.
+fn doctor_report(stdout: &str, stderr: &str, passed: bool) -> String {
+    let mut text = format!(
+        "Winwright {}: Check this PC\n\n{}\n",
+        env!("CARGO_PKG_VERSION"),
+        stdout.trim_end()
+    );
+    if !stderr.trim().is_empty() {
+        text.push_str(&format!("\nMessages:\n{}\n", stderr.trim_end()));
+    }
+    text.push_str(if passed {
+        "\nEvery check passed.\n"
+    } else {
+        "\nSome checks did not pass: see the FAILED lines above.\n"
+    });
+    text
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use winwright_contracts::config::ThemeChoice;
+
+    #[test]
+    fn doctor_output_is_kept_with_a_verdict() {
+        let ok = doctor_report("  ok      UI Automation: 12 windows\n", "", true);
+        assert!(ok.starts_with("Winwright ") && ok.contains("Check this PC"));
+        assert!(ok.contains("  ok      UI Automation: 12 windows\n"));
+        assert!(ok.ends_with("Every check passed.\n") && !ok.contains("Messages"));
+        let failed = doctor_report(
+            "  FAILED  monitor 2: overlay not seen\n",
+            "warning: screen busy\n",
+            false,
+        );
+        assert!(failed.contains("FAILED  monitor 2"));
+        assert!(failed.contains("Messages:\nwarning: screen busy\n"));
+        assert!(failed.ends_with("see the FAILED lines above.\n"));
+    }
 
     #[test]
     fn settings_round_trip_through_the_config_file() {
