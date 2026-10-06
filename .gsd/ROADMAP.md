@@ -64,6 +64,7 @@ The user asked for every suggestion at once. Each row lands as its own commit(s)
 | 26.12 | Trustworthy install: winget manifest ready to submit once the repo is public; code signing documented (needs a certificate the user buys) | manifest validates; **done: manifests attached to each release; validated; signing needs a certificate** |
 | 26.13 | Release 0.2.1 or 0.3.0: bump, install, push, tag, clean up | release workflow green |
 | 26.14 | Visual work (asked 2026-10-06: "better than Codex even in visual heavy stuff"): marks=true numbers each element on a window screenshot (set of marks, act by ref); pointer actions verified by the pixels around them; instructions steer to marks/OCR/scaled pixels | **done**: marks drawn by the capture worker with a digit font; live test |
+| 26.15 | Approval that works first time (asked 2026-10-06, Microsoft Store Install stalled): "Allow once" arms when Windows reports the dialog active but another window stays in front; assistants learn per app (recall an app's name first, end a report with "Lesson:") | **done (v0.3.4)**: the arm timer now watches every 100 ms; instructions step 7; live test passes 4 of 4 reruns |
 
 Changes to the 2026-10-04 direction: spoken guide steps (26.9) use the Windows voice for teaching
 only; there is still no assistant or listening. Recording (26.10) revives Phase 12 in a narrow form:
