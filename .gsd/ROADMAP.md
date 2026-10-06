@@ -46,6 +46,28 @@ Claude in Chrome). JARVIS (`apps/jarvis`, `winwright assistant`, push-to-talk) w
 | 25 | Smarter and safer (the user asked 2026-10-05: "find ways winwright can be more efficient and smarter, fix bugs"; also "launch improvements for every app" after a clumsy Discord run): open any app by its Start menu name (shortcuts read and judged as their program, Store apps activated by AppUserModelID, whole-word matching, main window not splash); `desktop_batch` (several known steps in one call, UFO2-style); a three-part code review (core, backends, UI/MCP) and its verified findings fixed | unit tests per fix; live: Calculator by name, MCP batch on the fixture, shared stop, window focus, dialog tests | done 2026-10-05: 107bef4/1eba4ed launch by name, 3af74e1 batch, a7cd136 security (secret destinations, shares before approval, shortcut args in the prompt, Allow vs sent clicks, overlays vs the dialog, AI app configs and PS profiles secret, session verbs), 5e24574 correctness (queued UIA actions after a stop, lossless edits, typing time and partial counts, launch window snapshot after approval, slot leak, wait-for-missing, coordinator lead/handover, setup Codex/backup, 45 s dialog), 9c31899 perf + clearer results, focus off-thread. Not done (noted in STATE): capture session reuse, event-driven settle, tray Resume hardware check |
 | 20 | Wrap-up: `scripts/check.ps1 -Live`, reinstall, push (only when asked), `cargo clean` (~23 GB), delete scratch and temp files and the old renamed winwright.old.*.exe | tree green; only source, config and reports remain on disk | done 2026-10-05 (the user asked to push and clean up): format, clippy, workspace tests, and every live suite green (fixture 7/7, mcp_stdio 2/2, confirm 2/2, overlay 6/6, input 2/2, canvas 2/2); installed; pushed; build cache and scratch removed |
 
+## Phase 26: everyday experience (asked 2026-10-06)
+The user asked for every suggestion at once. Each row lands as its own commit(s) with tests.
+| # | Scope | Done when |
+|---|---|---|
+| 26.1 | Allow for a while: the Allow dialog offers "Allow in this app for 10 minutes" for Normal-risk actions; later Normal actions in that same app (process) pass without a prompt until it expires; Destructive/secret/send-like actions always ask; the emergency stop clears every grant | unit tests: grant scope, expiry, risk gate, stop clears |
+| 26.2 | Screenshots the model sees accurately: images larger than 1568 px on the long edge are scaled down by Winwright; the result says the scale; `desktop_mouse` takes the image's pixels and maps them back | unit tests for the mapping both ways; MCP text names the scale |
+| 26.3 | Hands off: when the person moves the mouse or types while an action is about to inject input, Winwright waits until they have been idle 2 s (at most 30 s, then CANCELLED with a hint) | unit tests for the idle decision; injected input does not count |
+| 26.4 | Text from pixels: Windows' built-in OCR (Windows.Media.Ocr) reads words and their boxes from a window or region, for apps without an accessibility tree | live test on a test window with drawn text |
+| 26.5 | Working indicator: a thin teal frame around the window being acted on while an action runs; the tray tooltip names the current action | overlay unit tests; frame never takes input |
+| 26.6 | Stay out of the way: pattern actions (invoke, value, toggle, select, expand) no longer bring the window forward; only typing, keys and pointer input do | engine tests |
+| 26.7 | Finished-task notice: `memory_save` (the end-of-task report) shows a Windows notification with its summary; config `notifications.taskDone` (default on) | unit test for the text; config test |
+| 26.8 | Readable history: tray "Recent activity" opens a plain list (time, app, action, allowed/denied) built from the audit log | formatter unit tests |
+| 26.9 | Guide polish: "Step 3 of 7" in the bubble, the pointer glides again after 8 s without a click, and `speak: true` reads each step aloud with the built-in Windows voice (SAPI) | layout tests; speak is opt-in |
+| 26.10 | Learn by watching: `desktop_record` records the person's own clicks (element, window) until they press the stop hotkey or go idle; keys are never recorded, only "typed in <field>" (never in password fields) | unit tests; live test with the user's OK |
+| 26.11 | Tray: Settings window (theme, prompt timeout, allow-for-a-while, audit, notifications, update check), "Check this PC" (runs doctor, shows the result), optional update check against GitHub releases (off by default) | config round-trip tests; doctor output captured |
+| 26.12 | Trustworthy install: winget manifest ready to submit once the repo is public; code signing documented (needs a certificate the user buys) | manifest validates |
+| 26.13 | Release 0.2.1 or 0.3.0: bump, install, push, tag, clean up | release workflow green |
+
+Changes to the 2026-10-04 direction: spoken guide steps (26.9) use the Windows voice for teaching
+only; there is still no assistant or listening. Recording (26.10) revives Phase 12 in a narrow form:
+clicks only, for teaching and replay, never keystrokes.
+
 Not planned: mixed-DPI testing (one monitor), a config list for extra URI schemes (add one when a
 real need appears), local speech models, Jev, ElevenLabs.
 
