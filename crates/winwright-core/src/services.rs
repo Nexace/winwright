@@ -3,7 +3,8 @@
 
 use winwright_contracts::backend::OperationContext;
 use winwright_contracts::capture::{
-    CaptureRequest, CaptureTarget, CapturedImage, Fit, ScreenshotRequest, ScreenshotTarget,
+    CaptureRequest, CaptureTarget, CapturedImage, Fit, ImageFormat, ScreenText, ScreenshotRequest,
+    ScreenshotTarget,
 };
 use winwright_contracts::overlay::{
     HighlightRequest, HighlightResult, OverlayId, OverlayRequest, OverlayService,
@@ -403,33 +404,7 @@ impl Engine {
             None,
         ))?;
         let ctx = session.operation(self.timeout())?;
-        let window = |w: WindowInfo| {
-            (
-                CaptureTarget::Window(w.hwnd),
-                format!("window {:?}", w.title),
-            )
-        };
-        let (target, label) = match &request.target {
-            ScreenshotTarget::Active => window(self.active_window()?),
-            ScreenshotTarget::Window(selector) => window(self.find_window(selector)?),
-            ScreenshotTarget::Element { reference } => {
-                let epoch = self.uia.worker_epoch();
-                let key = session.state().refs.get_live(reference, epoch)?.key;
-                let props = self.uia.refresh(key, &ctx).await?;
-                let bounds = props.bounds.filter(|_| !props.offscreen).ok_or_else(|| {
-                    WinwrightError::CaptureFailed {
-                        reason: format!("{} is not on screen", props.label()),
-                    }
-                })?;
-                (CaptureTarget::Region(bounds), props.label())
-            }
-            ScreenshotTarget::Monitor(i) => (CaptureTarget::Monitor(*i), format!("monitor {i}")),
-            ScreenshotTarget::Region(r) => (
-                CaptureTarget::Region(*r),
-                format!("region {},{} {}x{}", r.left, r.top, r.width(), r.height()),
-            ),
-            ScreenshotTarget::Desktop => (CaptureTarget::Desktop, "desktop".to_owned()),
-        };
+        let (target, label) = self.capture_target(session, &request.target, &ctx).await?;
         *what = Some(label);
         let capture = self
             .capture
@@ -446,6 +421,90 @@ impl Engine {
                 &ctx,
             )
             .await
+    }
+
+    /// Reads the text on screen with OCR (for apps without an accessibility tree). Audited like
+    /// a screenshot.
+    pub async fn screen_text(
+        &self,
+        session: &Session,
+        target: ScreenshotTarget,
+    ) -> WinwrightResult<ScreenText> {
+        let started = Instant::now();
+        let mut what = None;
+        let result = async {
+            self.authorize(proposed(
+                "desktop_ocr",
+                Capability::Capture,
+                ActionRisk::ReadOnly,
+                None,
+            ))?;
+            let ctx = session.operation(self.timeout())?;
+            let (target, label) = self.capture_target(session, &target, &ctx).await?;
+            what = Some(label);
+            let capture = self
+                .capture
+                .as_deref()
+                .ok_or_else(|| unavailable("capture"))?;
+            let request = CaptureRequest {
+                target,
+                format: ImageFormat::Png,
+                quality: 85,
+                fit: None,
+            };
+            capture.read_text(request, &ctx).await
+        }
+        .await;
+        let target = what.map(|name| TargetSummary {
+            name: Some(name),
+            ..Default::default()
+        });
+        self.record(
+            session,
+            "desktop_ocr",
+            target.as_ref(),
+            None,
+            &result,
+            false,
+            started,
+        );
+        result
+    }
+
+    /// What a screenshot or text read of `target` captures, and a label for the audit log.
+    async fn capture_target(
+        &self,
+        session: &Session,
+        target: &ScreenshotTarget,
+        ctx: &OperationContext,
+    ) -> WinwrightResult<(CaptureTarget, String)> {
+        let window = |w: WindowInfo| {
+            (
+                CaptureTarget::Window(w.hwnd),
+                format!("window {:?}", w.title),
+            )
+        };
+        Ok(match target {
+            ScreenshotTarget::Active => window(self.active_window()?),
+            ScreenshotTarget::Window(selector) => window(self.find_window(selector)?),
+            ScreenshotTarget::Element { reference } => {
+                let epoch = self.uia.worker_epoch();
+                let key = session.state().refs.get_live(reference, epoch)?.key;
+                let props = self.uia.refresh(key, ctx).await?;
+                let bounds = props.bounds.filter(|_| !props.offscreen).ok_or_else(|| {
+                    WinwrightError::CaptureFailed {
+                        reason: format!("{} is not on screen", props.label()),
+                    }
+                })?;
+                (CaptureTarget::Region(bounds), props.label())
+            }
+            ScreenshotTarget::Monitor(i) => (CaptureTarget::Monitor(*i), format!("monitor {i}")),
+            ScreenshotTarget::Region(r) => (
+                CaptureTarget::Region(*r),
+                format!("region {},{} {}x{}", r.left, r.top, r.width(), r.height()),
+            ),
+            ScreenshotTarget::Desktop => (CaptureTarget::Desktop, "desktop".to_owned()),
+        })
     }
 
     /// Highlights an element for tutorial/debug mode (spec §21). Overlays never take focus.

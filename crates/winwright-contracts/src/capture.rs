@@ -194,6 +194,30 @@ pub struct ScreenshotRequest {
     pub fit: bool,
 }
 
+/// Text read off the screen by OCR. Boxes are physical desktop pixels.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenText {
+    /// The recognizer's language, e.g. `en-US`.
+    pub language: String,
+    pub lines: Vec<TextLine>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TextLine {
+    pub text: String,
+    pub bounds: PhysicalRect,
+    pub words: Vec<TextWord>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TextWord {
+    pub text: String,
+    pub bounds: PhysicalRect,
+}
+
 pub trait CaptureService: Send + Sync {
     fn monitors(&self) -> WinwrightResult<Vec<MonitorInfo>>;
 
@@ -202,4 +226,18 @@ pub trait CaptureService: Send + Sync {
         request: CaptureRequest,
         ctx: &'a OperationContext,
     ) -> BackendFuture<'a, CapturedImage>;
+
+    /// Reads the text in the captured pixels with OCR (`format`, `quality` and `fit` unused).
+    fn read_text<'a>(
+        &'a self,
+        _request: CaptureRequest,
+        _ctx: &'a OperationContext,
+    ) -> BackendFuture<'a, ScreenText> {
+        Box::pin(async {
+            Err(crate::WinwrightError::BackendUnavailable {
+                backend: "OCR".into(),
+                reason: "this capture backend cannot read text".into(),
+            })
+        })
+    }
 }

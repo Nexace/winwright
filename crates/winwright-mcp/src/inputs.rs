@@ -712,6 +712,12 @@ pub struct ScreenshotInput {
     pub format: Option<ImageFormat>,
     /// JPEG quality 1-100 (default 80).
     pub quality: Option<u8>,
+    /// Read the words on it with Windows OCR instead of returning the image: each line's text
+    /// and box in screen pixels. For apps whose snapshot tree lacks their text.
+    pub ocr: Option<bool>,
+    /// With ocr: only the words or lines containing this text (any case), with the screen
+    /// point to click (desktop_mouse without window or scale).
+    pub find: Option<String>,
 }
 
 impl ScreenshotInput {

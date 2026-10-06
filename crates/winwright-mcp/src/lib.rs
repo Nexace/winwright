@@ -16,9 +16,11 @@ use rmcp::{
     ErrorData, Peer, RoleServer, ServerHandler, ServiceExt, tool, tool_handler, tool_router,
 };
 use serde::Serialize;
+use serde_json::Value;
 use winwright_contracts::WinwrightError;
 use winwright_contracts::action::DesktopAction;
-use winwright_contracts::capture::{ImageFormat, ScreenshotRequest, ScreenshotTarget};
+use winwright_contracts::capture::{ImageFormat, ScreenText, ScreenshotRequest, ScreenshotTarget};
+use winwright_contracts::geometry::PhysicalRect;
 use winwright_contracts::ids::SessionId;
 use winwright_contracts::locator::FindResult;
 use winwright_contracts::memory::{MemoryRecallRequest, MemorySaveRequest};
@@ -491,7 +493,8 @@ impl WinwrightMcp {
 
     #[tool(
         description = "On-demand screenshot of the active window, a window, an element (ref), a monitor, a region, or the desktop. \
-        Costly in tokens: use only when the snapshot tree is not enough. Defaults to JPEG."
+        Costly in tokens: use only when the snapshot tree is not enough. Defaults to JPEG. ocr=true returns the text on it \
+        (Windows OCR) with screen positions instead of the image; find narrows that to what to click."
     )]
     async fn desktop_screenshot(
         &self,
@@ -501,6 +504,14 @@ impl WinwrightMcp {
             Ok(r) => r,
             Err(e) => return Ok(fail(e)),
         };
+        if input.ocr == Some(true) {
+            return Ok(
+                match self.engine.screen_text(&self.sess(), request.target).await {
+                    Ok(text) => json(&ocr_view(&text, input.find.as_deref())),
+                    Err(e) => fail(e),
+                },
+            );
+        }
         let mime = match request.format {
             ImageFormat::Png => "image/png",
             ImageFormat::Jpeg => "image/jpeg",
@@ -873,6 +884,42 @@ mod idle_tests {
         a.touch();
         assert!(a.idle_for() < Duration::from_secs(1));
     }
+}
+
+/// OCR text for the model: lines with boxes, or with `find` the matching words (or lines) and
+/// the screen point to click.
+fn ocr_view(text: &ScreenText, find: Option<&str>) -> Value {
+    let rect = |r: &PhysicalRect| serde_json::json!([r.left, r.top, r.width(), r.height()]);
+    let center =
+        |r: &PhysicalRect| serde_json::json!([r.left + r.width() / 2, r.top + r.height() / 2]);
+    let Some(find) = find.map(str::to_lowercase).filter(|f| !f.trim().is_empty()) else {
+        let lines: Vec<Value> = text
+            .lines
+            .iter()
+            .map(|l| serde_json::json!({"text": l.text, "box": rect(&l.bounds)}))
+            .collect();
+        return serde_json::json!({"language": text.language, "lines": lines, "pixels": "screen"});
+    };
+    let mut matches = Vec::new();
+    for line in &text.lines {
+        let words: Vec<_> = line
+            .words
+            .iter()
+            .filter(|w| w.text.to_lowercase().contains(&find))
+            .collect();
+        if words.is_empty() && line.text.to_lowercase().contains(&find) {
+            matches.push(serde_json::json!({"text": line.text, "click": center(&line.bounds)}));
+        }
+        for w in words {
+            matches.push(
+                serde_json::json!({"text": w.text, "line": line.text, "click": center(&w.bounds)}),
+            );
+        }
+    }
+    serde_json::json!({
+        "matches": matches,
+        "hint": "click points are screen pixels: desktop_mouse with x/y and no window or scale",
+    })
 }
 
 /// What a screenshot shows, and how to point into it.

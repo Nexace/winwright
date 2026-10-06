@@ -7,7 +7,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
-use winwright_contracts::capture::{CaptureRequest, CaptureTarget, CapturedImage};
+use winwright_contracts::capture::{CaptureRequest, CaptureTarget, CapturedImage, ScreenText};
 use winwright_contracts::geometry::{PhysicalPoint, PhysicalRect};
 use winwright_contracts::{WinwrightError, WinwrightResult};
 
@@ -48,6 +48,11 @@ pub enum Command {
         request: CaptureRequest,
         deadline: Deadline,
         reply: oneshot::Sender<WinwrightResult<CapturedImage>>,
+    },
+    ReadText {
+        request: CaptureRequest,
+        deadline: Deadline,
+        reply: oneshot::Sender<WinwrightResult<ScreenText>>,
     },
 }
 
@@ -108,6 +113,22 @@ pub fn run(mut rx: mpsc::Receiver<Command>, ready: std::sync::mpsc::Sender<Winwr
                 }
                 let _ = reply.send(result);
             }
+            Command::ReadText {
+                request,
+                deadline,
+                reply,
+            } => {
+                if reply.is_closed() {
+                    continue;
+                }
+                let result = worker
+                    .pixels(&request, &deadline)
+                    .and_then(|(image, origin)| crate::ocr::recognize(&image, origin));
+                if let Err(e) = &result {
+                    tracing::debug!(%e, "reading text failed");
+                }
+                let _ = reply.send(result);
+            }
         }
     }
     tracing::debug!("capture worker stopping");
@@ -125,6 +146,33 @@ impl Worker {
         request: &CaptureRequest,
         deadline: &Deadline,
     ) -> WinwrightResult<CapturedImage> {
+        let (image, origin) = self.pixels(request, deadline)?;
+        let timestamp_ms = now_ms();
+        let (width, height) = request.fit.map_or((image.width, image.height), |fit| {
+            fit.size(image.width, image.height)
+        });
+        let bytes = self
+            .wic
+            .encode(&image, (width, height), request.format, request.quality)?;
+        Ok(CapturedImage {
+            bytes,
+            format: request.format,
+            width,
+            height,
+            physical_width: image.width,
+            physical_height: image.height,
+            origin,
+            dpi: monitors::dpi_at(origin),
+            timestamp_ms,
+        })
+    }
+
+    /// The target's opaque physical pixels and where their top-left sits on the desktop.
+    fn pixels(
+        &mut self,
+        request: &CaptureRequest,
+        deadline: &Deadline,
+    ) -> WinwrightResult<(Bgra, PhysicalPoint)> {
         deadline.check("capture")?;
         let (mut image, origin) = match request.target {
             CaptureTarget::Window(hwnd) => self.window(hwnd, deadline)?,
@@ -145,26 +193,9 @@ impl Worker {
                 )
             }
         };
-        let timestamp_ms = now_ms();
         deadline.check("capture")?;
         force_opaque(&mut image.pixels);
-        let (width, height) = request.fit.map_or((image.width, image.height), |fit| {
-            fit.size(image.width, image.height)
-        });
-        let bytes = self
-            .wic
-            .encode(&image, (width, height), request.format, request.quality)?;
-        Ok(CapturedImage {
-            bytes,
-            format: request.format,
-            width,
-            height,
-            physical_width: image.width,
-            physical_height: image.height,
-            origin,
-            dpi: monitors::dpi_at(origin),
-            timestamp_ms,
-        })
+        Ok((image, origin))
     }
 
     /// The captured size is authoritative: when it differs from the DWM frame bounds (a

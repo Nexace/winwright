@@ -11,6 +11,7 @@
 
 mod com;
 mod monitors;
+mod ocr;
 mod raster;
 mod wgc;
 mod wic;
@@ -21,7 +22,9 @@ use std::time::Instant;
 
 use tokio::sync::{mpsc, oneshot};
 use winwright_contracts::backend::{BackendFuture, OperationContext};
-use winwright_contracts::capture::{CaptureRequest, CaptureService, CapturedImage, MonitorInfo};
+use winwright_contracts::capture::{
+    CaptureRequest, CaptureService, CapturedImage, MonitorInfo, ScreenText,
+};
 use winwright_contracts::{WinwrightError, WinwrightResult};
 
 use crate::worker::{Command, Deadline};
@@ -56,12 +59,12 @@ impl WgcCapture {
         Ok(Self { tx })
     }
 
-    async fn call(
+    async fn call<T>(
         &self,
         ctx: &OperationContext,
         operation: &'static str,
-        make: impl FnOnce(Deadline, oneshot::Sender<WinwrightResult<CapturedImage>>) -> Command,
-    ) -> WinwrightResult<CapturedImage> {
+        make: impl FnOnce(Deadline, oneshot::Sender<WinwrightResult<T>>) -> Command,
+    ) -> WinwrightResult<T> {
         ctx.check(operation)?;
         let started = Instant::now();
         let timeout = || WinwrightError::Timeout {
@@ -106,6 +109,20 @@ impl CaptureService for WgcCapture {
     ) -> BackendFuture<'a, CapturedImage> {
         Box::pin(
             self.call(ctx, "capture", move |deadline, reply| Command::Capture {
+                request,
+                deadline,
+                reply,
+            }),
+        )
+    }
+
+    fn read_text<'a>(
+        &'a self,
+        request: CaptureRequest,
+        ctx: &'a OperationContext,
+    ) -> BackendFuture<'a, ScreenText> {
+        Box::pin(
+            self.call(ctx, "read text", move |deadline, reply| Command::ReadText {
                 request,
                 deadline,
                 reply,

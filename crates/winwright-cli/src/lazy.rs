@@ -5,7 +5,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 use winwright_capture::WgcCapture;
 use winwright_contracts::WinwrightResult;
 use winwright_contracts::backend::{BackendFuture, OperationContext};
-use winwright_contracts::capture::{CaptureRequest, CaptureService, CapturedImage, MonitorInfo};
+use winwright_contracts::capture::{
+    CaptureRequest, CaptureService, CapturedImage, MonitorInfo, ScreenText,
+};
 
 #[derive(Default)]
 pub struct LazyCapture {
@@ -37,6 +39,17 @@ impl CaptureService for LazyCapture {
         Box::pin(async move {
             let capture = self.get()?;
             capture.capture(request, ctx).await
+        })
+    }
+
+    fn read_text<'a>(
+        &'a self,
+        request: CaptureRequest,
+        ctx: &'a OperationContext,
+    ) -> BackendFuture<'a, ScreenText> {
+        Box::pin(async move {
+            let capture = self.get()?;
+            capture.read_text(request, ctx).await
         })
     }
 }

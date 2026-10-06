@@ -13,14 +13,14 @@ use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::Graphics::Dwm::DwmFlush;
-use windows::Win32::Graphics::Gdi::{CreateSolidBrush, UpdateWindow};
+use windows::Win32::Graphics::Gdi::{CreateFontW, CreateSolidBrush, UpdateWindow};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GA_ROOT, GetAncestor, GetMessageW, MSG,
     PostMessageW, PostQuitMessage, RegisterClassW, SHOW_WINDOW_CMD, SW_SHOWMINNOACTIVE,
-    SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SetWindowPos, ShowWindow,
-    TranslateMessage, WM_CLOSE, WM_DESTROY, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOPMOST, WS_POPUP,
-    WindowFromPoint,
+    SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SendMessageW, SetWindowPos,
+    ShowWindow, TranslateMessage, WM_CLOSE, WM_DESTROY, WM_SETFONT, WNDCLASSW, WS_CHILD,
+    WS_EX_NOACTIVATE, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE, WindowFromPoint,
 };
 use windows::core::w;
 use winwright_capture::{WgcCapture, decode_bgra};
@@ -73,6 +73,15 @@ struct TestWindow {
 
 impl TestWindow {
     fn open(origin: PhysicalPoint, show: SHOW_WINDOW_CMD) -> Self {
+        Self::open_with(origin, show, None)
+    }
+
+    /// With `label` drawn large in the window (made by the window's own thread, so it paints).
+    fn open_with(
+        origin: PhysicalPoint,
+        show: SHOW_WINDOW_CMD,
+        label: Option<&'static str>,
+    ) -> Self {
         let (tx, rx) = mpsc::channel();
         let thread = std::thread::spawn(move || {
             // SAFETY: standard window creation and message loop on this thread; every
@@ -106,6 +115,46 @@ impl TestWindow {
                     None,
                 )
                 .unwrap();
+                if let Some(label) = label {
+                    let text = windows::core::HSTRING::from(label);
+                    let child = CreateWindowExW(
+                        Default::default(),
+                        w!("STATIC"),
+                        &text,
+                        WS_CHILD | WS_VISIBLE,
+                        24,
+                        40,
+                        WIDTH - 32,
+                        70,
+                        Some(hwnd),
+                        None,
+                        None,
+                        None,
+                    )
+                    .unwrap();
+                    let font = CreateFontW(
+                        36,
+                        0,
+                        0,
+                        0,
+                        600,
+                        0,
+                        0,
+                        0,
+                        Default::default(),
+                        Default::default(),
+                        Default::default(),
+                        Default::default(),
+                        0,
+                        w!("Segoe UI"),
+                    );
+                    SendMessageW(
+                        child,
+                        WM_SETFONT,
+                        Some(WPARAM(font.0 as usize)),
+                        Some(LPARAM(1)),
+                    );
+                }
                 let _ = ShowWindow(hwnd, show);
                 let _ = UpdateWindow(hwnd);
                 let _ = DwmFlush();
@@ -315,6 +364,33 @@ async fn a_resized_window_is_captured_at_its_new_size() {
     assert_eq!((resized.width as i32, resized.height as i32), (w, h));
     let (_, _, pixels) = decode(&resized);
     assert_solid(&pixels, 2);
+}
+
+#[tokio::test]
+#[ignore = "needs an interactive desktop"]
+async fn ocr_reads_text_drawn_in_our_window() {
+    let (capture, spots) = start();
+    let window = TestWindow::open_with(spots[0], SW_SHOWNOACTIVATE, Some("Winwright 42"));
+    std::thread::sleep(Duration::from_millis(200));
+    let text = capture
+        .read_text(
+            request(CaptureTarget::Window(window.hwnd), ImageFormat::Png),
+            &ctx(Duration::from_secs(10)),
+        )
+        .await
+        .unwrap();
+    let line = text
+        .lines
+        .iter()
+        .find(|l| l.text.contains("wright"))
+        .unwrap_or_else(|| panic!("no line reads Winwright: {:?}", text.lines));
+    assert!(line.text.contains("42"), "{}", line.text);
+    let r = window.rect;
+    assert!(
+        line.bounds.left >= r.left && line.bounds.bottom <= r.bottom,
+        "{:?} lies in {r:?}",
+        line.bounds
+    );
 }
 
 #[tokio::test]
