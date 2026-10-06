@@ -529,11 +529,7 @@ impl WinwrightMcp {
                     mime,
                 ),
                 ContentBlock::text(match &img.legend {
-                    Some(tree) => format!(
-                        "{}\nNumbers on the image are refs (12 = e12): act with desktop_click ref=e12 \
-                         etc.\n{tree}",
-                        shot_note(&img)
-                    ),
+                    Some(legend) => format!("{}\n{legend}", shot_note(&img)),
                     None => shot_note(&img),
                 }),
             ]),

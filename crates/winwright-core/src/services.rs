@@ -258,6 +258,43 @@ fn marks_of(nodes: &[SnapshotNode], out: &mut Vec<Mark>) {
     }
 }
 
+/// A window with fewer numbered elements than this gets its OCR text numbered too.
+const FEW_MARKS: usize = 4;
+/// Most OCR lines numbered on one screenshot.
+const MAX_OCR_MARKS: usize = 60;
+/// Longest OCR text a legend line shows.
+const OCR_LEGEND_CHARS: usize = 60;
+
+/// Numbers the lines OCR found (after the highest ref already drawn) and says where each is:
+/// the legend text to append. Nothing is added when OCR found no text.
+fn ocr_marks(text: &ScreenText, marks: &mut Vec<Mark>) -> String {
+    let mut number = marks.iter().map(|m| m.number).max().unwrap_or(0);
+    let mut legend = String::new();
+    for line in text.lines.iter().filter(|l| !l.text.trim().is_empty()) {
+        if legend.lines().count() >= MAX_OCR_MARKS || line.bounds.width() <= 0 {
+            break;
+        }
+        number += 1;
+        marks.push(Mark {
+            rect: line.bounds,
+            number,
+        });
+        let shown: String = line.text.chars().take(OCR_LEGEND_CHARS).collect();
+        legend.push_str(&format!(
+            "{number} \"{shown}\" click {},{}\n",
+            line.bounds.left + line.bounds.width() / 2,
+            line.bounds.top + line.bounds.height() / 2
+        ));
+    }
+    if legend.is_empty() {
+        return legend;
+    }
+    format!(
+        "\nFew UI elements here, so these numbers mark text found by OCR instead of refs. Click \
+         one with desktop_mouse using the screen x,y beside it (no window or scale):\n{legend}"
+    )
+}
+
 pub(crate) const DEFAULT_OVERLAY_COLOR: u32 = 0x0008_91B2;
 
 /// Prompts show at most this many characters of arguments.
@@ -481,7 +518,30 @@ impl Engine {
                 .await?;
             let mut marks = Vec::new();
             marks_of(snap.nodes.as_deref().unwrap_or_default(), &mut marks);
-            (marks, Some(snap.tree))
+            let mut legend = format!(
+                "Numbers on the image are refs (12 = e12): act with desktop_click ref=e12 etc.\n{}",
+                snap.tree
+            );
+            // A window the accessibility tree barely describes (a game, a canvas): number the
+            // text OCR finds too, so the model can still point by number.
+            if marks.len() < FEW_MARKS
+                && let Some(capture) = self.capture.as_deref()
+                && let Ok(text) = capture
+                    .read_text(
+                        CaptureRequest {
+                            target,
+                            format: ImageFormat::Png,
+                            quality: 85,
+                            fit: None,
+                            marks: Vec::new(),
+                        },
+                        &ctx,
+                    )
+                    .await
+            {
+                legend.push_str(&ocr_marks(&text, &mut marks));
+            }
+            (marks, Some(legend))
         } else {
             (Vec::new(), None)
         };
@@ -1137,6 +1197,39 @@ mod tests {
     }
 
     use super::*;
+    use winwright_contracts::capture::TextLine;
+    use winwright_contracts::geometry::PhysicalRect;
+
+    #[test]
+    fn ocr_lines_are_numbered_after_the_refs_and_say_where_to_click() {
+        let line = |text: &str, left: i32, top: i32| TextLine {
+            text: text.into(),
+            bounds: PhysicalRect::new(left, top, left + 100, top + 20),
+            words: Vec::new(),
+        };
+        let text = ScreenText {
+            language: "en-US".into(),
+            lines: vec![
+                line("Play", 10, 10),
+                line("  ", 10, 40),
+                line("Settings", 10, 70),
+            ],
+        };
+        let ui = PhysicalRect::new(0, 0, 30, 30);
+        let mut marks = vec![Mark {
+            rect: ui,
+            number: 7,
+        }];
+        let legend = ocr_marks(&text, &mut marks);
+        assert_eq!(
+            marks.iter().map(|m| m.number).collect::<Vec<_>>(),
+            [7, 8, 9],
+            "blank lines get no number; numbers continue after the refs"
+        );
+        assert!(legend.contains("8 \"Play\" click 60,20\n"), "{legend}");
+        assert!(legend.contains("9 \"Settings\" click 60,80\n"), "{legend}");
+        assert_eq!(ocr_marks(&ScreenText::default(), &mut marks), "");
+    }
 
     fn op(json: &str) -> FileOperation {
         serde_json::from_str(json).unwrap()
