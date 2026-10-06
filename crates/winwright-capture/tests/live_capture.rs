@@ -18,8 +18,9 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GA_ROOT, GetAncestor, GetMessageW, MSG,
     PostMessageW, PostQuitMessage, RegisterClassW, SHOW_WINDOW_CMD, SW_SHOWMINNOACTIVE,
-    SW_SHOWNOACTIVATE, ShowWindow, TranslateMessage, WM_CLOSE, WM_DESTROY, WNDCLASSW,
-    WS_EX_NOACTIVATE, WS_EX_TOPMOST, WS_POPUP, WindowFromPoint,
+    SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SetWindowPos, ShowWindow,
+    TranslateMessage, WM_CLOSE, WM_DESTROY, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOPMOST, WS_POPUP,
+    WindowFromPoint,
 };
 use windows::core::w;
 use winwright_capture::{WgcCapture, decode_bgra};
@@ -278,6 +279,41 @@ async fn window_capture_returns_the_windows_pixels() {
         assert_solid(&pixels, 2);
     }
     println!("window capture (PNG, {WIDTH}x{HEIGHT}) timings: {timings:?} ms");
+}
+
+#[tokio::test]
+#[ignore = "needs an interactive desktop"]
+async fn a_resized_window_is_captured_at_its_new_size() {
+    let (capture, window) = setup(SW_SHOWNOACTIVATE);
+    let ctx = ctx(Duration::from_secs(10));
+    let grab = || {
+        capture.capture(
+            request(CaptureTarget::Window(window.hwnd), ImageFormat::Png),
+            &ctx,
+        )
+    };
+    let first = grab().await.unwrap();
+    assert_eq!((first.width as i32, first.height as i32), (WIDTH, HEIGHT));
+    let (w, h) = (WIDTH + 60, HEIGHT + 40);
+    // SAFETY: resizes our own test window; no activation or z-order change.
+    unsafe {
+        SetWindowPos(
+            HWND(window.hwnd as usize as *mut c_void),
+            None,
+            0,
+            0,
+            w,
+            h,
+            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+        )
+        .unwrap();
+        let _ = DwmFlush();
+    }
+    // The kept capture item was made for the old size: a new one must be used.
+    let resized = grab().await.unwrap();
+    assert_eq!((resized.width as i32, resized.height as i32), (w, h));
+    let (_, _, pixels) = decode(&resized);
+    assert_solid(&pixels, 2);
 }
 
 #[tokio::test]

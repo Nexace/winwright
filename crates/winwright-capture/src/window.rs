@@ -9,7 +9,7 @@ use windows::Win32::Graphics::Dwm::{
 use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowDisplayAffinity, GetWindowRect, IsIconic, IsWindow, IsWindowVisible, WDA_NONE,
 };
-use winwright_contracts::geometry::PhysicalPoint;
+use winwright_contracts::geometry::PhysicalRect;
 use winwright_contracts::{WinwrightError, WinwrightResult};
 
 fn failed(reason: &str) -> WinwrightError {
@@ -62,9 +62,9 @@ pub fn capturable(hwnd: u64) -> WinwrightResult<HWND> {
     Ok(handle)
 }
 
-/// Top-left of the window's visible frame (`DWMWA_EXTENDED_FRAME_BOUNDS`, physical pixels, no
-/// invisible resize borders), which is where a window capture's first pixel sits.
-pub fn frame_origin(handle: HWND) -> PhysicalPoint {
+/// The window's visible frame (`DWMWA_EXTENDED_FRAME_BOUNDS`, physical pixels, no invisible
+/// resize borders); its top-left is where a window capture's first pixel sits.
+pub fn frame_bounds(handle: HWND) -> PhysicalRect {
     let mut rect = RECT::default();
     // SAFETY: the out buffer is a RECT of exactly the size passed.
     let dwm = unsafe {
@@ -79,8 +79,5 @@ pub fn frame_origin(handle: HWND) -> PhysicalPoint {
         // SAFETY: `rect` is a valid out pointer.
         let _ = unsafe { GetWindowRect(handle, &mut rect) };
     }
-    PhysicalPoint {
-        x: rect.left,
-        y: rect.top,
-    }
+    PhysicalRect::new(rect.left, rect.top, rect.right, rect.bottom)
 }

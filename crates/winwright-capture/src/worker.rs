@@ -13,8 +13,10 @@ use winwright_contracts::{WinwrightError, WinwrightResult};
 
 use crate::com::ComApartment;
 use crate::monitors::{self, Monitor, PhysicalDpiScope};
-use crate::raster::{Bgra, blit, force_opaque, plan_region, region_size, top_left, union};
-use crate::wgc::Wgc;
+use crate::raster::{
+    Bgra, LocalRect, blit, force_opaque, plan_region, region_size, top_left, union,
+};
+use crate::wgc::{Items, Source, Wgc};
 use crate::wic::Wic;
 use crate::window;
 
@@ -52,6 +54,7 @@ pub enum Command {
 struct Worker {
     wgc: Wgc,
     wic: Wic,
+    items: Items,
 }
 
 pub fn run(mut rx: mpsc::Receiver<Command>, ready: std::sync::mpsc::Sender<WinwrightResult<()>>) {
@@ -65,10 +68,11 @@ pub fn run(mut rx: mpsc::Receiver<Command>, ready: std::sync::mpsc::Sender<Winwr
     };
     // Physical pixels for every monitor/window rectangle this thread reads.
     let _physical = PhysicalDpiScope::enter();
-    let worker = match Wgc::new().and_then(|wgc| {
+    let mut worker = match Wgc::new().and_then(|wgc| {
         Ok(Worker {
             wgc,
             wic: Wic::new()?,
+            items: Items::default(),
         })
     }) {
         Ok(w) => w,
@@ -117,7 +121,7 @@ fn now_ms() -> u64 {
 
 impl Worker {
     fn capture(
-        &self,
+        &mut self,
         request: &CaptureRequest,
         deadline: &Deadline,
     ) -> WinwrightResult<CapturedImage> {
@@ -159,14 +163,42 @@ impl Worker {
     /// The captured size is authoritative: when it differs from the DWM frame bounds (a
     /// resize racing the capture), the image keeps its own size and only the origin comes
     /// from the frame bounds.
-    fn window(&self, hwnd: u64, deadline: &Deadline) -> WinwrightResult<(Bgra, PhysicalPoint)> {
+    fn window(&mut self, hwnd: u64, deadline: &Deadline) -> WinwrightResult<(Bgra, PhysicalPoint)> {
         let handle = window::capturable(hwnd)?;
-        let item = self.wgc.window_item(handle)?;
-        let image = self.wgc.grab(&item, None, deadline)?;
-        Ok((image, window::frame_origin(handle)))
+        let bounds = window::frame_bounds(handle);
+        let image = self.grab(Source::Window(handle.0 as usize), bounds, None, deadline)?;
+        Ok((image, top_left(&bounds)))
     }
 
-    fn monitor(&self, index: u32, deadline: &Deadline) -> WinwrightResult<(Bgra, PhysicalPoint)> {
+    /// Grabs `source` with a kept capture item when one fits, else a new one (kept after).
+    fn grab(
+        &mut self,
+        source: Source,
+        bounds: PhysicalRect,
+        crop: Option<LocalRect>,
+        deadline: &Deadline,
+    ) -> WinwrightResult<Bgra> {
+        if let Some(item) = self.items.take(source, bounds) {
+            match self.wgc.grab(&item, crop, deadline) {
+                Ok(image) => {
+                    self.items.put(source, bounds, item);
+                    return Ok(image);
+                }
+                Err(WinwrightError::Cancelled) => return Err(WinwrightError::Cancelled),
+                Err(e) => tracing::debug!(%e, "kept capture item failed; making a new one"),
+            }
+        }
+        let item = source.item(&self.wgc)?;
+        let image = self.wgc.grab(&item, crop, deadline)?;
+        self.items.put(source, bounds, item);
+        Ok(image)
+    }
+
+    fn monitor(
+        &mut self,
+        index: u32,
+        deadline: &Deadline,
+    ) -> WinwrightResult<(Bgra, PhysicalPoint)> {
         let monitors = monitors::enumerate()?;
         let monitor = monitors.get(index as usize).ok_or_else(|| {
             WinwrightError::invalid(format!(
@@ -174,15 +206,16 @@ impl Worker {
                 monitors.len()
             ))
         })?;
-        let item = self.wgc.monitor_item(monitor.handle)?;
-        let image = self.wgc.grab(&item, None, deadline)?;
-        Ok((image, top_left(&monitor.info.bounds)))
+        let bounds = monitor.info.bounds;
+        let source = Source::Monitor(monitor.handle.0 as usize);
+        let image = self.grab(source, bounds, None, deadline)?;
+        Ok((image, top_left(&bounds)))
     }
 
     /// Captures every monitor intersecting `rect` (GPU-cropped to the intersection) and
     /// composes them into one image covering exactly `rect`; uncovered pixels stay black.
     fn region(
-        &self,
+        &mut self,
         rect: PhysicalRect,
         monitors: &[Monitor],
         deadline: &Deadline,
@@ -199,8 +232,9 @@ impl Worker {
         let mut canvas: Option<Bgra> = None;
         for tile in &tiles {
             deadline.check("capture region")?;
-            let item = self.wgc.monitor_item(monitors[tile.source].handle)?;
-            let part = self.wgc.grab(&item, Some(tile.crop), deadline)?;
+            let monitor = &monitors[tile.source];
+            let source = Source::Monitor(monitor.handle.0 as usize);
+            let part = self.grab(source, monitor.info.bounds, Some(tile.crop), deadline)?;
             if (part.width, part.height, tile.dst_x, tile.dst_y) == (width, height, 0, 0) {
                 return Ok(part); // One monitor covers the whole region: no composition.
             }

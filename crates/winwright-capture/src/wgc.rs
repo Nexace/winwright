@@ -1,6 +1,8 @@
 //! Windows.Graphics.Capture single-frame grabs with explicit D3D11 and frame-pool ownership.
 //! Every object here lives and dies on the capture worker thread.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -27,6 +29,7 @@ use windows::Win32::System::WinRT::Direct3D11::{
 };
 use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop;
 use windows::core::{HRESULT, Interface};
+use winwright_contracts::geometry::PhysicalRect;
 use winwright_contracts::{WinwrightError, WinwrightResult};
 
 use crate::com::{platform, refused};
@@ -37,6 +40,9 @@ use crate::worker::Deadline;
 const FIRST_FRAME_CAP: Duration = Duration::from_secs(3);
 /// Longest single wait between frame-pool polls, so cancellation is noticed promptly.
 const POLL_SLICE: Duration = Duration::from_millis(20);
+/// Capture items kept for reuse, and how long an unused one is kept.
+const KEEP_ITEMS: usize = 4;
+const ITEM_IDLE: Duration = Duration::from_secs(60);
 
 fn unavailable(reason: impl Into<String>) -> WinwrightError {
     WinwrightError::BackendUnavailable {
@@ -317,6 +323,86 @@ impl Drop for Capture {
             let _ = self.pool.RemoveFrameArrived(token);
         }
         let _ = self.pool.Close();
+    }
+}
+
+/// What a capture item shows: a window (`HWND`) or a monitor (`HMONITOR`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Source {
+    Window(usize),
+    Monitor(usize),
+}
+
+impl Source {
+    pub fn item(self, wgc: &Wgc) -> WinwrightResult<GraphicsCaptureItem> {
+        match self {
+            Self::Window(h) => wgc.window_item(HWND(h as *mut std::ffi::c_void)),
+            Self::Monitor(m) => wgc.monitor_item(HMONITOR(m as *mut std::ffi::c_void)),
+        }
+    }
+}
+
+/// Recently made capture items. Making one takes ~50 ms, about half a screenshot; an item alone
+/// captures nothing (no session, no frames), so keeping a few is safe. One is reused only for
+/// the same window or monitor at the same bounds, and is dropped once its window closes.
+#[derive(Default)]
+pub struct Items {
+    entries: Vec<Cached>,
+}
+
+struct Cached {
+    source: Source,
+    bounds: PhysicalRect,
+    item: GraphicsCaptureItem,
+    closed: Arc<AtomicBool>,
+    token: Option<i64>,
+    used: Instant,
+}
+
+impl Drop for Cached {
+    fn drop(&mut self) {
+        if let Some(token) = self.token.take() {
+            let _ = self.item.RemoveClosed(token);
+        }
+    }
+}
+
+impl Items {
+    /// A kept item for `source` at `bounds`, taken out of the cache (`put` it back after use).
+    pub fn take(&mut self, source: Source, bounds: PhysicalRect) -> Option<GraphicsCaptureItem> {
+        let now = Instant::now();
+        self.entries
+            .retain(|c| !c.closed.load(Ordering::Relaxed) && now - c.used < ITEM_IDLE);
+        let i = self
+            .entries
+            .iter()
+            .position(|c| c.source == source && c.bounds == bounds)?;
+        Some(self.entries.swap_remove(i).item.clone())
+    }
+
+    pub fn put(&mut self, source: Source, bounds: PhysicalRect, item: GraphicsCaptureItem) {
+        self.entries.retain(|c| c.source != source);
+        let closed = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&closed);
+        let token = item
+            .Closed(&TypedEventHandler::new(move |_, _| {
+                flag.store(true, Ordering::Relaxed);
+                Ok(())
+            }))
+            .ok();
+        self.entries.push(Cached {
+            source,
+            bounds,
+            item,
+            closed,
+            token,
+            used: Instant::now(),
+        });
+        if self.entries.len() > KEEP_ITEMS
+            && let Some(oldest) = (0..self.entries.len()).min_by_key(|&i| self.entries[i].used)
+        {
+            self.entries.swap_remove(oldest);
+        }
     }
 }
 
