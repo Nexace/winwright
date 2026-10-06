@@ -8,6 +8,8 @@
 mod notion;
 mod time;
 
+pub use crate::time::local_ms;
+
 use std::path::{Path, PathBuf};
 
 use winwright_contracts::memory::{

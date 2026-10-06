@@ -424,9 +424,9 @@ fn lead(
                 });
             }
             TRAY_INSPECTOR => open_inspector(),
-            TRAY_AUDIT if !open_audit_log() => menu_tray.notify(
-                "No audit log yet",
-                "Winwright records every AI action here once an assistant acts.",
+            TRAY_AUDIT if !open_recent_activity() => menu_tray.notify(
+                "No activity yet",
+                "Winwright lists every AI action here once an assistant acts (unless the audit log is off).",
             ),
             _ => {}
         }),
@@ -486,7 +486,7 @@ fn tray_state(stopped: bool) -> winwright_overlay::TrayState {
                 )
             },
             item(TRAY_INSPECTOR, "Open Inspector", glyph::SEARCH, true),
-            item(TRAY_AUDIT, "View audit log", glyph::HISTORY, false),
+            item(TRAY_AUDIT, "Recent activity", glyph::HISTORY, false),
         ],
     }
 }
@@ -512,16 +512,33 @@ fn open_inspector() {
     }
 }
 
-/// Opens the audit log in Notepad (the user's own click from the tray menu). False when
-/// there is no log yet.
-fn open_audit_log() -> bool {
-    let Some(path) = winwright_core::audit::AuditLog::default_path() else {
+/// How many of the latest audit events "Recent activity" lists.
+const RECENT_ACTIVITY: usize = 200;
+
+/// Opens the latest audit events as a plain list in Notepad (the user's own click from the tray
+/// menu). False when nothing is recorded yet.
+fn open_recent_activity() -> bool {
+    use winwright_core::audit::{AuditLog, readable};
+    let Some(log) = AuditLog::default_path() else {
         return false;
     };
-    if !path.exists() {
+    let lines = AuditLog::tail(&log, RECENT_ACTIVITY).unwrap_or_default();
+    if lines.is_empty() {
         return false;
     }
-    spawn_detached(std::process::Command::new("notepad.exe").arg(&path));
+    let text = format!(
+        "Winwright: what your AI apps did on this PC, newest first (the last {RECENT_ACTIVITY} \
+         actions).\nTyped text and field values are never recorded.\nFull log: {}\n\n{}",
+        log.display(),
+        readable(&lines, winwright_memory::local_ms)
+    );
+    let list = std::env::temp_dir().join("winwright-recent-activity.txt");
+    if let Err(err) = std::fs::write(&list, text) {
+        tracing::warn!(%err, "cannot write the activity list; opening the raw log");
+        spawn_detached(std::process::Command::new("notepad.exe").arg(&log));
+        return true;
+    }
+    spawn_detached(std::process::Command::new("notepad.exe").arg(&list));
     true
 }
 
