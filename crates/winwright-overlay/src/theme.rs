@@ -38,8 +38,8 @@ use winwright_contracts::{WinwrightError, WinwrightResult};
 use crate::paint::{self, Canvas, premultiply};
 use crate::platform;
 
-/// Winwright orange.
-pub const BRAND: u32 = 0x00E0_4A2A;
+/// Winwright teal blue.
+pub const BRAND: u32 = 0x0008_91B2;
 const WHITE: u32 = 0x00FF_FFFF;
 const STOP_RED: u32 = 0x00D1_3438;
 
@@ -104,11 +104,12 @@ impl Palette {
         text: 0x001C_1B1A,
         muted: 0x0062_5E59,
         faint: 0x009C_9791,
-        accent: BRAND,
-        accent_hover: 0x00CC_4124,
-        accent_pressed: 0x00B5_381F,
+        // Darker than the mark so white text on buttons stays readable.
+        accent: 0x000E_7490,
+        accent_hover: 0x0015_5E75,
+        accent_pressed: 0x0016_4E63,
         on_accent: WHITE,
-        selection: 0x00FC_E8E1,
+        selection: 0x00D5_F3F8,
         role: 0x0022_59B8,
         good: 0x001E_8A4C,
         warn: 0x00A8_5F00,
@@ -127,11 +128,11 @@ impl Palette {
         text: 0x00F3_F1EE,
         muted: 0x00AB_A69F,
         faint: 0x0078_736D,
-        accent: 0x00E0_552F,
-        accent_hover: 0x00EE_6743,
-        accent_pressed: 0x00C9_4A28,
+        accent: BRAND,
+        accent_hover: 0x0006_A3C6,
+        accent_pressed: 0x000E_7490,
         on_accent: WHITE,
-        selection: 0x004A_2C22,
+        selection: 0x0011_3C47,
         role: 0x008A_B4F8,
         good: 0x005C_CB8A,
         warn: 0x00F0_B849,

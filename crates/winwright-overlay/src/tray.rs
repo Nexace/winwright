@@ -69,7 +69,7 @@ pub struct TrayMenuItem {
     pub separator_before: bool,
 }
 
-/// What the icon shows. `active` picks the orange (running) or gray (stopped) mark;
+/// What the icon shows. `active` picks the teal (running) or gray (stopped) mark;
 /// `status` is the second line of the menu header.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TrayState {

@@ -24,7 +24,7 @@ pub enum OverlayStyle {
 }
 
 fn default_color() -> u32 {
-    0x00E0_4A2A
+    0x0008_91B2
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

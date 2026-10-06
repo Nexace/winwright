@@ -18,7 +18,7 @@ use winwright_contracts::{WinwrightError, WinwrightResult};
 
 use crate::engine::Engine;
 use crate::find::Resolved;
-use crate::services::{DEFAULT_HIGHLIGHT_MS, default_overlay_color, proposed, unavailable};
+use crate::services::{DEFAULT_HIGHLIGHT_MS, DEFAULT_OVERLAY_COLOR, proposed, unavailable};
 use crate::session::Session;
 
 const MAX_STEPS: usize = 20;
@@ -263,9 +263,7 @@ impl Engine {
             style: request.style,
             label: request.label,
             step: None,
-            color: request
-                .color
-                .unwrap_or(default_overlay_color(request.style)),
+            color: request.color.unwrap_or(DEFAULT_OVERLAY_COLOR),
             duration_ms: Some(request.duration_ms.unwrap_or(DEFAULT_HIGHLIGHT_MS)),
         })?;
         Ok(HighlightResult {
@@ -316,9 +314,7 @@ impl Engine {
             window: None,
             warnings: Vec::new(),
         };
-        let color = request
-            .color
-            .unwrap_or(default_overlay_color(request.style));
+        let color = request.color.unwrap_or(DEFAULT_OVERLAY_COLOR);
         let mut missed = None;
         'steps: for (i, step) in request.steps.iter().enumerate() {
             self.ensure_no_confirmation_open()?;
