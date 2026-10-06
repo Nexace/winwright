@@ -4,7 +4,7 @@
 
 mod inputs;
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -206,10 +206,14 @@ pub struct WinwrightMcp {
 struct Activity {
     start: Instant,
     last_ms: AtomicU64,
+    /// Set by the first tool call: until then this process shows no tray icon and takes no
+    /// hotkey (the caller watches it).
+    used: Arc<AtomicBool>,
 }
 
 impl Activity {
     fn touch(&self) {
+        self.used.store(true, Ordering::Relaxed);
         self.last_ms
             .store(self.start.elapsed().as_millis() as u64, Ordering::Relaxed);
     }
@@ -225,7 +229,7 @@ fn session_id() -> SessionId {
 }
 
 impl WinwrightMcp {
-    pub fn new(engine: Arc<Engine>) -> Result<Self, WinwrightError> {
+    pub fn new(engine: Arc<Engine>, used: Arc<AtomicBool>) -> Result<Self, WinwrightError> {
         let session = engine.session(&session_id(), "mcp")?;
         Ok(Self {
             engine,
@@ -234,6 +238,7 @@ impl WinwrightMcp {
             activity: Arc::new(Activity {
                 start: Instant::now(),
                 last_ms: AtomicU64::new(0),
+                used,
             }),
         })
     }
@@ -854,12 +859,14 @@ pub enum Ended {
 }
 
 /// Serves MCP on stdio. With `idle` set, returns [`Ended::Idle`] after that long without a
-/// tool call (the pending stdin read means the caller should then exit the process).
+/// tool call (the pending stdin read means the caller should then exit the process). `used`
+/// becomes true at the first tool call.
 pub async fn serve_stdio(
     engine: Arc<Engine>,
     idle: Option<Duration>,
+    used: Arc<AtomicBool>,
 ) -> Result<Ended, Box<dyn std::error::Error + Send + Sync>> {
-    let server = WinwrightMcp::new(Arc::clone(&engine))?;
+    let server = WinwrightMcp::new(Arc::clone(&engine), used)?;
     let activity = Arc::clone(&server.activity);
     // The timer runs from the start: a client that connects and never sends anything (or
     // never connects at all) must not keep the process alive either.
@@ -908,10 +915,13 @@ mod idle_tests {
         let a = Activity {
             start: Instant::now() - Duration::from_secs(100),
             last_ms: AtomicU64::new(0),
+            used: Arc::new(AtomicBool::new(false)),
         };
         assert!(a.idle_for() >= Duration::from_secs(100));
+        assert!(!a.used.load(Ordering::Relaxed), "unused until a tool call");
         a.touch();
         assert!(a.idle_for() < Duration::from_secs(1));
+        assert!(a.used.load(Ordering::Relaxed));
     }
 }
 

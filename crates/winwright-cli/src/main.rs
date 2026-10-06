@@ -259,26 +259,38 @@ async fn serve_mcp(
     let stop = Arc::new(winwright_win32::shared::StopSignal::open()?);
     let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let leader = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // Until the AI app makes its first tool call this process stays out of sight: no tray icon
+    // and no hotkey, so an app that only has Winwright registered shows and takes nothing.
+    let used = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let coordinator = {
-        let (engine, stop, done, leader) = (
+        let (engine, stop, done, leader, used) = (
             Arc::downgrade(&engine),
             Arc::clone(&stop),
             Arc::clone(&done),
             Arc::clone(&leader),
+            Arc::clone(&used),
         );
         let (tray, hotkeys) = (native.tray.clone(), native.hotkeys.clone());
         let runtime = tokio::runtime::Handle::current();
         std::thread::Builder::new()
             .name("winwright-coordinator".into())
             .spawn(move || {
-                coordinate(&engine, &stop, &done, &leader, &tray, &hotkeys, &runtime);
+                coordinate(
+                    &engine,
+                    &stop,
+                    &done,
+                    &leader,
+                    &used,
+                    (&tray, &hotkeys),
+                    &runtime,
+                );
             })
             .map_err(|e| WinwrightError::BackendUnavailable {
                 backend: "mcp".into(),
                 reason: format!("cannot start the coordinator thread: {e}"),
             })?
     };
-    let served = winwright_mcp::serve_stdio(Arc::clone(&engine), mcp_idle_timeout())
+    let served = winwright_mcp::serve_stdio(Arc::clone(&engine), mcp_idle_timeout(), used)
         .await
         .map_err(|e| WinwrightError::BackendUnavailable {
             backend: "mcp".into(),
@@ -310,8 +322,8 @@ fn coordinate(
     stop: &Arc<winwright_win32::shared::StopSignal>,
     done: &std::sync::atomic::AtomicBool,
     leader: &std::sync::atomic::AtomicBool,
-    tray: &winwright_overlay::TrayHost,
-    hotkeys: &winwright_overlay::HotkeyHost,
+    used: &std::sync::atomic::AtomicBool,
+    (tray, hotkeys): (&winwright_overlay::TrayHost, &winwright_overlay::HotkeyHost),
     runtime: &tokio::runtime::Handle,
 ) {
     use std::sync::atomic::Ordering;
@@ -351,7 +363,10 @@ fn coordinate(
                 tray.update(tray_state(stopped));
             }
         }
-        if lead_state.is_none() && last_try.is_none_or(|t| t.elapsed() >= LEAD_RETRY) {
+        if lead_state.is_none()
+            && used.load(Ordering::Relaxed)
+            && last_try.is_none_or(|t| t.elapsed() >= LEAD_RETRY)
+        {
             last_try = Some(std::time::Instant::now());
             if let Some(lock) = winwright_win32::shared::LeaderLock::try_acquire() {
                 // Leading without the hotkey (an older Winwright still holds it) would leave
