@@ -39,7 +39,7 @@ const INSTRUCTIONS: &str = "Winwright operates Windows apps through UI Automatio
 2. Act by ref (desktop_click, desktop_fill, desktop_select, desktop_check, ...). Locators (role/name/label/window) also work when you have no ref. When you already know several steps, send them together with desktop_batch.\n\
 3. Use desktop_wait_for instead of sleeping, then desktop_snapshot with diff=true to see only what changed.\n\
 4. Prefer app_launch and filesystem_operation over clicking through the shell. app_launch takes the name the Start menu shows (\"Discord\") and waits for the app's main window, which it returns: act in that window.\n\
-5. Use desktop_screenshot only when the tree lacks what you need; desktop_mouse then acts on what it shows, by its pixels.\n\
+5. When you need to see the screen: desktop_screenshot marks=true numbers every element on a window's image (act by ref); ocr=true reads the text with its screen positions; for what has neither, desktop_mouse acts on a plain screenshot's pixels, with the scale it reports. Zoom with region for small details.\n\
 6. verified=false means the effect was not confirmed. Check it (desktop_read_text, or a snapshot) before repeating the action: never type the same text twice into a field blindly.\n\
 7. When you finish a task on the desktop, call memory_save once with a short report. When the person mentions earlier work, call memory_recall first.\n\
 8. When the person wants to learn how to do something, teach with desktop_guide (they click, you point) instead of doing it for them; overlay_highlight shows where something is. To learn a task from them, desktop_record watches them do it once.\n\
