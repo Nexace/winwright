@@ -400,6 +400,8 @@ pub struct LayoutInput {
     pub label_text: Option<(i32, i32)>,
     /// Step number text size in pixels.
     pub badge_text: Option<(i32, i32)>,
+    /// "Step 3 of 7" text size in pixels; shown above the caption in a pointer's bubble.
+    pub progress_text: Option<(i32, i32)>,
 }
 
 /// Overlay window bounds on screen plus every part in window-local pixels.
@@ -417,6 +419,8 @@ pub struct Layout {
     /// Where the label's text goes.
     pub text: Option<PhysicalRect>,
     pub badge: Option<PhysicalRect>,
+    /// Where "Step 3 of 7" goes, above the text.
+    pub progress: Option<PhysicalRect>,
 }
 
 /// Lays out one overlay. The window is the union of all parts clipped to the target's
@@ -451,13 +455,15 @@ pub fn compute_layout(input: &LayoutInput) -> Option<Layout> {
         y: target.top,
     };
 
-    let (label, badge, text) = match &pointer {
-        // A bubble beside the pointer; the step number sits inside it, left of the text.
+    let (label, badge, text, progress) = match &pointer {
+        // A bubble beside the pointer; the step number sits inside it, left of the text, and
+        // "Step 3 of 7" above the text.
         Some(p) => {
             let number = input.badge_text.map(|_| m.badge_diameter);
+            let (pw, ph) = input.progress_text.unwrap_or((0, 0));
             let label = input.label_text.map(|(w, h)| {
-                let w = w + number.map_or(0, |d| d + m.gap) + 2 * m.bubble_pad_x;
-                let h = h.max(number.unwrap_or(0)) + 2 * m.bubble_pad_y;
+                let w = w.max(pw) + number.map_or(0, |d| d + m.gap) + 2 * m.bubble_pad_x;
+                let h = (h + ph).max(number.unwrap_or(0)) + 2 * m.bubble_pad_y;
                 place_bubble(p.tip, (w, h), work, m)
             });
             let badge = label.zip(number).map(|(bubble, d)| {
@@ -465,7 +471,7 @@ pub fn compute_layout(input: &LayoutInput) -> Option<Layout> {
                 let top = bubble.top + (bubble.height() - d) / 2;
                 PhysicalRect::new(left, top, left + d, top + d)
             });
-            let text = label.map(|bubble| {
+            let column = label.map(|bubble| {
                 let left = badge.map_or(bubble.left + m.bubble_pad_x, |b| b.right + m.gap);
                 PhysicalRect::new(
                     left,
@@ -474,7 +480,11 @@ pub fn compute_layout(input: &LayoutInput) -> Option<Layout> {
                     bubble.bottom - m.bubble_pad_y,
                 )
             });
-            (label, badge, text)
+            let progress = column
+                .filter(|_| input.progress_text.is_some())
+                .map(|c| PhysicalRect::new(c.left, c.top, c.right, c.top + ph));
+            let text = column.map(|c| PhysicalRect::new(c.left, c.top + ph, c.right, c.bottom));
+            (label, badge, text, progress)
         }
         None => {
             let badge = input
@@ -493,7 +503,7 @@ pub fn compute_layout(input: &LayoutInput) -> Option<Layout> {
                     r.bottom - m.label_pad_y,
                 )
             });
-            (label, badge, text)
+            (label, badge, text, None)
         }
     };
     let shadow = label
@@ -526,6 +536,7 @@ pub fn compute_layout(input: &LayoutInput) -> Option<Layout> {
         label: label.map(|r| offset(r, dx, dy)),
         text: text.map(|r| offset(r, dx, dy)),
         badge: badge.map(|r| offset(r, dx, dy)),
+        progress: progress.map(|r| offset(r, dx, dy)),
     })
 }
 
@@ -549,6 +560,7 @@ mod tests {
             metrics: m100(),
             label_text: None,
             badge_text: None,
+            progress_text: None,
         }
     }
 
@@ -799,6 +811,35 @@ mod tests {
         assert_eq!(badge, PhysicalRect::new(604, 457, 628, 481));
         assert_eq!(text.left, badge.right + 6);
         assert!(contains_rect(bubble, badge) && contains_rect(bubble, text));
+        assert_eq!(layout.progress, None);
+    }
+
+    #[test]
+    fn step_progress_goes_above_the_caption_in_the_bubble() {
+        let target = PhysicalRect::new(500, 400, 600, 440);
+        let mut i = input(target, OverlayStyle::Pointer);
+        i.label_text = Some((80, 20));
+        i.badge_text = Some((8, 16));
+        i.progress_text = Some((70, 15));
+        let layout = compute_layout(&i).unwrap();
+        let bubble = on_screen(&layout, layout.label.unwrap());
+        let badge = on_screen(&layout, layout.badge.unwrap());
+        let progress = on_screen(&layout, layout.progress.unwrap());
+        let text = on_screen(&layout, layout.text.unwrap());
+        // As wide as before (the caption is the wider line), 15 px taller: 20 + 15 + 2*9.
+        assert_eq!(bubble, PhysicalRect::new(590, 448, 728, 501));
+        assert_eq!(progress, PhysicalRect::new(634, 457, 714, 472));
+        assert_eq!(text, PhysicalRect::new(634, 472, 714, 492));
+        // The number stays centered on the bubble's height, left of both lines.
+        assert_eq!(badge.top - bubble.top, bubble.bottom - badge.bottom - 1);
+        assert!(badge.right < progress.left && contains_rect(bubble, progress));
+        // A wider progress line widens the bubble; no caption, no bubble and no progress.
+        i.progress_text = Some((120, 15));
+        let wide = compute_layout(&i).unwrap();
+        assert_eq!(wide.label.unwrap().width(), 120 + 24 + 6 + 2 * 14);
+        i.label_text = None;
+        let bare = compute_layout(&i).unwrap();
+        assert_eq!((bare.label, bare.progress), (None, None));
     }
 
     #[test]

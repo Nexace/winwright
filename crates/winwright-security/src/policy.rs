@@ -60,6 +60,9 @@ impl Policy {
             Capability::FileDelete | Capability::ProcessTerminate => {
                 return verdict(Confirm, "destructive operation needs user confirmation");
             }
+            Capability::WatchPerson => {
+                return verdict(Confirm, "watching what you do always needs your OK");
+            }
             _ => {}
         }
 
@@ -165,6 +168,8 @@ mod tests {
         assert_eq!(decide(&p, Capability::Interact, Destructive), Confirm);
         assert_eq!(decide(&p, Capability::FileDelete, Normal), Confirm);
         assert_eq!(decide(&p, Capability::ProcessTerminate, Normal), Confirm);
+        // Even a read-only look at the person's own clicks asks first.
+        assert_eq!(decide(&p, Capability::WatchPerson, ReadOnly), Confirm);
         assert_eq!(decide(&p, Capability::Interact, Privileged), Deny);
         assert_eq!(decide(&p, Capability::Shell, Normal), Deny);
         assert_eq!(decide(&p, Capability::PowerShell, Normal), Deny);

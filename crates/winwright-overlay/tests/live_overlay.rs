@@ -36,6 +36,7 @@ fn request(rect: [i32; 4], style: OverlayStyle) -> OverlayRequest {
         style,
         label: None,
         step: None,
+        steps: None,
         color: 0x00E0_4A2A,
         duration_ms: None,
     }
@@ -174,6 +175,26 @@ fn pointer_renders_and_the_click_watch_comes_and_goes() {
     ui.overlay.clear(None).unwrap();
     assert_eq!(ui.overlay.window_handle(id).unwrap(), None);
     assert!(!is_window(handle));
+}
+
+#[test]
+#[ignore = "speaks through the speakers"]
+fn the_voice_speaks_without_waiting_and_hushes_at_once() {
+    let ui = NativeUi::start().unwrap();
+    let started = std::time::Instant::now();
+    ui.overlay
+        .speak("Click Develop, at the top of the window.")
+        .unwrap();
+    // A second line cuts the first off; neither call waits for the speech.
+    ui.overlay
+        .speak("Then drag Exposure to the right.")
+        .unwrap();
+    assert!(started.elapsed() < Duration::from_millis(500));
+    sleep(Duration::from_millis(1_200));
+    ui.overlay.hush();
+    // Still usable after a hush.
+    ui.overlay.speak("Done.").unwrap();
+    sleep(Duration::from_millis(800));
 }
 
 #[test]

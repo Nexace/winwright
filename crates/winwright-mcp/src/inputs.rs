@@ -15,7 +15,7 @@ use winwright_contracts::input::parse_chord;
 use winwright_contracts::locator::{ElementLocator, FindRequest, MatchMode};
 use winwright_contracts::overlay::{
     DEFAULT_SPOT_SIDE, GuideRequest, GuideStep, GuideTarget, GuideWait, HighlightRequest,
-    OverlayStyle, ScreenSpot, SpotHighlightRequest,
+    OverlayStyle, RecordRequest, ScreenSpot, SpotHighlightRequest,
 };
 use winwright_contracts::snapshot::{SnapshotRequest, SnapshotTarget};
 
@@ -945,6 +945,8 @@ pub struct GuideInput {
     /// How long to wait for the person in all (default 50000 ms, at most 300000; some apps end
     /// tool calls after 60 s).
     pub timeout_ms: Option<u64>,
+    /// Also read each step's caption aloud with the Windows voice (default false).
+    pub speak: Option<bool>,
 }
 
 impl GuideInput {
@@ -959,7 +961,27 @@ impl GuideInput {
             style: self.style.unwrap_or(OverlayStyle::Pointer),
             color: None,
             timeout_ms: self.timeout_ms.unwrap_or(50_000),
+            speak: self.speak.unwrap_or(false),
         })
+    }
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordInput {
+    /// Stop after the person has been idle this long (default 15 s).
+    pub idle_seconds: Option<u32>,
+    /// Stop after this long in all (default 120 s, at most 600; some apps end tool calls
+    /// after 60 s).
+    pub max_seconds: Option<u32>,
+}
+
+impl RecordInput {
+    pub fn request(&self) -> RecordRequest {
+        RecordRequest {
+            idle_seconds: self.idle_seconds.unwrap_or(15),
+            max_seconds: self.max_seconds.unwrap_or(120),
+        }
     }
 }
 
@@ -1147,6 +1169,16 @@ mod tests {
     }
 
     #[test]
+    fn recording_defaults_to_15_s_idle_and_2_minutes() {
+        let empty: RecordInput = serde_json::from_str("{}").unwrap();
+        let req = empty.request();
+        assert_eq!((req.idle_seconds, req.max_seconds), (15, 120));
+        let given: RecordInput =
+            serde_json::from_str(r#"{"idleSeconds":5,"maxSeconds":60}"#).unwrap();
+        assert_eq!(given.request().idle_seconds, 5);
+    }
+
+    #[test]
     fn guides_and_highlights_point_at_refs_or_spots() {
         let guide: GuideInput = serde_json::from_str(
             r#"{"steps":[{"caption":"Click Develop","ref":"e4"},
@@ -1169,6 +1201,10 @@ mod tests {
             Some("Lightroom")
         );
         assert_eq!(req.steps[2].wait, GuideWait::Change);
+        assert!(!req.speak, "speaking is opt-in");
+        let spoken: GuideInput =
+            serde_json::from_str(r#"{"steps":[{"caption":"x","ref":"e1"}],"speak":true}"#).unwrap();
+        assert!(spoken.request().unwrap().speak);
 
         let both: GuideInput =
             serde_json::from_str(r#"{"steps":[{"caption":"x","ref":"e1","x":1,"y":2}]}"#).unwrap();

@@ -42,7 +42,7 @@ const INSTRUCTIONS: &str = "Winwright operates Windows apps through UI Automatio
 5. Use desktop_screenshot only when the tree lacks what you need; desktop_mouse then acts on what it shows, by its pixels.\n\
 6. verified=false means the effect was not confirmed. Check it (desktop_read_text, or a snapshot) before repeating the action: never type the same text twice into a field blindly.\n\
 7. When you finish a task on the desktop, call memory_save once with a short report. When the person mentions earlier work, call memory_recall first.\n\
-8. When the person wants to learn how to do something, teach with desktop_guide (they click, you point) instead of doing it for them; overlay_highlight shows where something is.\n\
+8. When the person wants to learn how to do something, teach with desktop_guide (they click, you point) instead of doing it for them; overlay_highlight shows where something is. To learn a task from them, desktop_record watches them do it once.\n\
 Errors are JSON with a code and a hint. CONFIRMATION_REQUIRED means the user must approve: do not work around it. \
 CANCELLED after an emergency stop means the user stopped you: stop and ask them before doing anything else.";
 
@@ -550,7 +550,8 @@ impl WinwrightMcp {
         with a pointer, and Winwright waits until they click inside it (wait=click) or until its pixels change (wait=change, \
         for keys they press), then shows the next step. Steps point at a ref, or at x/y in pixels of `window`'s \
         desktop_screenshot (width/height = the spot, default 48). Nothing is clicked for them. A click outside the spot \
-        shows \"Not there\" and keeps waiting; the third one on a step stops the guide. Returns how far they got, their \
+        shows \"Not there\" and keeps waiting; the third one on a step stops the guide. After 8 s without a click the \
+        pointer glides to the spot again; speak=true also reads each caption aloud. Returns how far they got, their \
         clicks and a screenshot: when it stopped on clicks elsewhere, look and help; when time ran out, call again with \
         the steps left."
     )]
@@ -594,6 +595,25 @@ impl WinwrightMcp {
             Err(e) => content.push(ContentBlock::text(format!("no screenshot: {e}"))),
         }
         Ok(CallToolResult::success(content))
+    }
+
+    #[tool(
+        description = "Learn a task by watching the person do it once. After they agree in Winwright's dialog, records their own \
+        clicks (window title, element role, name and automation id, screen point) until they stop for idleSeconds (default \
+        15), after maxSeconds (default 120, at most 600) or at 50 steps; a notice on screen says it is recording. Keys are \
+        never recorded: a field they typed in becomes a typed step with its name only, never for password fields. Save the \
+        steps with memory_save and teach them back with desktop_guide."
+    )]
+    async fn desktop_record(&self, Parameters(input): Parameters<RecordInput>) -> ToolResult {
+        let result = self
+            .engine
+            .record_clicks(&self.sess(), input.request())
+            .await;
+        self.activity.touch();
+        Ok(match result {
+            Ok(r) => json(&r),
+            Err(e) => fail(e),
+        })
     }
 
     #[tool(description = "Remove all overlays.")]
@@ -950,7 +970,7 @@ mod tests {
     #[test]
     fn tool_schemas_are_objects_that_name_every_described_field() {
         let tools = WinwrightMcp::tool_router().list_all();
-        assert_eq!(tools.len(), 30);
+        assert_eq!(tools.len(), 31);
         for tool in tools {
             let schema = serde_json::Value::Object(tool.input_schema.as_ref().clone());
             assert_eq!(schema["type"], "object", "{}", tool.name);

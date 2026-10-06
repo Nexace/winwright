@@ -35,6 +35,9 @@ const CHANGE_POLL: Duration = Duration::from_millis(400);
 const MAX_MISSES: u32 = 3;
 /// After that the step stays this long, so the person sees where it was.
 const MISSED_MS: u64 = 8_000;
+/// A step not clicked for this long is shown again: the pointer glides in once more. The
+/// same span as [`MISSED_MS`]: long enough to look around, short enough to still be waiting.
+const REPLAY_AFTER: Duration = Duration::from_millis(MISSED_MS);
 /// The pointer after a click elsewhere.
 const MISS_COLOR: u32 = 0x00E5_484D;
 
@@ -102,15 +105,33 @@ async fn wait(pause: Duration, ctx: &OperationContext) -> WinwrightResult<bool> 
     }
 }
 
-/// The person's next press and, once it is released, where (when they dragged); `None` when
-/// the guide's time runs out first. A press still held then answers on its own.
+/// What the person did while a step waited.
+#[derive(Debug)]
+enum Press<T> {
+    Clicked(T),
+    /// No press within the idle time given.
+    Idle,
+    /// The guide's time ran out.
+    TimeUp,
+}
+
+/// The person's next press and, once it is released, where (when they dragged). With `idle`,
+/// gives up after that long without a press. A press still held when time runs out answers
+/// on its own.
 async fn next_press(
     events: &mut UnboundedReceiver<PointerEvent>,
+    idle: Option<Duration>,
     ctx: &OperationContext,
-) -> WinwrightResult<Option<(PointerEvent, Option<PhysicalPoint>)>> {
+) -> WinwrightResult<Press<(PointerEvent, Option<PhysicalPoint>)>> {
+    let idle_at = idle.map(|d| std::time::Instant::now() + d);
     let press = loop {
-        match next_event(events, ctx).await? {
-            None => return Ok(None),
+        let event = tokio::select! {
+            event = next_event(events, ctx) => event?,
+            () = tokio::time::sleep_until(idle_at.unwrap_or(ctx.deadline).into()),
+                if idle_at.is_some() => return Ok(Press::Idle),
+        };
+        match event {
+            None => return Ok(Press::TimeUp),
             Some(event) if event.down => break event,
             // The release of a press made before this step.
             Some(_) => {}
@@ -118,10 +139,10 @@ async fn next_press(
     };
     while let Some(event) = next_event(events, ctx).await? {
         if !event.down && event.button == press.button {
-            return Ok(Some((press, dragged(press.point, event.point))));
+            return Ok(Press::Clicked((press, dragged(press.point, event.point))));
         }
     }
-    Ok(Some((press, None)))
+    Ok(Press::Clicked((press, None)))
 }
 
 /// What a click means for the step on screen.
@@ -207,14 +228,23 @@ impl Shown {
 }
 
 /// Removes a step's overlay when dropped, however the guide ends.
-struct Drawn<'a> {
-    overlay: &'a dyn OverlayService,
-    id: OverlayId,
+pub(crate) struct Drawn<'a> {
+    pub(crate) overlay: &'a dyn OverlayService,
+    pub(crate) id: OverlayId,
 }
 
 impl Drop for Drawn<'_> {
     fn drop(&mut self) {
         let _ = self.overlay.clear(Some(self.id));
+    }
+}
+
+/// Stops the voice when dropped, however the guide ends.
+struct Hush<'a>(&'a dyn OverlayService);
+
+impl Drop for Hush<'_> {
+    fn drop(&mut self) {
+        self.0.hush();
     }
 }
 
@@ -263,6 +293,7 @@ impl Engine {
             style: request.style,
             label: request.label,
             step: None,
+            steps: None,
             color: request.color.unwrap_or(DEFAULT_OVERLAY_COLOR),
             duration_ms: Some(request.duration_ms.unwrap_or(DEFAULT_HIGHLIGHT_MS)),
         })?;
@@ -315,6 +346,8 @@ impl Engine {
             warnings: Vec::new(),
         };
         let color = request.color.unwrap_or(DEFAULT_OVERLAY_COLOR);
+        let mut speaking = request.speak;
+        let _hush = speaking.then_some(Hush(overlay));
         let mut missed = None;
         'steps: for (i, step) in request.steps.iter().enumerate() {
             self.ensure_no_confirmation_open()?;
@@ -329,6 +362,7 @@ impl Engine {
                     style: request.style,
                     label: Some(label),
                     step: number,
+                    steps: number.map(|_| total as u32),
                     color,
                     duration_ms: Some((ctx.remaining().as_millis() as u64).max(1)),
                 })
@@ -337,17 +371,44 @@ impl Engine {
                 overlay,
                 id: show(caption.to_owned(), color)?,
             };
+            if speaking && let Err(err) = overlay.speak(caption) {
+                result
+                    .warnings
+                    .push(format!("captions are not read aloud: {err}"));
+                speaking = false;
+            }
             match step.wait {
                 GuideWait::Click => {
                     let mut misses = 0;
+                    // "Show me again": once per stretch without a click.
+                    let mut replayed = false;
+                    let mut marked = false;
                     loop {
-                        let Some(click) = self
-                            .next_click(session, &mut events, &shown, i + 1, &ctx)
+                        let idle = (!replayed).then_some(REPLAY_AFTER);
+                        let click = match self
+                            .next_click(session, &mut events, &shown, i + 1, idle, &ctx)
                             .await?
-                        else {
-                            result.outcome = GuideOutcome::TimedOut;
-                            break 'steps;
+                        {
+                            Press::Clicked(click) => click,
+                            Press::Idle => {
+                                // Shown anew, the pointer glides in again from the cursor.
+                                let (label, color) = if marked {
+                                    (not_there(caption), MISS_COLOR)
+                                } else {
+                                    (caption.to_owned(), color)
+                                };
+                                let old = drawn.id;
+                                drawn.id = show(label, color)?;
+                                let _ = overlay.clear(Some(old));
+                                replayed = true;
+                                continue;
+                            }
+                            Press::TimeUp => {
+                                result.outcome = GuideOutcome::TimedOut;
+                                break 'steps;
+                            }
                         };
+                        replayed = false;
                         let inside = click.inside;
                         result.clicks.push(click);
                         match verdict(inside, &mut misses) {
@@ -361,6 +422,7 @@ impl Engine {
                                 // The same step, marked, waits for the right click.
                                 let _ = overlay.clear(Some(drawn.id));
                                 drawn.id = show(not_there(caption), MISS_COLOR)?;
+                                marked = true;
                             }
                         }
                     }
@@ -382,6 +444,7 @@ impl Engine {
                 style: request.style,
                 label: Some(not_there(caption)),
                 step,
+                steps: step.map(|_| total as u32),
                 color: MISS_COLOR,
                 duration_ms: Some(MISSED_MS),
             });
@@ -423,20 +486,23 @@ impl Engine {
         }
     }
 
-    /// The person's next press and where it was released; `None` when time runs out first.
+    /// The person's next press and where it was released, as [`next_press`] waits for it.
     async fn next_click(
         &self,
         session: &Session,
         events: &mut UnboundedReceiver<PointerEvent>,
         shown: &Shown,
         step: usize,
+        idle: Option<Duration>,
         ctx: &OperationContext,
-    ) -> WinwrightResult<Option<GuideClick>> {
-        let Some((press, drag_to)) = next_press(events, ctx).await? else {
-            return Ok(None);
+    ) -> WinwrightResult<Press<GuideClick>> {
+        let (press, drag_to) = match next_press(events, idle, ctx).await? {
+            Press::Clicked(click) => click,
+            Press::Idle => return Ok(Press::Idle),
+            Press::TimeUp => return Ok(Press::TimeUp),
         };
         let at = shown.local(press.point);
-        Ok(Some(GuideClick {
+        Ok(Press::Clicked(GuideClick {
             step: step as u32,
             button: press.button,
             x: at.x,
@@ -534,6 +600,7 @@ mod tests {
             style: OverlayStyle::Pointer,
             color: None,
             timeout_ms: 1_000,
+            speak: false,
         }
     }
 
@@ -582,24 +649,59 @@ mod tests {
         tx.send(press(100, true)).unwrap();
         tx.send(press(300, false)).unwrap();
         let ctx = ctx(1_000);
-        let (p, drag) = next_press(&mut rx, &ctx).await.unwrap().unwrap();
+        let Press::Clicked((p, drag)) = next_press(&mut rx, None, &ctx).await.unwrap() else {
+            panic!("no click");
+        };
         assert_eq!((p.point.x, drag), (10, None));
-        let (p, drag) = next_press(&mut rx, &ctx).await.unwrap().unwrap();
+        let Press::Clicked((p, drag)) = next_press(&mut rx, None, &ctx).await.unwrap() else {
+            panic!("no drag");
+        };
         assert_eq!((p.point.x, drag.map(|d| d.x)), (100, Some(300)));
         // Nothing more: time runs out.
-        assert!(next_press(&mut rx, &ctx).await.unwrap().is_none());
+        let left = next_press(&mut rx, None, &ctx).await.unwrap();
+        assert!(matches!(left, Press::TimeUp));
     }
 
     #[tokio::test]
     async fn a_press_still_held_when_time_runs_out_answers_alone_and_a_stop_cancels() {
         let (tx, mut rx) = unbounded_channel();
         tx.send(press(7, true)).unwrap();
-        let (p, drag) = next_press(&mut rx, &ctx(200)).await.unwrap().unwrap();
+        let Press::Clicked((p, drag)) = next_press(&mut rx, None, &ctx(200)).await.unwrap() else {
+            panic!("no click");
+        };
         assert_eq!((p.point.x, drag), (7, None));
         let stopped = ctx(5_000);
         stopped.cancel.cancel();
-        let err = next_press(&mut rx, &stopped).await.unwrap_err();
+        let err = next_press(&mut rx, None, &stopped).await.unwrap_err();
         assert!(matches!(err, WinwrightError::Cancelled));
+    }
+
+    #[tokio::test]
+    async fn a_step_left_alone_goes_idle_but_a_held_press_is_never_cut_short() {
+        let (tx, mut rx) = unbounded_channel();
+        let ctx = ctx(5_000);
+        let quiet = Some(Duration::from_millis(50));
+        assert!(matches!(
+            next_press(&mut rx, quiet, &ctx).await.unwrap(),
+            Press::Idle
+        ));
+        // A stale release does not count as a click, so the step still goes idle.
+        tx.send(press(5, false)).unwrap();
+        assert!(matches!(
+            next_press(&mut rx, quiet, &ctx).await.unwrap(),
+            Press::Idle
+        ));
+        // Once pressed, the release is awaited past the idle time.
+        tx.send(press(9, true)).unwrap();
+        let late = tx.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            late.send(press(9, false)).unwrap();
+        });
+        let Press::Clicked((p, drag)) = next_press(&mut rx, quiet, &ctx).await.unwrap() else {
+            panic!("the held press was dropped");
+        };
+        assert_eq!((p.point.x, drag), (9, None));
     }
 
     #[test]

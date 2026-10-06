@@ -10,6 +10,7 @@ mod guide;
 pub mod lease;
 pub mod locator;
 mod memory;
+mod record;
 pub mod refs;
 mod services;
 pub mod session;

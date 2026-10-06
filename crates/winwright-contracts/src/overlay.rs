@@ -18,8 +18,8 @@ pub enum OverlayStyle {
     Arrow,
     /// Small filled circle at the rectangle's center (click feedback).
     ClickMarker,
-    /// A pointer at the rectangle's center with the label in a bubble beside it (teaching).
-    /// It draws no step badge.
+    /// A pointer at the rectangle's center with the label in a bubble beside it (teaching);
+    /// a step number goes inside the bubble.
     Pointer,
 }
 
@@ -40,6 +40,9 @@ pub struct OverlayRequest {
     /// Numbered badge for tutorial steps.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub step: Option<u32>,
+    /// How many steps the tutorial has: the pointer's bubble then says "Step 3 of 7".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steps: Option<u32>,
     /// 0xRRGGBB.
     #[serde(default = "default_color")]
     pub color: u32,
@@ -149,6 +152,9 @@ pub struct GuideRequest {
     pub color: Option<u32>,
     /// For the whole guide.
     pub timeout_ms: u64,
+    /// Each step's caption is also read aloud with the Windows voice.
+    #[serde(default)]
+    pub speak: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -195,6 +201,60 @@ pub struct GuideResult {
     pub warnings: Vec<String>,
 }
 
+/// Learning by watching: the person does a task once while their own clicks are recorded.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RecordRequest {
+    /// Recording stops after this long without the person's input.
+    pub idle_seconds: u32,
+    /// And after this long in all.
+    pub max_seconds: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum RecordedAction {
+    Click,
+    /// The focused field's value changed: the person typed in it. What they typed is never
+    /// read into the recording.
+    Typed,
+}
+
+/// One thing the person did, with what is needed to point at it again.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordedStep {
+    pub action: RecordedAction,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub button: Option<MouseButton>,
+    /// The title of the element's top-level window.
+    pub window: String,
+    pub role: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub automation_id: String,
+    /// Where the click was, in physical screen pixels.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<PhysicalPoint>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum RecordStop {
+    /// The person stopped for the idle time.
+    Idle,
+    TimeLimit,
+    StepLimit,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordResult {
+    pub steps: Vec<RecordedStep>,
+    pub stopped: RecordStop,
+    pub seconds: u32,
+}
+
 /// A mouse button the person pressed or released.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PointerEvent {
@@ -239,6 +299,19 @@ pub trait OverlayService: Send + Sync {
             reason: "this overlay service cannot watch the pointer".into(),
         })
     }
+
+    /// Reads `text` aloud with the Windows voice, cutting off whatever it was still saying.
+    /// Returns at once; the speech goes on by itself.
+    fn speak(&self, text: &str) -> WinwrightResult<()> {
+        let _ = text;
+        Err(WinwrightError::BackendUnavailable {
+            backend: "overlay".into(),
+            reason: "this overlay service cannot speak".into(),
+        })
+    }
+
+    /// Stops any speech at once. Never blocks.
+    fn hush(&self) {}
 }
 
 /// A global hotkey bound with `RegisterHotKey`. Conflicts are reported, never ignored.

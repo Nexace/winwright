@@ -42,6 +42,8 @@ pub enum Capability {
     ClipboardSecret,
     ReadSensitive,
     Elevated,
+    /// Watching what the person does (their clicks), to learn a task from them.
+    WatchPerson,
 }
 
 /// Target description used for policy and audit. Never holds field values.

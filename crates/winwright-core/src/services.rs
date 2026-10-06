@@ -537,6 +537,7 @@ impl Engine {
             style: request.style,
             label: request.label,
             step: request.step,
+            steps: None,
             color: request.color.unwrap_or(DEFAULT_OVERLAY_COLOR),
             duration_ms: Some(request.duration_ms.unwrap_or(DEFAULT_HIGHLIGHT_MS)),
         })?;
@@ -1011,6 +1012,7 @@ impl Engine {
         }
         if let Some(overlay) = self.overlay.as_deref() {
             let _ = overlay.clear(None);
+            overlay.hush();
         }
         tracing::warn!("emergency stop: all sessions cancelled");
     }

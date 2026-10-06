@@ -121,6 +121,7 @@ async fn check_monitor(
             style: OverlayStyle::Highlight,
             label: None,
             step: None,
+            steps: None,
             color: 0x00FF_00FF,
             duration_ms: Some(5_000),
         }) {
