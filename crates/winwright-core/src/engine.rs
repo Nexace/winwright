@@ -442,7 +442,11 @@ impl Engine {
                     Ok(true)
                 } else if asked.elapsed() + Duration::from_millis(500) >= timeout {
                     Err(WinwrightError::ActionBlocked {
-                        reason: format!("nobody answered the confirmation in time: {summary}"),
+                        reason: format!(
+                            "nobody answered the confirmation in time: {summary}. Tell the \
+                             person to click \"Allow once\" on the Winwright dialog (it unlocks \
+                             about a second after the dialog is in front), then retry"
+                        ),
                     })
                 } else {
                     Err(WinwrightError::ActionBlocked {

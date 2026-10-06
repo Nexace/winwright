@@ -31,6 +31,7 @@ use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, HDC, HGDIOBJ, InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO,
     MonitorFromPoint, PAINTSTRUCT, ReleaseDC, SRCCOPY, SelectObject,
 };
+use windows::Win32::System::Diagnostics::Debug::MessageBeep;
 use windows::Win32::UI::Controls::{
     CDDS_PREPAINT, CDIS_DISABLED, CDIS_FOCUS, CDIS_HOT, CDIS_SELECTED, CDRF_DODEFAULT,
     CDRF_SKIPDEFAULT, DRAWITEMSTRUCT, NM_CUSTOMDRAW, NMCUSTOMDRAW, NMHDR,
@@ -46,13 +47,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
     DefWindowProcW, DestroyIcon, DestroyWindow, DispatchMessageW, FLASHW_ALL, FLASHW_TIMERNOFG,
     FLASHWINFO, FlashWindowEx, GetCursorPos, GetForegroundWindow, GetMessageW, HICON, HMENU,
     HWND_TOPMOST, ICON_BIG, ICON_SMALL, IDCANCEL, InSendMessageEx, IsDialogMessageW, KillTimer,
-    MSG, PostMessageW, PostQuitMessage, SM_CXICON, SM_CXSMICON, SW_SHOWNORMAL, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SendMessageW, SetTimer, SetWindowPos, SetWindowTextW,
-    ShowWindow, TranslateMessage, WA_INACTIVE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE,
-    WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_DPICHANGED, WM_DRAWITEM, WM_ERASEBKGND, WM_KEYDOWN,
-    WM_KEYFIRST, WM_KEYLAST, WM_MOUSEFIRST, WM_MOUSELAST, WM_NOTIFY, WM_PAINT, WM_SETFONT,
-    WM_SETICON, WM_SYSKEYDOWN, WM_TIMER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_EX_APPWINDOW,
-    WS_EX_TOPMOST, WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    MB_ICONQUESTION, MSG, PostMessageW, PostQuitMessage, SM_CXICON, SM_CXSMICON, SW_SHOWNORMAL,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SendMessageW, SetTimer, SetWindowPos,
+    SetWindowTextW, ShowWindow, TranslateMessage, WA_INACTIVE, WINDOW_EX_STYLE, WINDOW_STYLE,
+    WM_ACTIVATE, WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_DPICHANGED, WM_DRAWITEM, WM_ERASEBKGND,
+    WM_KEYDOWN, WM_KEYFIRST, WM_KEYLAST, WM_MOUSEFIRST, WM_MOUSELAST, WM_NOTIFY, WM_PAINT,
+    WM_SETFONT, WM_SETICON, WM_SYSKEYDOWN, WM_TIMER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN,
+    WS_EX_APPWINDOW, WS_EX_TOPMOST, WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 use windows::core::{HSTRING, PCWSTR, w};
 use winwright_contracts::WinwrightResult;
@@ -934,6 +935,9 @@ fn run_dialog(
                 dwTimeout: 0,
             });
         }
+        // A question for the person: a sound, so a dialog under their other windows or off
+        // their gaze is not missed.
+        let _ = MessageBeep(MB_ICONQUESTION);
         if let Some(deny) = with_dialog(|d| d.deny) {
             let _ = SetFocus(Some(deny));
         }
