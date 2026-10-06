@@ -307,3 +307,47 @@ async fn phase17_mouse_acts_by_position() {
     );
     input.move_to(cursor, &ctx).await.unwrap();
 }
+
+/// A window the accessibility tree barely describes (the canvas draws its text itself) gets the
+/// text OCR finds numbered in its marks legend, with screen points to click.
+#[tokio::test]
+#[ignore = "shows the canvas fixture and captures it for a few seconds"]
+async fn marks_number_the_ocr_text_of_a_canvas() {
+    use winwright_contracts::capture::{ScreenshotRequest, ScreenshotTarget};
+
+    winwright_win32::enable_per_monitor_dpi_awareness();
+    let fx = FixtureProcess::launch(Fixture::Canvas).expect("canvas launches");
+    let engine = Engine::new(
+        Config::default(),
+        Arc::new(winwright_win32::Win32Windows),
+        Arc::new(winwright_uia::UiaBackend::start().expect("UIA worker")),
+    )
+    .with_capture(Arc::new(
+        winwright_capture::WgcCapture::start().expect("capture worker"),
+    ));
+    let session = engine
+        .session(
+            &winwright_contracts::ids::SessionId::parse("live").unwrap(),
+            "test",
+        )
+        .unwrap();
+    let image = engine
+        .screenshot(
+            &session,
+            ScreenshotRequest {
+                target: ScreenshotTarget::Window(WindowSelector {
+                    hwnd: Some(fx.hwnd),
+                    ..Default::default()
+                }),
+                marks: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("a marked screenshot");
+    let legend = image.legend.expect("a legend");
+    assert!(
+        legend.contains("found by OCR") && legend.to_lowercase().contains("wright"),
+        "the drawn text is numbered: {legend}"
+    );
+}

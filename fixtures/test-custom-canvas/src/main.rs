@@ -10,8 +10,9 @@ use std::cell::{Cell, OnceCell, RefCell};
 
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, DC_BRUSH, EndPaint, FillRect, GetStockObject, HBRUSH, HDC, InvalidateRect,
-    PAINTSTRUCT, SetDCBrushColor,
+    BeginPaint, CreateFontW, DC_BRUSH, DeleteObject, EndPaint, FillRect, GetStockObject, HBRUSH,
+    HDC, HGDIOBJ, InvalidateRect, PAINTSTRUCT, SelectObject, SetBkMode, SetDCBrushColor,
+    SetTextColor, TRANSPARENT, TextOutW,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{
@@ -35,6 +36,8 @@ const CLASS: PCWSTR = w!("WinwrightFixtureCanvas");
 /// Client area in DIPs.
 const CLIENT_SIZE: [i32; 2] = [520, 220];
 const BACKGROUND: COLORREF = rgb(211, 211, 211);
+/// The drawn text under the squares (no accessibility tree describes it; OCR can read it).
+const LABEL: &str = "Winwright canvas";
 /// Painted squares: name, `[left, top, right, bottom]` in DIPs, fill colour.
 const SQUARES: [(&str, [i32; 4], COLORREF); 3] = [
     ("red", [40, 40, 160, 160], rgb(255, 0, 0)),
@@ -214,8 +217,39 @@ fn paint(hwnd: HWND) {
     for (_, rect, color) in SQUARES {
         fill(hdc, &scaled(rect, dpi), color);
     }
+    label(hdc, dpi);
     // SAFETY: ends the paint cycle begun above with the same struct.
     let _ = unsafe { EndPaint(hwnd, &ps) };
+}
+
+/// Some drawn text under the squares, for tests of reading text off the screen (OCR).
+fn label(hdc: HDC, dpi: u32) {
+    let text: Vec<u16> = LABEL.encode_utf16().collect();
+    // SAFETY: `hdc` is the live paint DC; the font is selected out and deleted before return.
+    unsafe {
+        let font = CreateFontW(
+            -scale(30, dpi),
+            0,
+            0,
+            0,
+            600,
+            0,
+            0,
+            0,
+            Default::default(),
+            Default::default(),
+            Default::default(),
+            Default::default(),
+            0,
+            w!("Segoe UI"),
+        );
+        let old = SelectObject(hdc, HGDIOBJ(font.0));
+        SetBkMode(hdc, TRANSPARENT);
+        SetTextColor(hdc, rgb(0, 0, 0));
+        let _ = TextOutW(hdc, scale(40, dpi), scale(168, dpi), &text);
+        SelectObject(hdc, old);
+        let _ = DeleteObject(HGDIOBJ(font.0));
+    }
 }
 
 fn fill(hdc: HDC, rect: &RECT, color: COLORREF) {

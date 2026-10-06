@@ -258,8 +258,9 @@ fn marks_of(nodes: &[SnapshotNode], out: &mut Vec<Mark>) {
     }
 }
 
-/// A window with fewer numbered elements than this gets its OCR text numbered too.
-const FEW_MARKS: usize = 4;
+/// A window with fewer numbered elements than this gets its OCR text numbered too. A window's
+/// own frame (menu, minimize, maximize, close) already makes four.
+const FEW_MARKS: usize = 8;
 /// Most OCR lines numbered on one screenshot.
 const MAX_OCR_MARKS: usize = 60;
 /// Longest OCR text a legend line shows.
