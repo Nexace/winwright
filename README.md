@@ -85,7 +85,10 @@ under the point is judged like a click on it),
 `overlay_highlight` (shows you where something is: a pointer with a caption bubble at an
 element or at a spot on a screenshot), `desktop_guide` (teaches you: points at each step in
 turn and waits until you click it, or press the keys it names; it never clicks for you; while
-it waits it sees only your mouse clicks, never your keys), `overlay_clear`, `app_launch` (any app by the name the Start menu shows, Store apps too),
+it waits it sees only your mouse clicks, never your keys; `speak: true` also reads each step
+aloud), `desktop_record` (learns a task by watching you do it once: after you agree, it records
+your clicks and the element under each until you stop for 15 s; keys are never recorded, a
+field you typed in is noted by name only, never a password field), `overlay_clear`, `app_launch` (any app by the name the Start menu shows, Store apps too),
 `process_list`, `process_session` (run a
 program in the background, send it input, read its output; starting and every input ask, and
 need `allowShell`; the emergency stop ends them all), `process_terminate`

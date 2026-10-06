@@ -15,7 +15,7 @@ use winwright_contracts::input::parse_chord;
 use winwright_contracts::locator::{ElementLocator, FindRequest, MatchMode};
 use winwright_contracts::overlay::{
     DEFAULT_SPOT_SIDE, GuideRequest, GuideStep, GuideTarget, GuideWait, HighlightRequest,
-    OverlayStyle, ScreenSpot, SpotHighlightRequest,
+    OverlayStyle, RecordRequest, ScreenSpot, SpotHighlightRequest,
 };
 use winwright_contracts::snapshot::{SnapshotRequest, SnapshotTarget};
 
@@ -921,6 +921,25 @@ impl GuideInput {
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
+pub struct RecordInput {
+    /// Stop after the person has been idle this long (default 15 s).
+    pub idle_seconds: Option<u32>,
+    /// Stop after this long in all (default 120 s, at most 600; some apps end tool calls
+    /// after 60 s).
+    pub max_seconds: Option<u32>,
+}
+
+impl RecordInput {
+    pub fn request(&self) -> RecordRequest {
+        RecordRequest {
+            idle_seconds: self.idle_seconds.unwrap_or(15),
+            max_seconds: self.max_seconds.unwrap_or(120),
+        }
+    }
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct ProcessListInput {
     /// Only processes whose name contains this (case-insensitive), e.g. "discord".
     pub name: Option<String>,
@@ -1100,6 +1119,16 @@ mod tests {
         ));
         assert!(matches!(batch.steps[2].call(), BatchCall::Wait(Ok(_))));
         assert!(serde_json::from_str::<BatchInput>(r#"{"steps": [{"do": "explode"}]}"#).is_err());
+    }
+
+    #[test]
+    fn recording_defaults_to_15_s_idle_and_2_minutes() {
+        let empty: RecordInput = serde_json::from_str("{}").unwrap();
+        let req = empty.request();
+        assert_eq!((req.idle_seconds, req.max_seconds), (15, 120));
+        let given: RecordInput =
+            serde_json::from_str(r#"{"idleSeconds":5,"maxSeconds":60}"#).unwrap();
+        assert_eq!(given.request().idle_seconds, 5);
     }
 
     #[test]

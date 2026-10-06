@@ -228,9 +228,9 @@ impl Shown {
 }
 
 /// Removes a step's overlay when dropped, however the guide ends.
-struct Drawn<'a> {
-    overlay: &'a dyn OverlayService,
-    id: OverlayId,
+pub(crate) struct Drawn<'a> {
+    pub(crate) overlay: &'a dyn OverlayService,
+    pub(crate) id: OverlayId,
 }
 
 impl Drop for Drawn<'_> {

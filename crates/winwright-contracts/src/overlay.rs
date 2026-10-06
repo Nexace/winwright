@@ -201,6 +201,60 @@ pub struct GuideResult {
     pub warnings: Vec<String>,
 }
 
+/// Learning by watching: the person does a task once while their own clicks are recorded.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RecordRequest {
+    /// Recording stops after this long without the person's input.
+    pub idle_seconds: u32,
+    /// And after this long in all.
+    pub max_seconds: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum RecordedAction {
+    Click,
+    /// The focused field's value changed: the person typed in it. What they typed is never
+    /// read into the recording.
+    Typed,
+}
+
+/// One thing the person did, with what is needed to point at it again.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordedStep {
+    pub action: RecordedAction,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub button: Option<MouseButton>,
+    /// The title of the element's top-level window.
+    pub window: String,
+    pub role: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub automation_id: String,
+    /// Where the click was, in physical screen pixels.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<PhysicalPoint>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum RecordStop {
+    /// The person stopped for the idle time.
+    Idle,
+    TimeLimit,
+    StepLimit,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordResult {
+    pub steps: Vec<RecordedStep>,
+    pub stopped: RecordStop,
+    pub seconds: u32,
+}
+
 /// A mouse button the person pressed or released.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PointerEvent {
