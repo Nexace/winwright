@@ -4,6 +4,7 @@
 //! in `paint`, text is GDI ClearType, icons are Segoe Fluent glyphs. No WebView, no assets.
 
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use windows::Win32::Foundation::{
     COLORREF, ERROR_CLASS_ALREADY_EXISTS, GetLastError, HINSTANCE, HWND, RECT,
@@ -32,6 +33,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WNDPROC,
 };
 use windows::core::{BOOL, HRESULT, HSTRING, PCWSTR, w};
+use winwright_contracts::config::ThemeChoice;
 use winwright_contracts::geometry::PhysicalRect;
 use winwright_contracts::{WinwrightError, WinwrightResult};
 
@@ -140,7 +142,8 @@ impl Palette {
         code: 0x0023_2221,
     };
 
-    /// High contrast first, then `WINWRIGHT_THEME=light|dark`, then the Windows app mode.
+    /// High contrast first, then `WINWRIGHT_THEME=light|dark`, then the theme chosen in
+    /// Settings (`overlay.theme`), then the Windows app mode.
     pub fn system() -> Self {
         if let Some(p) = Self::high_contrast() {
             return p;
@@ -148,8 +151,12 @@ impl Palette {
         match std::env::var("WINWRIGHT_THEME").as_deref() {
             Ok("dark") => Self::DARK,
             Ok("light") => Self::LIGHT,
-            _ if apps_use_dark_theme() => Self::DARK,
-            _ => Self::LIGHT,
+            _ => match choice() {
+                ThemeChoice::Dark => Self::DARK,
+                ThemeChoice::Light => Self::LIGHT,
+                ThemeChoice::System if apps_use_dark_theme() => Self::DARK,
+                ThemeChoice::System => Self::LIGHT,
+            },
         }
     }
 
@@ -206,6 +213,22 @@ impl Palette {
         } else {
             self.text
         }
+    }
+}
+
+/// The configured theme, as `ThemeChoice as u8`.
+static CHOICE: AtomicU8 = AtomicU8::new(ThemeChoice::System as u8);
+
+/// Sets the theme (from config) for every window opened from now on.
+pub fn set_choice(theme: ThemeChoice) {
+    CHOICE.store(theme as u8, Ordering::Relaxed);
+}
+
+fn choice() -> ThemeChoice {
+    match CHOICE.load(Ordering::Relaxed) {
+        c if c == ThemeChoice::Light as u8 => ThemeChoice::Light,
+        c if c == ThemeChoice::Dark as u8 => ThemeChoice::Dark,
+        _ => ThemeChoice::System,
     }
 }
 

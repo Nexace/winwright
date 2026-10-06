@@ -561,6 +561,7 @@ async fn act(engine: &Engine, action: DesktopAction, json: bool) -> Result<(), W
 
 async fn run(cli: Cli) -> Result<(), WinwrightError> {
     let config = winwright_core::config::load_config(cli.config.as_deref())?;
+    winwright_overlay::theme::set_choice(config.overlay.theme);
     let json = cli.json;
     let Some(command) = cli.command else {
         unreachable!("main answers a missing command itself")
@@ -970,6 +971,7 @@ fn print_overview() {
 
 fn run_inspector(config: Option<&std::path::Path>) -> Result<(), WinwrightError> {
     let config = winwright_core::config::load_config(config)?;
+    winwright_overlay::theme::set_choice(config.overlay.theme);
     let engine = Engine::new(
         config,
         Arc::new(winwright_win32::Win32Windows),
