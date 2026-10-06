@@ -99,6 +99,21 @@ pub struct Engine {
     pub(crate) grants: Grants,
     /// The frame around the window being acted in.
     pub(crate) working: Arc<crate::working::Working>,
+    /// Told what is being done ("" when done), for the tray tooltip.
+    pub(crate) activity: Option<Activity>,
+}
+
+/// Receives a short line saying what Winwright is doing (an action's summary, never typed
+/// text), or "" once it is done.
+pub type Activity = Arc<dyn Fn(&str) + Send + Sync>;
+
+/// Says "" when the action it was posted for ends, on every path.
+pub(crate) struct Posted(pub(crate) Activity);
+
+impl Drop for Posted {
+    fn drop(&mut self) {
+        (self.0)("");
+    }
 }
 
 /// How long "Allow 10 min" lasts.
@@ -233,6 +248,7 @@ impl Engine {
             worked: Mutex::new(Vec::new()),
             grants: Grants::default(),
             working: Arc::default(),
+            activity: None,
         }
     }
 
@@ -262,6 +278,11 @@ impl Engine {
     }
 
     /// Trusted local approval UI. Without one, confirmations fail with `CONFIRMATION_REQUIRED`.
+    pub fn with_activity(mut self, activity: Activity) -> Self {
+        self.activity = Some(activity);
+        self
+    }
+
     pub fn with_confirmer(mut self, confirmer: Arc<dyn Confirmer>) -> Self {
         self.confirmer = Some(confirmer);
         self

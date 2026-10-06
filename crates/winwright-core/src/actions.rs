@@ -976,7 +976,9 @@ impl Engine {
         let proposed = self.proposed(&action, resolved.as_ref(), focused.as_ref(), dialog);
         *audit_target = proposed.target.clone();
         let summary = describe(&action, resolved.as_ref(), focused.as_ref());
-        *confirmed = self.permit(session, proposed, summary, &mut lease).await?;
+        *confirmed = self
+            .permit(session, proposed, summary.clone(), &mut lease)
+            .await?;
         // A confirmation may have taken a while: give the action its own full deadline.
         let ctx = if *confirmed {
             session.operation(action_timeout(self.timeout(), &action))?
@@ -1017,6 +1019,17 @@ impl Engine {
             (Some(overlay), true) => self
                 .working_bounds(resolved.as_ref(), pointer.as_ref())
                 .map(|bounds| self.working.show(overlay, bounds)),
+            _ => None,
+        };
+        let _posted = match (&self.activity, mutating) {
+            (Some(post), true) => {
+                let app = audit_target.as_ref().and_then(|t| t.process.as_deref());
+                post(&match app {
+                    Some(app) => format!("{summary} in {app}"),
+                    None => summary.clone(),
+                });
+                Some(crate::engine::Posted(std::sync::Arc::clone(post)))
+            }
             _ => None,
         };
         // Pixels around a pointer action, for canvases and games whose tree shows no change.

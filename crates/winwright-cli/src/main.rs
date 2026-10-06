@@ -242,6 +242,9 @@ async fn serve_mcp(
     if let Some(file) = taint_file {
         engine = engine.with_taint_file(file);
     }
+    if let Some(activity) = shared_activity() {
+        engine = engine.with_activity(Arc::new(move |text: &str| activity.post(text)));
+    }
     if let Some(memory) = winwright_memory::Memory::from_env() {
         tracing::info!(dir = %memory.dir().display(), notion = memory.copies_to_notion(), "memory on");
         engine = engine.with_memory(Arc::new(memory));
@@ -318,6 +321,7 @@ fn coordinate(
     )> = None;
     let mut last_try: Option<std::time::Instant> = None;
     let mut stopped = false;
+    let mut shown_activity: Option<String> = None;
     while !done.load(Ordering::SeqCst) {
         let Some(e) = engine.upgrade() else { break };
         let now = stop.is_stopped();
@@ -339,6 +343,14 @@ fn coordinate(
             }
         }
         drop(e);
+        // The tray names what any Winwright process is doing right now.
+        if lead_state.is_some() {
+            let activity = shared_activity().and_then(|a| a.current());
+            if activity != shown_activity {
+                shown_activity = activity;
+                tray.update(tray_state(stopped));
+            }
+        }
         if lead_state.is_none() && last_try.is_none_or(|t| t.elapsed() >= LEAD_RETRY) {
             last_try = Some(std::time::Instant::now());
             if let Some(lock) = winwright_win32::shared::LeaderLock::try_acquire() {
@@ -476,6 +488,15 @@ const TRAY_SETTINGS: u32 = 5;
 const TRAY_CHECK: u32 = 6;
 const TRAY_UPDATE: u32 = 7;
 
+/// The slot every Winwright process posts its current action to (see `shared::Activity`).
+fn shared_activity() -> Option<&'static winwright_win32::shared::Activity> {
+    static ACTIVITY: std::sync::OnceLock<Option<winwright_win32::shared::Activity>> =
+        std::sync::OnceLock::new();
+    ACTIVITY
+        .get_or_init(winwright_win32::shared::Activity::open)
+        .as_ref()
+}
+
 fn tray_state(stopped: bool) -> winwright_overlay::TrayState {
     use winwright_overlay::theme::glyph;
     use winwright_overlay::{TrayMenuItem, TrayState};
@@ -486,17 +507,20 @@ fn tray_state(stopped: bool) -> winwright_overlay::TrayState {
         glyph: Some(glyph),
         separator_before,
     };
+    let working = (!stopped)
+        .then(|| shared_activity().and_then(|a| a.current()))
+        .flatten();
     let mut state = TrayState {
-        tooltip: if stopped {
-            "Winwright \u{00B7} stopped (AI actions are blocked)".into()
-        } else {
-            "Winwright \u{00B7} ready for your AI assistant".into()
+        tooltip: match (&working, stopped) {
+            (_, true) => "Winwright \u{00B7} stopped (AI actions are blocked)".into(),
+            (Some(doing), false) => format!("Winwright \u{00B7} {doing}"),
+            (None, false) => "Winwright \u{00B7} ready for your AI assistant".into(),
         },
         active: !stopped,
-        status: if stopped {
-            "Stopped \u{00B7} AI actions are blocked".into()
-        } else {
-            "Active \u{00B7} your AI assistant can act".into()
+        status: match (&working, stopped) {
+            (_, true) => "Stopped \u{00B7} AI actions are blocked".into(),
+            (Some(doing), false) => format!("Working \u{00B7} {doing}"),
+            (None, false) => "Active \u{00B7} your AI assistant can act".into(),
         },
         items: vec![
             if stopped {
