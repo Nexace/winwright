@@ -70,10 +70,10 @@ The user asked for every suggestion at once. Each row lands as its own commit(s)
 ## Phase 27: better than the rest (asked 2026-10-06: "make winwright better than all of them"; the user chose all four areas)
 | # | Scope | Done when |
 |---|---|---|
-| 27.1 | Learns per app: `memory_save` takes `app` and `lesson`; `app_launch` returns the app's recent lessons (newest three, written by earlier tries, never from reports made after outside content), labeled as hints not orders | unit tests for the store, the filter and the launch result |
-| 27.2 | Smoother approvals: a sound when the dialog opens, and a timeout error that tells the AI to ask the person to click Allow once and retry | tests on the error text; live dialog tests pass |
-| 27.3 | Custom-drawn apps: `marks=true` on a window with few UI Automation elements numbers the text OCR finds too, so the AI acts by ref instead of by pixels | unit tests; live test on the canvas fixture |
-| 27.4 | Easier setup: `winwright setup` registers Claude Code itself when `claude` is on PATH (today it prints the command); auto-update stays notify-only (a downloaded exe cannot be trusted without code signing) | unit tests; `setup --dry-run` |
+| 27.1 | Learns per app: `memory_save` takes `app` and `lesson`; `app_launch` returns the app's recent lessons (newest three, written by earlier tries, never from reports made after outside content), labeled as hints not orders | **done** (aa6def2): store test (app match, newest first, outside-content reports skipped), report format test |
+| 27.2 | Smoother approvals: a sound when the dialog opens, and a timeout error that tells the AI to ask the person to click Allow once and retry | **done** (f731827): MessageBeep when the dialog opens; the timeout error names what to do. Not unit-tested (the timeout path needs a real clock); live dialog tests passed before the beep was added and were not rerun |
+| 27.3 | Custom-drawn apps: `marks=true` on a window with few UI Automation elements numbers the text OCR finds too, so the AI acts by ref instead of by pixels | **done** (5e498d3): fewer than 4 numbered elements adds OCR lines numbered after the refs, with screen click points; unit test; not yet run live on the canvas fixture |
+| 27.4 | Easier setup: `winwright setup` registers Claude Code itself when `claude` is on PATH (today it prints the command); auto-update stays notify-only (a downloaded exe cannot be trusted without code signing) | **done**: `setup` runs `claude mcp add/remove` (claude.exe or claude.cmd), says "already set up" when registered; unit test for the arguments; `setup --dry-run` run for real |
 
 Changes to the 2026-10-04 direction: spoken guide steps (26.9) use the Windows voice for teaching
 only; there is still no assistant or listening. Recording (26.10) revives Phase 12 in a narrow form:

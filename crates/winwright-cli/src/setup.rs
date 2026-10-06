@@ -391,14 +391,65 @@ pub fn run(dry_run: bool, remove: bool) -> Result<(), WinwrightError> {
             "  No supported AI app found (Claude Desktop, Cursor, Windsurf, Antigravity, opencode, Codex)."
         );
     }
-    match &exe {
-        Some(exe) => println!(
-            "Claude Code: run  claude mcp add {NAME} --scope user -- \"{exe}\" mcp\n\
-             Then run `winwright doctor` once to check this PC."
-        ),
-        None => println!("Claude Code: run  claude mcp remove {NAME} --scope user"),
+    claude_code(exe.as_deref(), dry_run);
+    if exe.is_some() {
+        println!("Then run `winwright doctor` once to check this PC.");
     }
     Ok(())
+}
+
+/// The arguments of the `claude mcp` command that registers (`exe` given) or removes Winwright.
+fn claude_args(exe: Option<&str>) -> Vec<String> {
+    let mut args: Vec<String> = ["mcp", if exe.is_some() { "add" } else { "remove" }, NAME]
+        .map(String::from)
+        .into();
+    args.extend(["--scope".into(), "user".into()]);
+    if let Some(exe) = exe {
+        args.extend(["--".into(), exe.into(), "mcp".into()]);
+    }
+    args
+}
+
+/// Runs `claude` (installed as claude.exe, or as claude.cmd by npm); `None` when it is not on
+/// PATH.
+fn claude(args: &[String]) -> Option<std::process::Output> {
+    ["claude.exe", "claude.cmd"].iter().find_map(|name| {
+        std::process::Command::new(name)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .ok()
+    })
+}
+
+/// Registers Winwright in Claude Code through its own command when `claude` is on PATH, and
+/// prints the command otherwise.
+fn claude_code(exe: Option<&str>, dry_run: bool) {
+    let args = claude_args(exe);
+    let command = format!(
+        "claude {}",
+        args.iter()
+            .map(|a| if a.contains(' ') {
+                format!("\"{a}\"")
+            } else {
+                a.clone()
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    let known = claude(&["mcp".into(), "get".into(), NAME.into()]).map(|o| o.status.success());
+    match (known, exe.is_some()) {
+        (None, _) => println!("  Claude Code: run  {command}"),
+        (Some(true), true) => println!("  Claude Code: already set up"),
+        (Some(false), false) => println!("  Claude Code: not registered"),
+        (Some(_), _) if dry_run => println!("  Claude Code: would run  {command}"),
+        (Some(_), _) => match claude(&args) {
+            Some(out) if out.status.success() => {
+                println!("  Claude Code: done ({command}); open a new session");
+            }
+            _ => println!("  Claude Code: it did not work; run  {command}"),
+        },
+    }
 }
 
 #[cfg(test)]
@@ -412,6 +463,27 @@ mod tests {
             Edit::Write(text) => text,
             Edit::Unchanged => panic!("expected a change"),
         }
+    }
+
+    #[test]
+    fn claude_code_gets_the_user_scope_commands() {
+        assert_eq!(
+            claude_args(Some(EXE)),
+            [
+                "mcp",
+                "add",
+                "winwright",
+                "--scope",
+                "user",
+                "--",
+                EXE,
+                "mcp"
+            ]
+        );
+        assert_eq!(
+            claude_args(None),
+            ["mcp", "remove", "winwright", "--scope", "user"]
+        );
     }
 
     #[test]
