@@ -1090,7 +1090,7 @@ dependencies = [
 
 [[package]]
 name = "winwright-capture"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "tokio",
  "tokio-util",
@@ -1102,7 +1102,7 @@ dependencies = [
 
 [[package]]
 name = "winwright-cli"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "clap",
  "serde",
@@ -1128,7 +1128,7 @@ dependencies = [
 
 [[package]]
 name = "winwright-contracts"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "schemars",
  "serde",
@@ -1140,7 +1140,7 @@ dependencies = [
 
 [[package]]
 name = "winwright-core"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "regex",
  "serde",
@@ -1154,7 +1154,7 @@ dependencies = [
 
 [[package]]
 name = "winwright-files"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "regex",
  "tokio",
@@ -1168,21 +1168,21 @@ dependencies = [
 
 [[package]]
 name = "winwright-fixture-canvas"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "windows",
 ]
 
 [[package]]
 name = "winwright-fixture-win32"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "windows",
 ]
 
 [[package]]
 name = "winwright-input"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "tokio",
  "tokio-util",
@@ -1194,7 +1194,7 @@ dependencies = [
 
 [[package]]
 name = "winwright-inspector"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "serde_json",
  "tokio",
@@ -1207,7 +1207,7 @@ dependencies = [
 
 [[package]]
 name = "winwright-mcp"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "base64",
  "rmcp",
@@ -1222,7 +1222,7 @@ dependencies = [
 
 [[package]]
 name = "winwright-memory"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "serde_json",
  "tracing",
@@ -1232,7 +1232,7 @@ dependencies = [
 
 [[package]]
 name = "winwright-overlay"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "tokio",
  "tracing",
@@ -1243,14 +1243,14 @@ dependencies = [
 
 [[package]]
 name = "winwright-security"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "winwright-contracts",
 ]
 
 [[package]]
 name = "winwright-shell"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "tokio",
  "tokio-util",
@@ -1261,14 +1261,14 @@ dependencies = [
 
 [[package]]
 name = "winwright-test-support"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "windows",
 ]
 
 [[package]]
 name = "winwright-uia"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "tokio",
  "tokio-util",
@@ -1282,7 +1282,7 @@ dependencies = [
 
 [[package]]
 name = "winwright-win32"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "tracing",
  "windows",
