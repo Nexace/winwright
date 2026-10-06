@@ -32,7 +32,10 @@ fn find_dialog() -> (HWND, HWND) {
             if let Ok(b) = FindWindowExW(Some(dialog), None, w!("BUTTON"), w!("Allow once")) {
                 break b;
             }
-            assert!(started.elapsed() < Duration::from_secs(3), "no Allow button");
+            assert!(
+                started.elapsed() < Duration::from_secs(3),
+                "no Allow button"
+            );
             std::thread::sleep(Duration::from_millis(20));
         };
         (dialog, allow)
