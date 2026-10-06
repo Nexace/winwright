@@ -27,7 +27,14 @@ fn find_dialog() -> (HWND, HWND) {
             assert!(started.elapsed() < Duration::from_secs(3), "no dialog");
             std::thread::sleep(Duration::from_millis(20));
         };
-        let allow = FindWindowExW(Some(dialog), None, w!("BUTTON"), w!("Allow once")).unwrap();
+        // The buttons come just after the window: wait for them too.
+        let allow = loop {
+            if let Ok(b) = FindWindowExW(Some(dialog), None, w!("BUTTON"), w!("Allow once")) {
+                break b;
+            }
+            assert!(started.elapsed() < Duration::from_secs(3), "no Allow button");
+            std::thread::sleep(Duration::from_millis(20));
+        };
         (dialog, allow)
     }
 }
@@ -180,17 +187,35 @@ async fn unanswered_prompt_is_denied_and_closed() {
 async fn the_ten_minute_button_arms_and_refuses_clicks_no_person_made_too() {
     let original = foreground_now();
     let checker = std::thread::spawn(move || {
-        let (dialog, _) = find_dialog();
-        // SAFETY: looks up a child button by its text; no handle is dereferenced.
-        let button = unsafe {
-            FindWindowExW(
-                Some(dialog),
-                None,
-                w!("BUTTON"),
-                w!("Allow in Notepad for 10 minutes"),
-            )
-        }
-        .expect("the dialog offers the ten-minute button");
+        let started = Instant::now();
+        let dialog = loop {
+            // SAFETY: looks up a window by class; no handle is dereferenced.
+            if let Ok(h) = unsafe { FindWindowW(w!("WinwrightConfirm"), PCWSTR::null()) } {
+                break h;
+            }
+            assert!(started.elapsed() < Duration::from_secs(3), "no dialog");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        // The dialog makes this button right after "Allow once": wait for it.
+        let started = Instant::now();
+        let button = loop {
+            // SAFETY: looks up a child button by its text; no handle is dereferenced.
+            if let Ok(b) = unsafe {
+                FindWindowExW(
+                    Some(dialog),
+                    None,
+                    w!("BUTTON"),
+                    w!("Allow in Notepad for 10 minutes"),
+                )
+            } {
+                break b;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "the dialog offers the ten-minute button"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        };
         bring_to_front(dialog);
         std::thread::sleep(Duration::from_millis(1_200));
         // SAFETY: reads window state; a stale handle only gives a wrong answer.

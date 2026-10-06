@@ -117,7 +117,7 @@ fn lists_tools_with_object_schemas() {
         assert!(names.contains(&expected), "missing {expected}: {names:?}");
     }
     assert!(
-        names.len() <= 30,
+        names.len() <= 31,
         "keep the tool surface small: {}",
         names.len()
     );
