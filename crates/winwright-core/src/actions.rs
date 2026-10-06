@@ -12,6 +12,7 @@ use winwright_contracts::backend::{
     InspectTarget, OperationContext, ScrollAmount, TreeRoot, UiActionOutcome, UiNode,
     UiPatternAction, UiProps, UiTreeRequest,
 };
+use winwright_contracts::capture::{CaptureRequest, CaptureTarget, ImageFormat};
 use winwright_contracts::element::{ControlRole, ExpandState, ToggleState, UiPattern};
 use winwright_contracts::geometry::{PhysicalPoint, PhysicalRect};
 use winwright_contracts::input::{InputBackend, Key, MouseButton, validate_chord};
@@ -1018,6 +1019,11 @@ impl Engine {
                 .map(|bounds| self.working.show(overlay, bounds)),
             _ => None,
         };
+        // Pixels around a pointer action, for canvases and games whose tree shows no change.
+        let near = match pointer.as_ref().and_then(|p| p.points.last()) {
+            Some(&at) if mutating => self.pixels_near(at, &ctx).await.map(|px| (at, px)),
+            _ => None,
+        };
 
         let r = resolved.as_ref();
         let at = |i: usize| pointer.as_ref().expect("mouse actions have points").points[i];
@@ -1132,9 +1138,15 @@ impl Engine {
             );
         if mutating {
             if evidence_based && !step.verified {
-                let (seen, after) = self
+                let (mut seen, after) = self
                     .settle(r, step.baseline.as_ref(), &before_windows, &ctx)
                     .await;
+                if !seen && let Some((at, before)) = &near {
+                    seen = self
+                        .pixels_near(*at, &ctx)
+                        .await
+                        .is_some_and(|now| now != *before);
+                }
                 result.verified = seen;
                 if after.is_some() {
                     step.after = after;
@@ -1168,6 +1180,26 @@ impl Engine {
         result.after = step.after.as_ref().and_then(summarize);
         result.duration_ms = started.elapsed().as_millis() as u64;
         Ok(result)
+    }
+
+    /// The screen around `at` as PNG bytes (equal bytes, equal pixels), or `None` without
+    /// capture. Overlays show in it, the same before and after.
+    async fn pixels_near(&self, at: PhysicalPoint, ctx: &OperationContext) -> Option<Vec<u8>> {
+        const NEAR: i32 = 120;
+        let capture = self.capture.as_deref()?;
+        let request = CaptureRequest {
+            target: CaptureTarget::Region(PhysicalRect::new(
+                at.x - NEAR,
+                at.y - NEAR,
+                at.x + NEAR,
+                at.y + NEAR,
+            )),
+            format: ImageFormat::Png,
+            quality: 85,
+            fit: None,
+            marks: Vec::new(),
+        };
+        capture.capture(request, ctx).await.ok().map(|i| i.bytes)
     }
 
     /// The window an action works in: the target's, the one under the pointer, else the
