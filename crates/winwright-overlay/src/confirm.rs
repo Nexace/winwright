@@ -73,6 +73,8 @@ const ID_ALLOW_WHILE: i32 = 101;
 const TIMER_TICK: usize = 1;
 const TIMER_ARM: usize = 2;
 const ARM_DELAY_MS: u32 = 800;
+/// How often the dialog checks whether it is really in front while "Allow once" is off.
+const WATCH_MS: u32 = 100;
 const ARM_DELAY: Duration = Duration::from_millis(ARM_DELAY_MS as u64);
 const WIDTH: i32 = 460;
 /// With the third button.
@@ -939,6 +941,8 @@ fn run_dialog(
         // it appears: a dialog Windows would not bring to the front must not sit armed under
         // the cursor, where the click that activates it would also approve.
         SetTimer(Some(hwnd), TIMER_TICK, 250, None);
+        // Starts watching for the dialog to be in front even if no activation message came.
+        SetTimer(Some(hwnd), TIMER_ARM, WATCH_MS, None);
         KEYS.with(|k| {
             k.set(Keys {
                 last_press: Some(Instant::now()),
@@ -1164,6 +1168,29 @@ unsafe extern "system" fn dialog_proc(
                             GetForegroundWindow() == hwnd
                         };
                         let since = with_dialog(|d| d.active_since).flatten();
+                        // Windows can report the dialog active while another window is still in
+                        // front (the borrowed focus does not always stick): keep watching, and
+                        // count the delay from when the dialog really is in front.
+                        if !foreground {
+                            let allows = with_dialog(|d| {
+                                d.armed = false;
+                                d.active_since = None;
+                                d.allows()
+                            });
+                            for allow in allows.unwrap_or_default() {
+                                // SAFETY: our own child window; restarts this window's own timer.
+                                let _ = unsafe { EnableWindow(allow, false) };
+                            }
+                            // SAFETY: restarts this window's own timer.
+                            unsafe { SetTimer(Some(hwnd), TIMER_ARM, WATCH_MS, None) };
+                            return Some(LRESULT(0));
+                        }
+                        if since.is_none() {
+                            with_dialog(|d| d.active_since = Some(Instant::now()));
+                            // SAFETY: restarts this window's own timer.
+                            unsafe { SetTimer(Some(hwnd), TIMER_ARM, ARM_DELAY_MS, None) };
+                            return Some(LRESULT(0));
+                        }
                         match arming(since, foreground, Instant::now()) {
                             Arming::Arm => {
                                 let allows = with_dialog(|d| {
