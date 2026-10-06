@@ -12,7 +12,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SendMessageW, WM_COMMAND,
 };
 use windows::core::{PCWSTR, w};
-use winwright_contracts::security::{ConfirmationPrompt, Confirmer};
+use winwright_contracts::security::{Approval, ConfirmationPrompt, Confirmer};
 use winwright_overlay::NativeConfirmer;
 
 /// The open dialog and its "Allow once" button, once it appears.
@@ -172,5 +172,56 @@ async fn unanswered_prompt_is_denied_and_closed() {
             .iter()
             .any(|w| w.process_id == pid && w.title.starts_with("Winwright: confirm")),
         "dialog was left open"
+    );
+}
+
+#[tokio::test]
+#[ignore = "shows a dialog on the interactive desktop for about four seconds"]
+async fn the_ten_minute_button_arms_and_refuses_clicks_no_person_made_too() {
+    let original = foreground_now();
+    let checker = std::thread::spawn(move || {
+        let (dialog, _) = find_dialog();
+        // SAFETY: looks up a child button by its text; no handle is dereferenced.
+        let button = unsafe {
+            FindWindowExW(
+                Some(dialog),
+                None,
+                w!("BUTTON"),
+                w!("Allow in Notepad for 10 minutes"),
+            )
+        }
+        .expect("the dialog offers the ten-minute button");
+        bring_to_front(dialog);
+        std::thread::sleep(Duration::from_millis(1_200));
+        // SAFETY: reads window state; a stale handle only gives a wrong answer.
+        let armed = unsafe { IsWindowEnabled(button).as_bool() };
+        if armed {
+            // SAFETY: messages the dialog this test opened; a stale handle only fails a call.
+            unsafe {
+                SendMessageW(button, BM_CLICK, None, None);
+                let _ = PostMessageW(
+                    Some(dialog),
+                    WM_COMMAND,
+                    WPARAM(((BN_CLICKED as usize) << 16) | 101),
+                    LPARAM(button.0 as isize),
+                );
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        give_back(original);
+        armed
+    });
+    let mut p = prompt("automated test: the ten-minute button", 4_000);
+    p.grant = Some("Notepad".into());
+    let answer = NativeConfirmer::new().approve(p).await.unwrap();
+    let armed = checker.join().unwrap();
+    assert!(
+        armed,
+        "the button never armed in front; rerun while the desktop is free"
+    );
+    assert_eq!(
+        answer,
+        Approval::Denied,
+        "a click no person made allowed for a while"
     );
 }

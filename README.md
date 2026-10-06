@@ -12,7 +12,11 @@ Antigravity can see and use any Windows app through it, and it asks you before a
   Ctrl+Alt+Esc stops everything; every action goes to a local audit log.
 - **It can teach you.** Ask "teach me how to crop a photo in Lightroom": a pointer glides to
   each step with a caption and waits for *your* click, saying "Not there" if you miss.
-- **Works where there is no UI tree** (games, canvases, custom-drawn apps) by screenshot pixels.
+- **Sees like you do when it has to.** Screenshots can number every button and field so the AI
+  picks by sight and acts exactly, Windows' built-in OCR reads text off games and canvases with
+  its position, and a click by position counts as done only when the screen really changed.
+- **Shares the PC with you.** It shows a thin teal frame around the window it works in, waits
+  while you use the mouse or keyboard, and puts up a "Done" notice when a task finishes.
 
 Windows 10 or 11, 64-bit. Tested on Windows 11.
 
@@ -79,7 +83,9 @@ Tools: `desktop_snapshot` (use `diff: true` after actions), `desktop_find`, `des
 `desktop_batch` (several known steps in one call, stopping at the first that fails),
 `desktop_fill`, `desktop_type`, `desktop_press`, `desktop_select`, `desktop_check`,
 `desktop_expand`, `desktop_scroll`, `desktop_focus`, `desktop_read_text`, `desktop_wait_for`,
-`desktop_inspect`, `desktop_windows`, `window_control`, `desktop_screenshot`, `desktop_mouse`
+`desktop_inspect`, `desktop_windows`, `window_control`, `desktop_screenshot` (scaled to what
+the AI sees in full; `marks: true` numbers each element of a window on the image, `ocr: true`
+returns the text on screen with positions instead), `desktop_mouse`
 (move, click, drag or scroll at a point, for apps with no UI tree such as games; the element
 under the point is judged like a click on it),
 `overlay_highlight` (shows you where something is: a pointer with a caption bubble at an
@@ -103,10 +109,17 @@ UI Automation and the click watcher. Run it once after installing, and after add
 
 **Safety.** Before anything risky (deleting, spending money, changing security, closing
 programs, running commands) Winwright shows its own Allow/Deny dialog, which only your real
-mouse or keyboard can answer. Password values are never read; elevated apps are refused
+mouse or keyboard can answer. For clicks, typing and sends in one app it can offer "Allow 10
+min", so a chat or form does not ask at every step; deleting, programs and commands still ask,
+and Ctrl+Alt+Esc ends it. Password values are never read; elevated apps are refused
 (`UIPI_BLOCKED`). `security.confirmationMode` in `%APPDATA%\winwright\config.json` is
 `balanced` (default), `strict` (ask before every change) or `relaxed` (ask only before the
 risky ones). Ctrl+Alt+Esc stops everything at any time; every action goes to an audit log.
+
+**Tray.** The teal W in the notification area (from whichever Winwright started first) has
+*Recent activity* (what the AI did, in plain words), *Settings* (theme, how long the Allow
+dialog waits, "Allow 10 min", the activity log, "Done" notices, an optional daily update check),
+*Check this PC* (runs `winwright doctor`), and Stop/Resume.
 
 **Memory.** After a desktop task the app's AI saves a short report with `memory_save` to
 `%USERPROFILE%\.winwright\reports` (names and summaries only), and reads earlier ones with
