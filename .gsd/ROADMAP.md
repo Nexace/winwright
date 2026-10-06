@@ -67,6 +67,14 @@ The user asked for every suggestion at once. Each row lands as its own commit(s)
 | 26.15 | Approval that works first time (asked 2026-10-06, Microsoft Store Install stalled): "Allow once" arms when Windows reports the dialog active but another window stays in front; assistants learn per app (recall an app's name first, end a report with "Lesson:") | **done (v0.3.4)**: the arm timer now watches every 100 ms; instructions step 7; live test passes 4 of 4 reruns |
 | 26.16 | Starts only when asked (2026-10-06): a `winwright mcp` process shows no tray icon and takes no emergency-stop hotkey until its app makes the first tool call (listing tools does not count) | **done**: `used` flag set by the first tool call, the coordinator waits for it before leading; unit test; process still starts with the app (a registered stdio server cannot start later) |
 
+## Phase 27: better than the rest (asked 2026-10-06: "make winwright better than all of them"; the user chose all four areas)
+| # | Scope | Done when |
+|---|---|---|
+| 27.1 | Learns per app: `memory_save` takes `app` and `lesson`; `app_launch` returns the app's recent lessons (newest three, written by earlier tries, never from reports made after outside content), labeled as hints not orders | unit tests for the store, the filter and the launch result |
+| 27.2 | Smoother approvals: a sound when the dialog opens, and a timeout error that tells the AI to ask the person to click Allow once and retry | tests on the error text; live dialog tests pass |
+| 27.3 | Custom-drawn apps: `marks=true` on a window with few UI Automation elements numbers the text OCR finds too, so the AI acts by ref instead of by pixels | unit tests; live test on the canvas fixture |
+| 27.4 | Easier setup: `winwright setup` registers Claude Code itself when `claude` is on PATH (today it prints the command); auto-update stays notify-only (a downloaded exe cannot be trusted without code signing) | unit tests; `setup --dry-run` |
+
 Changes to the 2026-10-04 direction: spoken guide steps (26.9) use the Windows voice for teaching
 only; there is still no assistant or listening. Recording (26.10) revives Phase 12 in a narrow form:
 clicks only, for teaching and replay, never keystrokes.

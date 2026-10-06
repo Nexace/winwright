@@ -22,6 +22,8 @@ use crate::session::Session;
 
 const DEFAULT_RECALL: u32 = 5;
 const MAX_RECALL: u32 = 20;
+/// How many lessons `app_launch` returns.
+const MAX_LESSONS: usize = 3;
 /// How long the "Done" notice stays, and how much of the title it shows.
 const DONE_NOTICE_MS: u64 = 6_000;
 const DONE_TITLE_CHARS: usize = 80;
@@ -116,6 +118,8 @@ impl Engine {
                 tools: tally(&tools),
                 outside,
                 source,
+                app: request.app,
+                lesson: request.lesson,
             };
             let saved = blocking(move || store.save(&report)).await?;
             if self.config.notifications.task_done && !tools.is_empty() {
@@ -126,6 +130,30 @@ impl Engine {
         .await;
         self.record(session, "memory_save", None, None, &result, false, started);
         result
+    }
+
+    /// What earlier tries taught about `apps` (the name asked for, the process that opened):
+    /// at most [`MAX_LESSONS`], newest first. Best effort: no memory, or an unreadable folder,
+    /// means none.
+    pub async fn app_lessons(&self, apps: &[String]) -> Vec<String> {
+        let Some(store) = self.memory.clone() else {
+            return Vec::new();
+        };
+        let apps = apps.to_vec();
+        blocking(move || {
+            let mut found: Vec<String> = Vec::new();
+            for app in apps.iter().filter(|a| !a.trim().is_empty()) {
+                for lesson in store.lessons(app, MAX_LESSONS)? {
+                    if !found.contains(&lesson) {
+                        found.push(lesson);
+                    }
+                }
+            }
+            found.truncate(MAX_LESSONS);
+            Ok(found)
+        })
+        .await
+        .unwrap_or_default()
     }
 
     /// "Done: <title>" at the bottom right of the main screen for a few seconds, so the person

@@ -39,6 +39,13 @@ pub struct MemorySaveRequest {
     /// `done`, `partly done`, or `failed`.
     #[serde(default)]
     pub outcome: Option<String>,
+    /// The app a lesson is about, as the person names it ("Microsoft Store", "Discord").
+    #[serde(default)]
+    pub app: Option<String>,
+    /// When something failed in that app and then worked: what failed and what works, in one
+    /// or two sentences. The next `app_launch` of the app returns it as a hint.
+    #[serde(default)]
+    pub lesson: Option<String>,
 }
 
 /// A report as the store writes it: the request plus what Winwright knows itself.
@@ -52,6 +59,9 @@ pub struct NewReport {
     pub outside: OutsideContent,
     /// The app that asked (the MCP client's name), when known.
     pub source: Option<String>,
+    /// The app a lesson is about, and the lesson (see [`MemorySaveRequest`]).
+    pub app: Option<String>,
+    pub lesson: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -95,4 +105,9 @@ pub trait MemoryStore: Send + Sync {
     fn save(&self, report: &NewReport) -> WinwrightResult<MemorySaved>;
     /// Newest reports matching every word of `query`, newest first.
     fn recall(&self, query: &str, limit: usize) -> WinwrightResult<Vec<StoredReport>>;
+    /// The newest lessons saved for `app`, newest first, never from a report written after
+    /// outside content.
+    fn lessons(&self, _app: &str, _limit: usize) -> WinwrightResult<Vec<String>> {
+        Ok(Vec::new())
+    }
 }
