@@ -1,0 +1,14 @@
+PackageIdentifier: Nexace.Winwright
+PackageVersion: {VERSION}
+PackageLocale: en-US
+Publisher: Nexace
+PackageName: Winwright
+License: MIT OR Apache-2.0
+ShortDescription: Lets your AI apps use Windows apps safely, through UI Automation, with your approval.
+PackageUrl: https://github.com/Nexace/winwright
+Tags:
+  - mcp
+  - automation
+  - ai
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0

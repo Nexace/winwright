@@ -27,10 +27,18 @@ jobs:
           "$hash  $name.zip" | Out-File -Encoding ascii "$name.zip.sha256"
           "NAME=$name" >> $env:GITHUB_ENV
           "HASH=$hash" >> $env:GITHUB_ENV
+          # winget manifests for this release (see packaging/README.md).
+          $version = "${{ github.ref_name }}".TrimStart("v")
+          New-Item -ItemType Directory winget | Out-Null
+          Get-ChildItem packaging/winget/*.yaml | ForEach-Object {
+            (Get-Content $_ -Raw).Replace("{VERSION}", $version).Replace("{SHA256}", $hash.ToUpper()) |
+              Set-Content -Encoding utf8NoBOM "winget/$($_.Name)"
+          }
+          Compress-Archive winget/* winget-manifests.zip
       - name: Publish
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           $notes = "Download $env:NAME.zip, unzip it and run ``winwright setup``. SHA-256: ``$env:HASH``"
-          gh release create "${{ github.ref_name }}" "$env:NAME.zip" "$env:NAME.zip.sha256" --title "Winwright ${{ github.ref_name }}" --notes $notes --generate-notes
+          gh release create "${{ github.ref_name }}" "$env:NAME.zip" "$env:NAME.zip.sha256" winget-manifests.zip --title "Winwright ${{ github.ref_name }}" --notes $notes --generate-notes
