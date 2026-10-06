@@ -16,6 +16,7 @@ mod services;
 pub mod session;
 pub mod snapshot;
 mod wait;
+mod working;
 
 #[cfg(test)]
 mod engine_tests;

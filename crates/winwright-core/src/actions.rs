@@ -1011,6 +1011,13 @@ impl Engine {
             WindowSet::new()
         };
         tracing::debug!(action = ?action, target = resolved.as_ref().map(|r| r.label()), "executing");
+        // The person sees where the AI works: a frame around the window, while it acts.
+        let _working = match (&self.overlay, mutating && self.config.overlay.enabled) {
+            (Some(overlay), true) => self
+                .working_bounds(resolved.as_ref(), pointer.as_ref())
+                .map(|bounds| self.working.show(overlay, bounds)),
+            _ => None,
+        };
 
         let r = resolved.as_ref();
         let at = |i: usize| pointer.as_ref().expect("mouse actions have points").points[i];
@@ -1161,6 +1168,36 @@ impl Engine {
         result.after = step.after.as_ref().and_then(summarize);
         result.duration_ms = started.elapsed().as_millis() as u64;
         Ok(result)
+    }
+
+    /// The window an action works in: the target's, the one under the pointer, else the
+    /// foreground window.
+    fn working_bounds(
+        &self,
+        resolved: Option<&Resolved>,
+        pointer: Option<&Pointer>,
+    ) -> Option<PhysicalRect> {
+        if let Some(hwnd) = resolved.and_then(|r| r.window) {
+            let w = self.windows.window(hwnd).ok().flatten()?;
+            return (!w.minimized).then_some(w.bounds);
+        }
+        if let Some(p) = pointer {
+            let at = *p.points.first()?;
+            return self
+                .windows
+                .list_windows()
+                .ok()?
+                .into_iter()
+                .find(|w| {
+                    !w.minimized && w.bounds.contains(at) && w.process_id == p.beneath.process_id
+                })
+                .map(|w| w.bounds);
+        }
+        self.windows
+            .foreground_window()
+            .ok()
+            .flatten()
+            .map(|w| w.bounds)
     }
 
     /// The point to click, plus the target's state just before the click (after any scrolling).

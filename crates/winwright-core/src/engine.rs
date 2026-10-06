@@ -97,6 +97,8 @@ pub struct Engine {
     /// Tools run since the last memory report, for the next one.
     pub(crate) worked: Mutex<Vec<String>>,
     pub(crate) grants: Grants,
+    /// The frame around the window being acted in.
+    pub(crate) working: Arc<crate::working::Working>,
 }
 
 /// How long "Allow 10 min" lasts.
@@ -230,6 +232,7 @@ impl Engine {
             memory: None,
             worked: Mutex::new(Vec::new()),
             grants: Grants::default(),
+            working: Arc::default(),
         }
     }
 

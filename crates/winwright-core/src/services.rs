@@ -406,6 +406,10 @@ impl Engine {
         let ctx = session.operation(self.timeout())?;
         let (target, label) = self.capture_target(session, &request.target, &ctx).await?;
         *what = Some(label);
+        // Winwright's own frame is not part of what the model should see.
+        if let Some(overlay) = self.overlay.as_deref() {
+            self.working.hide_now(overlay);
+        }
         let capture = self
             .capture
             .as_deref()
