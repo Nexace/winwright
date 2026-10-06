@@ -494,7 +494,8 @@ impl WinwrightMcp {
     #[tool(
         description = "On-demand screenshot of the active window, a window, an element (ref), a monitor, a region, or the desktop. \
         Costly in tokens: use only when the snapshot tree is not enough. Defaults to JPEG. ocr=true returns the text on it \
-        (Windows OCR) with screen positions instead of the image; find narrows that to what to click."
+        (Windows OCR) with screen positions instead of the image; find narrows that to what to click. marks=true draws each \
+        element's ref number on a window's image, for picking what to act on by sight."
     )]
     async fn desktop_screenshot(
         &self,
@@ -522,7 +523,14 @@ impl WinwrightMcp {
                     base64::engine::general_purpose::STANDARD.encode(&img.bytes),
                     mime,
                 ),
-                ContentBlock::text(shot_note(&img)),
+                ContentBlock::text(match &img.legend {
+                    Some(tree) => format!(
+                        "{}\nNumbers on the image are refs (12 = e12): act with desktop_click ref=e12 \
+                         etc.\n{tree}",
+                        shot_note(&img)
+                    ),
+                    None => shot_note(&img),
+                }),
             ]),
             Err(e) => fail(e),
         })
@@ -580,6 +588,7 @@ impl WinwrightMcp {
             format: ImageFormat::Jpeg,
             quality: Some(80),
             fit: true,
+            marks: false,
         };
         let mut content = vec![ContentBlock::text(
             serde_json::to_string(&result).unwrap_or_default(),

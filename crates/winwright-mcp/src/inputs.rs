@@ -718,6 +718,9 @@ pub struct ScreenshotInput {
     /// With ocr: only the words or lines containing this text (any case), with the screen
     /// point to click (desktop_mouse without window or scale).
     pub find: Option<String>,
+    /// For a window: draw each button, field and item's ref number on the image (12 = e12)
+    /// and list them, so you can act by ref (desktop_click ref=e12) on what you see.
+    pub marks: Option<bool>,
 }
 
 impl ScreenshotInput {
@@ -767,6 +770,7 @@ impl ScreenshotInput {
             format: self.format.unwrap_or(ImageFormat::Jpeg),
             quality: Some(self.quality.unwrap_or(80)),
             fit: true,
+            marks: self.marks == Some(true),
         })
     }
 }

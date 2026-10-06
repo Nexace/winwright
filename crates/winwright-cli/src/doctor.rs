@@ -77,6 +77,7 @@ async fn shot(
 ) -> Result<Vec<u8>, String> {
     let request = CaptureRequest {
         fit: None,
+        marks: Vec::new(),
         target: CaptureTarget::Region(rect),
         format: ImageFormat::Png,
         quality: 100,

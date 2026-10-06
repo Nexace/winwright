@@ -3,18 +3,21 @@
 
 use winwright_contracts::backend::OperationContext;
 use winwright_contracts::capture::{
-    CaptureRequest, CaptureTarget, CapturedImage, Fit, ImageFormat, ScreenText, ScreenshotRequest,
-    ScreenshotTarget,
+    CaptureRequest, CaptureTarget, CapturedImage, Fit, ImageFormat, Mark, ScreenText,
+    ScreenshotRequest, ScreenshotTarget,
 };
+use winwright_contracts::element::ControlRole;
+use winwright_contracts::ids::parse_element_ref;
 use winwright_contracts::overlay::{
     HighlightRequest, HighlightResult, OverlayId, OverlayRequest, OverlayService,
 };
 use winwright_contracts::security::{ActionRisk, Capability, ProposedAction, TargetSummary};
+use winwright_contracts::snapshot::{SnapshotNode, SnapshotRequest, SnapshotTarget};
 use winwright_contracts::system::{
     ExecRequest, ExecResult, FileOperation, FileResult, LaunchRequest, LaunchResult, ProcessInfo,
     SessionInfo, SessionOutput, SessionStart, WriteMode,
 };
-use winwright_contracts::window::WindowInfo;
+use winwright_contracts::window::{WindowInfo, WindowSelector};
 use winwright_contracts::{WinwrightError, WinwrightResult};
 use winwright_security::{is_secret_path, program_capability, stricter, transfer_risk};
 
@@ -210,6 +213,51 @@ fn file_risk_by_kind(op: &FileOperation) -> (Capability, ActionRisk) {
 }
 
 /// Winwright teal blue.
+/// Most numbered marks drawn on one screenshot.
+const MAX_MARKS: usize = 200;
+
+/// The elements worth a number on a screenshot: what can be clicked, typed in or picked, on
+/// screen, with its ref number. Containers and plain text are left out.
+fn marks_of(nodes: &[SnapshotNode], out: &mut Vec<Mark>) {
+    use ControlRole as R;
+    for node in nodes {
+        if out.len() >= MAX_MARKS {
+            return;
+        }
+        let e = &node.element;
+        let actionable = matches!(
+            e.role,
+            R::Button
+                | R::CheckBox
+                | R::ComboBox
+                | R::DataItem
+                | R::Edit
+                | R::HeaderItem
+                | R::Link
+                | R::ListItem
+                | R::MenuItem
+                | R::RadioButton
+                | R::Slider
+                | R::Spinner
+                | R::SplitButton
+                | R::TabItem
+                | R::TreeItem
+        );
+        if let (true, true, Some(rect), Some(number)) = (
+            actionable,
+            e.visible,
+            e.bounds.filter(|b| b.width() > 0 && b.height() > 0),
+            parse_element_ref(&e.reference),
+        ) {
+            out.push(Mark {
+                rect,
+                number: u32::try_from(number).unwrap_or(u32::MAX),
+            });
+        }
+        marks_of(&node.children, out);
+    }
+}
+
 pub(crate) const DEFAULT_OVERLAY_COLOR: u32 = 0x0008_91B2;
 
 /// Prompts show at most this many characters of arguments.
@@ -410,21 +458,51 @@ impl Engine {
         if let Some(overlay) = self.overlay.as_deref() {
             self.working.hide_now(overlay);
         }
+        let (marks, legend) = if request.marks {
+            let CaptureTarget::Window(hwnd) = target else {
+                return Err(WinwrightError::invalid(
+                    "marks number a window's elements: screenshot the active window or a window",
+                ));
+            };
+            // The refs drawn are live: the model acts on them like a snapshot's.
+            let snap = self
+                .snapshot(
+                    session,
+                    SnapshotRequest {
+                        target: SnapshotTarget::Window(WindowSelector {
+                            hwnd: Some(hwnd),
+                            ..Default::default()
+                        }),
+                        include_bounds: true,
+                        structured: true,
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            let mut marks = Vec::new();
+            marks_of(snap.nodes.as_deref().unwrap_or_default(), &mut marks);
+            (marks, Some(snap.tree))
+        } else {
+            (Vec::new(), None)
+        };
         let capture = self
             .capture
             .as_deref()
             .ok_or_else(|| unavailable("capture"))?;
-        capture
+        let mut image = capture
             .capture(
                 CaptureRequest {
                     target,
                     format: request.format,
                     quality: request.quality.unwrap_or(85).clamp(1, 100),
                     fit: request.fit.then_some(Fit::MODEL),
+                    marks,
                 },
                 &ctx,
             )
-            .await
+            .await?;
+        image.legend = legend;
+        Ok(image)
     }
 
     /// Reads the text on screen with OCR (for apps without an accessibility tree). Audited like
@@ -455,6 +533,7 @@ impl Engine {
                 format: ImageFormat::Png,
                 quality: 85,
                 fit: None,
+                marks: Vec::new(),
             };
             capture.read_text(request, &ctx).await
         }

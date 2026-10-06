@@ -146,11 +146,20 @@ impl Worker {
         request: &CaptureRequest,
         deadline: &Deadline,
     ) -> WinwrightResult<CapturedImage> {
-        let (image, origin) = self.pixels(request, deadline)?;
+        let (mut image, origin) = self.pixels(request, deadline)?;
         let timestamp_ms = now_ms();
         let (width, height) = request.fit.map_or((image.width, image.height), |fit| {
             fit.size(image.width, image.height)
         });
+        if !request.marks.is_empty() {
+            let scale = f64::from(width) / f64::from(image.width.max(1));
+            crate::marks::draw(
+                &mut image,
+                origin,
+                &request.marks,
+                crate::marks::glyph_size(scale),
+            );
+        }
         let bytes = self
             .wic
             .encode(&image, (width, height), request.format, request.quality)?;
@@ -164,6 +173,7 @@ impl Worker {
             origin,
             dpi: monitors::dpi_at(origin),
             timestamp_ms,
+            legend: None,
         })
     }
 

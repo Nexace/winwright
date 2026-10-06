@@ -10,6 +10,7 @@
 //! capture origin and never scale again (§18 step 3, §43).
 
 mod com;
+mod marks;
 mod monitors;
 mod ocr;
 mod raster;

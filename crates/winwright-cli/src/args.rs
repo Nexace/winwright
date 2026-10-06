@@ -819,6 +819,7 @@ impl ScreenshotArgs {
             },
             quality: Some(self.quality),
             fit: false,
+            marks: false,
         })
     }
 }

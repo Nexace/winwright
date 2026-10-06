@@ -542,6 +542,7 @@ impl Engine {
             capture.capture(
                 CaptureRequest {
                     fit: None,
+                    marks: Vec::new(),
                     target: CaptureTarget::Region(rect),
                     format: ImageFormat::Png,
                     quality: 100,

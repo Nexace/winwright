@@ -28,7 +28,7 @@ pub enum CaptureTarget {
     Region(PhysicalRect),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CaptureRequest {
     pub target: CaptureTarget,
@@ -40,6 +40,16 @@ pub struct CaptureRequest {
     /// Scale the image down to fit (never up); `None` keeps every physical pixel.
     #[serde(default)]
     pub fit: Option<Fit>,
+    /// Numbered boxes to draw on the image (set of marks).
+    #[serde(default)]
+    pub marks: Vec<Mark>,
+}
+
+/// A numbered box drawn on a screenshot, in physical desktop pixels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct Mark {
+    pub rect: PhysicalRect,
+    pub number: u32,
 }
 
 fn default_quality() -> u8 {
@@ -92,6 +102,9 @@ pub struct CapturedImage {
     pub dpi: u32,
     /// Unix epoch milliseconds when the frame was taken.
     pub timestamp_ms: u64,
+    /// For a marked screenshot: the snapshot whose refs the drawn numbers name (mark 12 is
+    /// ref e12). Filled in by the engine.
+    pub legend: Option<String>,
 }
 
 impl std::fmt::Debug for CapturedImage {
@@ -192,6 +205,9 @@ pub struct ScreenshotRequest {
     /// Scale down to what a vision model sees in full ([`Fit::MODEL`]).
     #[serde(default)]
     pub fit: bool,
+    /// Draw each interactive element's ref number on a window's image (set of marks).
+    #[serde(default)]
+    pub marks: bool,
 }
 
 /// Text read off the screen by OCR. Boxes are physical desktop pixels.

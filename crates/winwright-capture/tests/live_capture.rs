@@ -26,7 +26,7 @@ use windows::core::w;
 use winwright_capture::{WgcCapture, decode_bgra};
 use winwright_contracts::backend::OperationContext;
 use winwright_contracts::capture::{
-    CaptureRequest, CaptureService, CaptureTarget, CapturedImage, Fit, ImageFormat,
+    CaptureRequest, CaptureService, CaptureTarget, CapturedImage, Fit, ImageFormat, Mark,
 };
 use winwright_contracts::geometry::{PhysicalPoint, PhysicalRect};
 use winwright_contracts::ids::SessionId;
@@ -50,6 +50,7 @@ fn request(target: CaptureTarget, format: ImageFormat) -> CaptureRequest {
         format,
         quality: 90,
         fit: None,
+        marks: Vec::new(),
     }
 }
 
@@ -390,6 +391,32 @@ async fn ocr_reads_text_drawn_in_our_window() {
         line.bounds.left >= r.left && line.bounds.bottom <= r.bottom,
         "{:?} lies in {r:?}",
         line.bounds
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs an interactive desktop"]
+async fn marks_are_drawn_on_the_captured_window() {
+    let (capture, window) = setup(SW_SHOWNOACTIVATE);
+    let mut req = request(CaptureTarget::Window(window.hwnd), ImageFormat::Png);
+    req.marks = vec![Mark {
+        rect: window.rect,
+        number: 5,
+    }];
+    let image = capture
+        .capture(req, &ctx(Duration::from_secs(10)))
+        .await
+        .unwrap();
+    let (w, _, pixels) = decode(&image);
+    let px = |x: u32, y: u32| {
+        let i = (y * w + x) as usize * 4;
+        [pixels[i], pixels[i + 1], pixels[i + 2]]
+    };
+    assert_eq!(px(0, 0), [0x2D, 0x2D, 0xD9], "the mark's tag at its corner");
+    assert_eq!(
+        px(w / 2, 100),
+        [BGRA[0], BGRA[1], BGRA[2]],
+        "inside untouched"
     );
 }
 
