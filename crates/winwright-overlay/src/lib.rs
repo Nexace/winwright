@@ -477,6 +477,7 @@ mod tests {
             style: OverlayStyle::Highlight,
             label: None,
             step: None,
+            steps: None,
             color: 0x00E0_4A2A,
             duration_ms: None,
         }

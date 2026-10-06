@@ -263,6 +263,7 @@ impl Engine {
             style: request.style,
             label: request.label,
             step: None,
+            steps: None,
             color: request.color.unwrap_or(DEFAULT_OVERLAY_COLOR),
             duration_ms: Some(request.duration_ms.unwrap_or(DEFAULT_HIGHLIGHT_MS)),
         })?;
@@ -329,6 +330,7 @@ impl Engine {
                     style: request.style,
                     label: Some(label),
                     step: number,
+                    steps: number.map(|_| total as u32),
                     color,
                     duration_ms: Some((ctx.remaining().as_millis() as u64).max(1)),
                 })
@@ -382,6 +384,7 @@ impl Engine {
                 style: request.style,
                 label: Some(not_there(caption)),
                 step,
+                steps: step.map(|_| total as u32),
                 color: MISS_COLOR,
                 duration_ms: Some(MISSED_MS),
             });

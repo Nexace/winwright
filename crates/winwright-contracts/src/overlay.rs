@@ -18,8 +18,8 @@ pub enum OverlayStyle {
     Arrow,
     /// Small filled circle at the rectangle's center (click feedback).
     ClickMarker,
-    /// A pointer at the rectangle's center with the label in a bubble beside it (teaching).
-    /// It draws no step badge.
+    /// A pointer at the rectangle's center with the label in a bubble beside it (teaching);
+    /// a step number goes inside the bubble.
     Pointer,
 }
 
@@ -40,6 +40,9 @@ pub struct OverlayRequest {
     /// Numbered badge for tutorial steps.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub step: Option<u32>,
+    /// How many steps the tutorial has: the pointer's bubble then says "Step 3 of 7".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steps: Option<u32>,
     /// 0xRRGGBB.
     #[serde(default = "default_color")]
     pub color: u32,

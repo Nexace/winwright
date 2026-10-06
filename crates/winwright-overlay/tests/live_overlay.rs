@@ -36,6 +36,7 @@ fn request(rect: [i32; 4], style: OverlayStyle) -> OverlayRequest {
         style,
         label: None,
         step: None,
+        steps: None,
         color: 0x00E0_4A2A,
         duration_ms: None,
     }

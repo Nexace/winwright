@@ -12,6 +12,8 @@ const BLACK: u32 = 0;
 /// The pointer style's caption bubble: near-black with a slightly lighter rim.
 pub const BUBBLE_FILL: u32 = 0x001F_2023;
 const BUBBLE_RIM: u32 = 0x0045_474D;
+/// "Step 3 of 7" in the bubble: muted beside the white caption.
+pub const BUBBLE_NOTE: u32 = 0x00A9_AEB6;
 /// Alpha of each of the stacked layers that make a soft shadow.
 const SHADOW_LAYER_ALPHA: u8 = 9;
 const POINTER_SHADOW_ALPHA: u8 = 70;
@@ -479,6 +481,7 @@ mod tests {
             metrics: m,
             label_text: None,
             badge_text: None,
+            progress_text: None,
         })
         .unwrap();
         let (w, h) = (layout.window.width(), layout.window.height());
@@ -515,6 +518,7 @@ mod tests {
             metrics: m,
             label_text: Some((60, 18)),
             badge_text: Some((8, 16)),
+            progress_text: Some((50, 14)),
         })
         .unwrap();
         let (w, h) = (layout.window.width(), layout.window.height());
@@ -527,6 +531,11 @@ mod tests {
         assert_eq!(c.pixel(tip.x + 2, tip.y + 12), premultiply(WHITE, 255));
         let text = layout.text.unwrap();
         assert_eq!(c.pixel(text.left, text.top), premultiply(BUBBLE_FILL, 255));
+        let progress = layout.progress.unwrap();
+        assert_eq!(
+            c.pixel(progress.left, progress.top),
+            premultiply(BUBBLE_FILL, 255)
+        );
         let badge = layout.badge.unwrap().center();
         assert_eq!(c.pixel(badge.x, badge.y), premultiply(RED, 255));
         assert_premultiplied(&px);
@@ -549,6 +558,7 @@ mod tests {
                 metrics: m,
                 label_text: Some((60, 18)),
                 badge_text: Some((9, 16)),
+                progress_text: Some((50, 14)),
             })
             .unwrap();
             let (w, h) = (layout.window.width(), layout.window.height());

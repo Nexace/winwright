@@ -9,7 +9,7 @@ use windows::Win32::Graphics::Gdi::{
     CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateCompatibleDC, CreateDIBSection, CreateFontW,
     DEFAULT_CHARSET, DIB_RGB_COLORS, DRAW_TEXT_FORMAT, DT_CALCRECT, DT_CENTER, DT_END_ELLIPSIS,
     DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, DeleteDC, DeleteObject, DrawTextW,
-    FONT_WEIGHT, FW_BOLD, FW_SEMIBOLD, GdiFlush, GetMonitorInfoW, HDC, HGDIOBJ,
+    FONT_WEIGHT, FW_BOLD, FW_NORMAL, FW_SEMIBOLD, GdiFlush, GetMonitorInfoW, HDC, HGDIOBJ,
     MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromRect, OUT_DEFAULT_PRECIS, SelectObject,
     SetBkMode, SetTextColor, TRANSPARENT,
 };
@@ -22,7 +22,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{PCWSTR, w};
 use winwright_contracts::geometry::{PhysicalPoint, PhysicalRect};
-use winwright_contracts::overlay::OverlayRequest;
+use winwright_contracts::overlay::{OverlayRequest, OverlayStyle};
 use winwright_contracts::{WinwrightError, WinwrightResult};
 
 use crate::layout::{self, LayoutInput, Metrics};
@@ -66,6 +66,13 @@ pub fn label_text(label: &str) -> Vec<u16> {
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect();
     line.trim().encode_utf16().collect()
+}
+
+/// "Step 3 of 7" for a pointer's bubble, when the request numbers its step out of several.
+fn progress_text(request: &OverlayRequest) -> Option<Vec<u16>> {
+    let (step, steps) = request.step.zip(request.steps)?;
+    (request.style == OverlayStyle::Pointer && request.label.is_some())
+        .then(|| format!("Step {step} of {steps}").encode_utf16().collect())
 }
 
 struct MonitorGeometry {
@@ -298,6 +305,8 @@ pub fn create_overlay(
     let badge = request
         .step
         .map(|n| n.to_string().encode_utf16().collect::<Vec<u16>>());
+    let note_font = font(metrics.badge_font, FW_NORMAL)?;
+    let progress = progress_text(request);
     let input = LayoutInput {
         target: request.rect,
         style: request.style,
@@ -306,6 +315,7 @@ pub fn create_overlay(
         metrics,
         label_text: label.as_deref().map(|t| measure(dc.0, &label_font, t)),
         badge_text: badge.as_deref().map(|t| measure(dc.0, &badge_font, t)),
+        progress_text: progress.as_deref().map(|t| measure(dc.0, &note_font, t)),
     };
     let Some(layout) = layout::compute_layout(&input) else {
         return Ok(None);
@@ -339,6 +349,15 @@ pub fn create_overlay(
             font: &badge_font,
             align: DT_CENTER,
             rgb: on_color,
+        });
+    }
+    if let (Some(rect), Some(text)) = (layout.progress, progress.as_deref()) {
+        texts.push(Text {
+            rect,
+            text,
+            font: &note_font,
+            align: DT_LEFT,
+            rgb: paint::BUBBLE_NOTE,
         });
     }
 
@@ -475,5 +494,25 @@ mod tests {
         assert_eq!(text, "Click this button");
         assert!(label_text(" \n ").is_empty());
         assert_eq!(label_text("Größe ✓").len(), 7);
+    }
+
+    #[test]
+    fn only_a_numbered_pointer_step_says_how_far_along_it_is() {
+        let mut request = OverlayRequest {
+            rect: PhysicalRect::new(0, 0, 10, 10),
+            style: OverlayStyle::Pointer,
+            label: Some("Click Develop".into()),
+            step: Some(3),
+            steps: Some(7),
+            color: 0,
+            duration_ms: None,
+        };
+        let text = progress_text(&request).map(|t| String::from_utf16(&t).unwrap());
+        assert_eq!(text.as_deref(), Some("Step 3 of 7"));
+        request.style = OverlayStyle::Highlight;
+        assert_eq!(progress_text(&request), None);
+        request.style = OverlayStyle::Pointer;
+        request.steps = None;
+        assert_eq!(progress_text(&request), None);
     }
 }
