@@ -41,7 +41,7 @@ mod sys;
 use std::collections::HashSet;
 use std::fmt;
 use std::sync::{Mutex, MutexGuard, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use winwright_contracts::backend::{BackendFuture, OperationContext};
 use winwright_contracts::geometry::{PhysicalPoint, PhysicalRect};
@@ -57,6 +57,27 @@ const SETTLE: Duration = Duration::from_millis(15);
 const CHORD_HOLD: Duration = Duration::from_millis(20);
 /// Pause between `type_text` batches, letting the target drain its input queue.
 const TEXT_BATCH_GAP: Duration = Duration::from_millis(5);
+/// Input from the person this recently holds injected input back ...
+const HANDS_OFF_MS: u32 = 1_500;
+/// ... for at most this long, then the action is refused.
+const HANDS_OFF_MAX: Duration = Duration::from_secs(30);
+const HANDS_OFF_POLL: Duration = Duration::from_millis(100);
+/// Input seen this soon after Winwright's own injection is taken to be that injection.
+const OWN_INPUT_SLACK_MS: u32 = 60;
+
+/// Whether the person is using the mouse or keyboard: the last input (`last`, a tick) came
+/// within [`HANDS_OFF_MS`] of `now` and is not Winwright's own injection at tick `ours`.
+/// Ticks wrap every 49.7 days, so differences use wrapping arithmetic.
+fn person_active(now: u32, last: u32, ours: Option<u32>) -> bool {
+    let recent = now.wrapping_sub(last) < HANDS_OFF_MS;
+    let theirs = ours.is_none_or(|ours| {
+        let after = last.wrapping_sub(ours);
+        // `last` after our injection by more than the slack (and not before it: a huge
+        // wrapped difference means `last` came first, which is the person's).
+        after > OWN_INPUT_SLACK_MS
+    });
+    recent && theirs
+}
 
 /// [`InputBackend`] over Win32 `SendInput`. See the crate docs for the DPI-awareness requirement.
 pub struct SendInputBackend {
@@ -149,6 +170,10 @@ trait Platform: Layout + Send + Sync {
     fn virtual_screen(&self) -> WinwrightResult<PhysicalRect>;
     /// Injects `events` in order, reporting how many were inserted when not all were.
     fn send(&self, events: &[RawInput]) -> Result<(), Shortfall>;
+    /// The tick count now and at the last input from anyone; `None` when unknown.
+    fn input_ticks(&self) -> Option<(u32, u32)> {
+        None
+    }
 }
 
 /// `SendInput` inserted only the first `inserted` events.
@@ -162,6 +187,8 @@ struct HeldState {
     held: HashSet<Held>,
     /// Bumped by `release_all`; sequences started under an older value stop injecting.
     stop_epoch: u64,
+    /// Tick of Winwright's last injection, to tell it from the person's input.
+    last_injected: Option<u32>,
 }
 
 struct Engine<P> {
@@ -204,6 +231,11 @@ impl<P: Platform> Engine<P> {
             Ok(()) => events.len(),
             Err(shortfall) => shortfall.inserted.min(events.len()),
         };
+        if inserted > 0
+            && let Some((now, _)) = self.platform.input_ticks()
+        {
+            state.last_injected = Some(now);
+        }
         plan::track(&mut state.held, &events[..inserted]);
         if let Some(pressed) = pressed {
             plan::track(pressed, &events[..inserted]);
@@ -256,6 +288,7 @@ impl<P: Platform> Engine<P> {
         };
         ctx.check(op)?;
         self.platform.check_input_desktop()?;
+        self.hands_off(op, ctx).await?;
         let epoch = self.state().stop_epoch;
         Ok(Sequence {
             engine: self,
@@ -265,6 +298,36 @@ impl<P: Platform> Engine<P> {
             pressed: HashSet::new(),
             _turn: turn,
         })
+    }
+
+    /// Holds injected input back while the person is using the mouse or keyboard, until they
+    /// have left it alone for [`HANDS_OFF_MS`], so the AI never fights them for the pointer.
+    async fn hands_off(&self, op: &'static str, ctx: &OperationContext) -> WinwrightResult<()> {
+        let started = Instant::now();
+        loop {
+            let ours = self.state().last_injected;
+            let Some((now, last)) = self.platform.input_ticks() else {
+                return Ok(());
+            };
+            if !person_active(now, last, ours) {
+                return Ok(());
+            }
+            if started.elapsed() >= HANDS_OFF_MAX {
+                return Err(WinwrightError::ActionBlocked {
+                    reason: "the person kept using the mouse or keyboard for 30 s; ask them \
+                             before trying again"
+                        .into(),
+                });
+            }
+            if started.elapsed() < HANDS_OFF_POLL {
+                tracing::info!(op, "waiting while the person uses the mouse or keyboard");
+            }
+            tokio::select! {
+                () = tokio::time::sleep(HANDS_OFF_POLL.min(ctx.remaining())) => {}
+                () = ctx.cancel.cancelled() => {}
+            }
+            ctx.check(op)?;
+        }
     }
 
     async fn move_to(&self, point: PhysicalPoint, ctx: &OperationContext) -> WinwrightResult<()> {
@@ -354,6 +417,8 @@ impl<P: Platform> Engine<P> {
         for (i, batch) in batches.iter().enumerate() {
             if i > 0 {
                 seq.pause(TEXT_BATCH_GAP).await?;
+                // Long text stops while the person grabs the mouse or keyboard.
+                self.hands_off("type_text", ctx).await?;
             }
             seq.send(batch)?;
         }
@@ -446,6 +511,8 @@ mod tests {
         /// Cancelled right after the first send, to interrupt a sequence between batches.
         cancel_after_send: Mutex<Option<CancellationToken>>,
         log: Mutex<Vec<Vec<RawInput>>>,
+        /// What `input_ticks` reports.
+        ticks: Mutex<Option<(u32, u32)>>,
     }
 
     impl Default for Recorder {
@@ -456,6 +523,7 @@ mod tests {
                 limits: Mutex::default(),
                 cancel_after_send: Mutex::default(),
                 log: Mutex::default(),
+                ticks: Mutex::default(),
             }
         }
     }
@@ -500,6 +568,48 @@ mod tests {
                 })
             }
         }
+
+        fn input_ticks(&self) -> Option<(u32, u32)> {
+            *self.ticks.lock().unwrap()
+        }
+    }
+
+    #[test]
+    fn the_persons_recent_input_counts_but_winwrights_own_does_not() {
+        assert!(person_active(10_000, 9_000, None), "1 s ago");
+        assert!(!person_active(10_000, 8_000, None), "2 s ago: idle");
+        assert!(
+            !person_active(10_000, 9_520, Some(9_500)),
+            "just after our injection: ours"
+        );
+        assert!(
+            person_active(10_000, 9_900, Some(9_500)),
+            "well after our injection: theirs"
+        );
+        assert!(
+            person_active(10_000, 9_400, Some(9_500)),
+            "before our injection: theirs"
+        );
+        assert!(
+            person_active(5, u32::MAX - 100, None),
+            "across the tick wrap"
+        );
+    }
+
+    #[tokio::test]
+    async fn injection_waits_while_the_person_uses_the_pc() {
+        let e = engine();
+        *e.platform.ticks.lock().unwrap() = Some((10_000, 9_900));
+        let short = ctx(Duration::from_millis(250));
+        let err = e.move_to(pt(1, 1), &short).await.unwrap_err();
+        assert_eq!(err.code().as_str(), "TIMEOUT", "{err}");
+        assert!(
+            events(&e).is_empty(),
+            "nothing injected while they are active"
+        );
+        *e.platform.ticks.lock().unwrap() = Some((10_000, 5_000));
+        e.move_to(pt(1, 1), &long_ctx()).await.unwrap();
+        assert_eq!(events(&e).len(), 1);
     }
 
     fn engine() -> Engine<Recorder> {
