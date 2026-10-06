@@ -105,6 +105,8 @@ struct Overlay {
     hwnd: HWND,
     timer: bool,
     glide: Option<Glide>,
+    /// A glow breathes from when it was shown.
+    pulse: Option<Instant>,
 }
 
 /// A pointer moving from the cursor to its target, one frame per glide timer tick.
@@ -119,6 +121,10 @@ struct Glide {
 const GLIDE_TIMER: u64 = 1 << 30;
 const GLIDE_FRAME_MS: u32 = 15;
 const GLIDE_MS: f32 = 280.0;
+/// Glow pulse timers carry this bit. Each frame only changes the window's overall alpha: the
+/// pixels are not drawn again.
+const PULSE_TIMER: u64 = 1 << 29;
+const PULSE_FRAME_MS: u32 = 50;
 
 struct Hotkey {
     chord: Chord,
@@ -331,6 +337,10 @@ fn on_timer(host: HWND, id: u64) {
         with_state(|state| state.glide_frame(id & !GLIDE_TIMER));
         return;
     }
+    if id & PULSE_TIMER != 0 {
+        with_state(|state| state.pulse_frame(id & !PULSE_TIMER));
+        return;
+    }
     // SAFETY: stops the (periodic) timer on this thread's host window; auto-hide is one-shot.
     let _ = unsafe { KillTimer(Some(host), id as usize) };
     with_state(|state| state.remove(id));
@@ -519,12 +529,28 @@ impl UiState {
             // No timer: land at once rather than stay off target.
             move_to(created.hwnd, created.at);
         }
+        let pulse = (request.style == winwright_contracts::overlay::OverlayStyle::Glow)
+            // SAFETY: as above; WM_TIMER carries the tagged id.
+            .then(|| unsafe {
+                SetTimer(
+                    Some(self.host),
+                    (PULSE_TIMER | id.0) as usize,
+                    PULSE_FRAME_MS,
+                    None,
+                )
+            })
+            .filter(|&ok| ok != 0)
+            .map(|_| {
+                crate::render::set_alpha(created.hwnd, crate::layout::pulse_alpha(0.0));
+                Instant::now()
+            });
         self.overlays.insert(
             id.0,
             Overlay {
                 hwnd: created.hwnd,
                 timer,
                 glide,
+                pulse,
             },
         );
         while self.overlays.len() > MAX_OVERLAYS {
@@ -546,6 +572,9 @@ impl UiState {
             }
             if overlay.glide.is_some() {
                 let _ = KillTimer(Some(self.host), (GLIDE_TIMER | id) as usize);
+            }
+            if overlay.pulse.is_some() {
+                let _ = KillTimer(Some(self.host), (PULSE_TIMER | id) as usize);
             }
             let _ = DestroyWindow(overlay.hwnd);
         }
@@ -570,6 +599,19 @@ impl UiState {
         if progress >= 1.0 {
             overlay.glide = None;
             stop();
+        }
+    }
+
+    /// One breath of a glow: only its overall alpha changes.
+    fn pulse_frame(&mut self, id: u64) {
+        let Some(overlay) = self.overlays.get(&id) else {
+            // SAFETY: the pulse timer of `id` on this thread's host window.
+            let _ = unsafe { KillTimer(Some(self.host), (PULSE_TIMER | id) as usize) };
+            return;
+        };
+        if let Some(start) = overlay.pulse {
+            let alpha = crate::layout::pulse_alpha(start.elapsed().as_secs_f32());
+            crate::render::set_alpha(overlay.hwnd, alpha);
         }
     }
 

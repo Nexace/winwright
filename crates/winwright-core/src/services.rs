@@ -702,6 +702,17 @@ impl Engine {
             let ctx = session.operation(self.timeout())?;
             let mut launched = processes.launch(request, &ctx).await?;
             launched.window = self.launched_window(&before, &program, &ctx).await;
+            // What the person asked to open comes to the front (restored if minimized).
+            if let Some(hwnd) = launched
+                .window
+                .as_ref()
+                .filter(|w| !w.foreground)
+                .map(|w| w.hwnd)
+                && self.focus_window_off_thread(hwnd).await.is_ok()
+                && let Some(now) = self.windows.window(hwnd).ok().flatten()
+            {
+                launched.window = Some(now);
+            }
             Ok(launched)
         }
         .await;

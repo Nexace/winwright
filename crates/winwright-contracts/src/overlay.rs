@@ -21,6 +21,9 @@ pub enum OverlayStyle {
     /// A pointer at the rectangle's center with the label in a bubble beside it (teaching);
     /// a step number goes inside the bubble.
     Pointer,
+    /// A soft glow fading inward from the rectangle's edges, gently breathing: the frame
+    /// around the window the AI works in.
+    Glow,
 }
 
 fn default_color() -> u32 {

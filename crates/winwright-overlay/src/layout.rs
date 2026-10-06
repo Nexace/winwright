@@ -40,6 +40,11 @@ pub struct Metrics {
     pub bubble_radius: i32,
     pub shadow: i32,
     pub shadow_dy: i32,
+    /// Glow style: how far the glow reaches in from the edge, its bright edge line, and the
+    /// corner radius.
+    pub glow: i32,
+    pub glow_edge: i32,
+    pub glow_radius: i32,
 }
 
 impl Metrics {
@@ -68,8 +73,22 @@ impl Metrics {
             bubble_radius: s(12),
             shadow: s(6),
             shadow_dy: s(3),
+            glow: s(32),
+            glow_edge: s(2),
+            glow_radius: s(10),
         }
     }
+}
+
+/// The glow's overall alpha `secs` after it appeared: a quick fade in, then a slow breath
+/// between about 65% and 100%.
+pub fn pulse_alpha(secs: f32) -> u8 {
+    const FADE_IN: f32 = 0.25;
+    const BREATH: f32 = 2.4;
+    let breath = 0.5 - 0.5 * (secs * std::f32::consts::TAU / BREATH).cos();
+    let level = 0.65 + 0.35 * breath;
+    let fade = (secs / FADE_IN).clamp(0.0, 1.0);
+    (255.0 * level * fade).round() as u8
 }
 
 pub fn inflate(r: PhysicalRect, by: i32) -> PhysicalRect {
@@ -421,6 +440,8 @@ pub struct Layout {
     pub badge: Option<PhysicalRect>,
     /// Where "Step 3 of 7" goes, above the text.
     pub progress: Option<PhysicalRect>,
+    /// The glow style's rect: the glow is drawn inside it, fading in from its edges.
+    pub glow: Option<PhysicalRect>,
 }
 
 /// Lays out one overlay. The window is the union of all parts clipped to the target's
@@ -434,6 +455,7 @@ pub fn compute_layout(input: &LayoutInput) -> Option<Layout> {
         input.work
     };
     let highlight = (input.style == OverlayStyle::Highlight).then_some(target);
+    let glow = (input.style == OverlayStyle::Glow).then_some(target);
     let arrow = (input.style == OverlayStyle::Arrow).then(|| place_arrow(target, work, m));
     let marker = (input.style == OverlayStyle::ClickMarker).then(|| target.center());
     let pointer = (input.style == OverlayStyle::Pointer).then(|| {
@@ -512,6 +534,7 @@ pub fn compute_layout(input: &LayoutInput) -> Option<Layout> {
 
     let parts = [
         highlight.map(|t| inflate(t, m.border)),
+        glow,
         arrow.map(|a| a.bounds),
         marker.map(|c| marker_bounds(c, m)),
         pointer.map(|p| p.bounds),
@@ -537,12 +560,27 @@ pub fn compute_layout(input: &LayoutInput) -> Option<Layout> {
         text: text.map(|r| offset(r, dx, dy)),
         badge: badge.map(|r| offset(r, dx, dy)),
         progress: progress.map(|r| offset(r, dx, dy)),
+        glow: glow.map(|r| offset(r, dx, dy)),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_glow_fades_in_then_breathes_gently() {
+        assert_eq!(pulse_alpha(0.0), 0, "starts invisible");
+        assert!(pulse_alpha(0.1) < pulse_alpha(0.25));
+        for i in 0..100 {
+            let a = pulse_alpha(0.3 + i as f32 * 0.05);
+            assert!(
+                (160..=255).contains(&a),
+                "breathes between 65% and 100%: {a}"
+            );
+        }
+        assert!(pulse_alpha(1.2) > pulse_alpha(2.4), "peaks mid-breath");
+    }
 
     const MONITOR: PhysicalRect = PhysicalRect::new(0, 0, 1920, 1080);
     const WORK: PhysicalRect = PhysicalRect::new(0, 0, 1920, 1040);

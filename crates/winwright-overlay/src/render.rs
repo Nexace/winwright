@@ -435,6 +435,30 @@ pub fn create_overlay(
     }))
 }
 
+/// Changes only an overlay's overall alpha (the glow's breathing); its pixels stay as drawn.
+pub fn set_alpha(hwnd: HWND, alpha: u8) {
+    let blend = BLENDFUNCTION {
+        BlendOp: AC_SRC_OVER as u8,
+        BlendFlags: 0,
+        SourceConstantAlpha: alpha,
+        AlphaFormat: AC_SRC_ALPHA as u8,
+    };
+    // SAFETY: `hwnd` is a live overlay of this thread; with no source DC the content stays.
+    let _ = unsafe {
+        UpdateLayeredWindow(
+            hwnd,
+            None,
+            None,
+            None,
+            None,
+            None,
+            COLORREF(0),
+            Some(&raw const blend),
+            ULW_ALPHA,
+        )
+    };
+}
+
 /// Pushes the premultiplied DIB to the layered window, then shows it topmost without
 /// activating it (so focus never moves).
 fn present(hwnd: HWND, dc: HDC, bounds: PhysicalRect) -> WinwrightResult<()> {

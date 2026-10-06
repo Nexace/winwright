@@ -288,8 +288,77 @@ impl<'a> Canvas<'a> {
     }
 }
 
+/// Peak alpha of the glow just inside its edge line, and the edge line's own.
+const GLOW_ALPHA: f32 = 190.0;
+const GLOW_EDGE_ALPHA: u8 = 250;
+
+impl Canvas<'_> {
+    /// A glow inside `r`: a bright `edge`-wide line along its rounded border, then light fading
+    /// out over `reach` pixels toward the middle, which stays clear. Only the band near the
+    /// edges is visited.
+    pub fn glow_inside(&mut self, r: PhysicalRect, reach: i32, edge: i32, radius: i32, rgb: u32) {
+        let r = intersect(r, self.bounds());
+        if r.is_empty() || reach <= 0 {
+            return;
+        }
+        let (cx, cy) = (
+            (r.left + r.right) as f32 / 2.0,
+            (r.top + r.bottom) as f32 / 2.0,
+        );
+        let (hx, hy) = (r.width() as f32 / 2.0, r.height() as f32 / 2.0);
+        let rad = (radius as f32).min(hx.min(hy));
+        let bright = lighten(rgb, 35);
+        let (reach_f, edge_f) = (reach as f32, edge as f32);
+        let band = reach.max(radius) + 1;
+        for y in r.top..r.bottom {
+            let in_band_y = y < r.top + band || y >= r.bottom - band;
+            let mut x = r.left;
+            while x < r.right {
+                if !in_band_y && x == r.left + band {
+                    // Skip the clear middle of this row.
+                    x = (r.right - band).max(x);
+                    continue;
+                }
+                // Distance inside the rounded rect (positive inside).
+                let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+                let qx = (px - cx).abs() - (hx - rad);
+                let qy = (py - cy).abs() - (hy - rad);
+                let outside = qx.max(0.0).hypot(qy.max(0.0));
+                let inside = qx.max(qy).min(0.0);
+                if outside + inside - rad > 0.0 {
+                    x += 1;
+                    continue; // Outside the rounded corner.
+                }
+                // A smooth minimum of the distances to the four edges: equal to the nearest
+                // edge along the sides, and rounded (no seams) where two edges meet.
+                let k = reach_f / 4.0;
+                let sum: f32 = [
+                    px - r.left as f32,
+                    r.right as f32 - px,
+                    py - r.top as f32,
+                    r.bottom as f32 - py,
+                ]
+                .iter()
+                .map(|e| (-e / k).exp())
+                .sum();
+                let d = (-k * sum.ln()).max(0.0);
+                if d < edge_f {
+                    self.blend(x, y, bright, GLOW_EDGE_ALPHA);
+                } else if d < edge_f + reach_f {
+                    let t = 1.0 - (d - edge_f) / reach_f;
+                    self.blend(x, y, rgb, (GLOW_ALPHA * t * t).round() as u8);
+                }
+                x += 1;
+            }
+        }
+    }
+}
+
 /// Paints every shape of `layout` (text is drawn afterwards by GDI).
 pub fn draw(canvas: &mut Canvas<'_>, layout: &Layout, m: &Metrics, color: u32) {
+    if let Some(glow) = layout.glow {
+        canvas.glow_inside(glow, m.glow, m.glow_edge, m.glow_radius, color);
+    }
     if let Some(target) = layout.highlight {
         canvas.fill_rect(target, color, FILL_ALPHA);
         canvas.frame_outside(target, m.border, color, 255);
@@ -353,6 +422,20 @@ mod tests {
     use crate::layout::{LayoutInput, compute_layout};
 
     const RED: u32 = 0x00E0_4A2A;
+
+    #[test]
+    fn the_glow_is_bright_at_the_edge_fades_inward_and_leaves_the_middle_clear() {
+        let mut px = vec![0u32; 200 * 120];
+        let mut c = Canvas::new(200, 120, &mut px);
+        c.glow_inside(PhysicalRect::new(0, 0, 200, 120), 20, 2, 8, 0x0008_91B2);
+        let a = |x, y| c.pixel(x, y) >> 24;
+        assert_eq!(a(100, 0), u32::from(GLOW_EDGE_ALPHA), "the edge line");
+        assert!(a(100, 3) > a(100, 10), "fades inward");
+        assert!(a(100, 10) > a(100, 20));
+        assert_eq!(a(100, 60), 0, "the middle stays clear");
+        assert_eq!(a(0, 0), 0, "rounded corners");
+        assert!(a(199, 60) > 0 && a(0, 60) > 0, "every side glows");
+    }
 
     fn alpha(p: u32) -> u32 {
         p >> 24
@@ -549,6 +632,7 @@ mod tests {
             OverlayStyle::Arrow,
             OverlayStyle::ClickMarker,
             OverlayStyle::Pointer,
+            OverlayStyle::Glow,
         ] {
             let layout = compute_layout(&LayoutInput {
                 target: PhysicalRect::new(300, 300, 400, 340),
