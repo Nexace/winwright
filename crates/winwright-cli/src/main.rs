@@ -3,6 +3,7 @@ mod doctor;
 mod lazy;
 mod setup;
 mod tray_menu;
+mod update;
 
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -427,6 +428,11 @@ fn lead(
             TRAY_INSPECTOR => open_inspector(),
             TRAY_SETTINGS => tray_menu::open_settings(&menu_tray),
             TRAY_CHECK => tray_menu::check_this_pc(&menu_tray),
+            TRAY_UPDATE => {
+                if let Some(release) = update::available() {
+                    spawn_detached(std::process::Command::new("explorer.exe").arg(release.url));
+                }
+            }
             TRAY_AUDIT if !open_recent_activity() => menu_tray.notify(
                 "No activity yet",
                 "Winwright lists every AI action here once an assistant acts (unless the activity log is off in Settings).",
@@ -436,6 +442,17 @@ fn lead(
     ) {
         tracing::warn!(%err, "tray icon unavailable");
     }
+    let (found_tray, menu_tray, signal) = (tray.clone(), tray.clone(), Arc::clone(stop));
+    update::start(
+        tray_menu::updates_enabled,
+        move |release| {
+            found_tray.notify(
+                &format!("Winwright {} available", release.label()),
+                "Choose \"Get Winwright\" in the tray menu to open the release page.",
+            )
+        },
+        move || menu_tray.update(tray_state(signal.is_stopped())),
+    );
     Some(hotkey)
 }
 
@@ -456,6 +473,7 @@ const TRAY_INSPECTOR: u32 = 3;
 const TRAY_AUDIT: u32 = 4;
 const TRAY_SETTINGS: u32 = 5;
 const TRAY_CHECK: u32 = 6;
+const TRAY_UPDATE: u32 = 7;
 
 fn tray_state(stopped: bool) -> winwright_overlay::TrayState {
     use winwright_overlay::theme::glyph;
@@ -467,7 +485,7 @@ fn tray_state(stopped: bool) -> winwright_overlay::TrayState {
         glyph: Some(glyph),
         separator_before,
     };
-    TrayState {
+    let mut state = TrayState {
         tooltip: if stopped {
             "Winwright \u{00B7} stopped (AI actions are blocked)".into()
         } else {
@@ -495,7 +513,14 @@ fn tray_state(stopped: bool) -> winwright_overlay::TrayState {
             item(TRAY_CHECK, "Check this PC", glyph::DIAGNOSTIC, false),
             item(TRAY_SETTINGS, "Settings", glyph::SETTINGS, true),
         ],
+    };
+    if let Some(release) = update::available() {
+        let label = format!("Get Winwright {}", release.label());
+        state
+            .items
+            .push(item(TRAY_UPDATE, &label, glyph::DOWNLOAD, false));
     }
+    state
 }
 
 /// Starts a program for the user without waiting for it. Its stdio is never the MCP pipes:

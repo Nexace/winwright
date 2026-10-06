@@ -5,6 +5,7 @@
 //!
 //! Reports hold names and summaries only: never typed text, field values, or file contents.
 
+pub mod http;
 mod notion;
 mod time;
 

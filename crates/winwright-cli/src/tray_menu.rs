@@ -91,6 +91,13 @@ pub fn open_settings(tray: &TrayHost) {
     );
 }
 
+/// `updates.check` as the config file says now (off when it cannot be read).
+pub fn updates_enabled() -> bool {
+    config_path()
+        .and_then(|path| current_config(&path).ok())
+        .is_some_and(|config| config.updates.check)
+}
+
 /// One check at a time.
 static CHECKING: AtomicBool = AtomicBool::new(false);
 

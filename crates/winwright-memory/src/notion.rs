@@ -1,16 +1,6 @@
 //! Copies a report to Notion as a page under one parent page, through Notion's REST API with
-//! an "API token" connection (an internal integration). WinHTTP does the request, so no HTTP
-//! or TLS crates come in. Errors say what the person should fix and never hold the token.
-
-use std::ffi::c_void;
-
-use windows::Win32::Networking::WinHttp::{
-    INTERNET_DEFAULT_HTTPS_PORT, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_FLAG_SECURE,
-    WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_STATUS_CODE, WinHttpCloseHandle, WinHttpConnect,
-    WinHttpOpen, WinHttpOpenRequest, WinHttpQueryHeaders, WinHttpReadData, WinHttpReceiveResponse,
-    WinHttpSendRequest, WinHttpSetTimeouts,
-};
-use windows::core::{HSTRING, PCWSTR, w};
+//! an "API token" connection (an internal integration), sent through WinHTTP (`crate::http`).
+//! Errors say what the person should fix and never hold the token.
 
 const VERSION: &str = "2026-03-11";
 
@@ -105,7 +95,13 @@ pub fn create_page(target: &Target, report: &str) -> Result<String, String> {
         "Authorization: Bearer {}\r\nNotion-Version: {VERSION}\r\nContent-Type: application/json\r\n",
         target.token
     );
-    let (status, response) = post("api.notion.com", "/v1/pages", &headers, body.as_bytes())?;
+    let (status, response) = crate::http::request(
+        "POST",
+        "api.notion.com",
+        "/v1/pages",
+        &headers,
+        body.as_bytes(),
+    )?;
     if (200..300).contains(&status) {
         let url = serde_json::from_slice::<serde_json::Value>(&response)
             .ok()
@@ -122,109 +118,6 @@ pub fn create_page(target: &Target, report: &str) -> Result<String, String> {
             .into(),
         other => format!("Notion answered {other}"),
     })
-}
-
-/// Closes a WinHTTP handle when dropped.
-struct Handle(*mut c_void);
-
-impl Drop for Handle {
-    fn drop(&mut self) {
-        if !self.0.is_null() {
-            // SAFETY: a handle WinHTTP returned, closed once.
-            let _ = unsafe { WinHttpCloseHandle(self.0) };
-        }
-    }
-}
-
-fn handle(raw: *mut c_void, what: &str) -> Result<Handle, String> {
-    if raw.is_null() {
-        Err(format!(
-            "cannot reach Notion ({what}: {})",
-            windows::core::Error::from_thread()
-        ))
-    } else {
-        Ok(Handle(raw))
-    }
-}
-
-/// One HTTPS POST: the status code and the response body.
-fn post(host: &str, path: &str, headers: &str, body: &[u8]) -> Result<(u32, Vec<u8>), String> {
-    let fail =
-        |what: &str, err: windows::core::Error| format!("cannot reach Notion ({what}: {err})");
-    let host = HSTRING::from(host);
-    let path = HSTRING::from(path);
-    let headers: Vec<u16> = headers.encode_utf16().collect();
-    let length = u32::try_from(body.len()).map_err(|_| "report too large".to_owned())?;
-    // SAFETY: plain WinHTTP calls in order; every handle is closed by its guard, every buffer
-    // outlives the call that uses it, and lengths match the buffers passed.
-    unsafe {
-        let session = handle(
-            WinHttpOpen(
-                w!("Winwright"),
-                WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
-                PCWSTR::null(),
-                PCWSTR::null(),
-                0,
-            ),
-            "open",
-        )?;
-        WinHttpSetTimeouts(session.0, 10_000, 10_000, 15_000, 15_000)
-            .map_err(|e| fail("timeouts", e))?;
-        let connect = handle(
-            WinHttpConnect(session.0, &host, INTERNET_DEFAULT_HTTPS_PORT, 0),
-            "connect",
-        )?;
-        let request = handle(
-            WinHttpOpenRequest(
-                connect.0,
-                w!("POST"),
-                &path,
-                PCWSTR::null(),
-                PCWSTR::null(),
-                std::ptr::null(),
-                WINHTTP_FLAG_SECURE,
-            ),
-            "request",
-        )?;
-        WinHttpSendRequest(
-            request.0,
-            Some(&headers),
-            Some(body.as_ptr().cast()),
-            length,
-            length,
-            0,
-        )
-        .map_err(|e| fail("send", e))?;
-        WinHttpReceiveResponse(request.0, std::ptr::null_mut()).map_err(|e| fail("response", e))?;
-        let mut status = 0u32;
-        let mut size = size_of::<u32>() as u32;
-        WinHttpQueryHeaders(
-            request.0,
-            WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-            PCWSTR::null(),
-            Some((&raw mut status).cast()),
-            &mut size,
-            std::ptr::null_mut(),
-        )
-        .map_err(|e| fail("status", e))?;
-        let mut response = Vec::new();
-        let mut chunk = [0u8; 8192];
-        loop {
-            let mut read = 0u32;
-            WinHttpReadData(
-                request.0,
-                chunk.as_mut_ptr().cast(),
-                chunk.len() as u32,
-                &mut read,
-            )
-            .map_err(|e| fail("read", e))?;
-            if read == 0 || response.len() > 1 << 20 {
-                break;
-            }
-            response.extend_from_slice(&chunk[..read as usize]);
-        }
-        Ok((status, response))
-    }
 }
 
 #[cfg(test)]
