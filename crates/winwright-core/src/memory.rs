@@ -9,16 +9,38 @@
 use std::sync::{Arc, PoisonError};
 use std::time::Instant;
 
+use winwright_contracts::geometry::PhysicalRect;
 use winwright_contracts::memory::{
     MemoryRecallRequest, MemorySaveRequest, MemorySaved, MemoryStore, NewReport, OutsideContent,
 };
+use winwright_contracts::overlay::{OverlayRequest, OverlayStyle};
 use winwright_contracts::{WinwrightError, WinwrightResult};
 
 use crate::engine::Engine;
+use crate::services::DEFAULT_OVERLAY_COLOR;
 use crate::session::Session;
 
 const DEFAULT_RECALL: u32 = 5;
 const MAX_RECALL: u32 = 20;
+/// How long the "Done" notice stays, and how much of the title it shows.
+const DONE_NOTICE_MS: u64 = 6_000;
+const DONE_TITLE_CHARS: usize = 80;
+
+/// The finished-task notice: one line, at most [`DONE_TITLE_CHARS`] of the title.
+fn done_text(title: &str) -> String {
+    let line: String = title
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let line = line.split_whitespace().collect::<Vec<_>>().join(" ");
+    let short: String = line.chars().take(DONE_TITLE_CHARS).collect();
+    let more = if line.chars().count() > DONE_TITLE_CHARS {
+        "\u{2026}"
+    } else {
+        ""
+    };
+    format!("Done: {short}{more}")
+}
 
 fn store(engine: &Engine) -> WinwrightResult<Arc<dyn MemoryStore>> {
     engine
@@ -86,6 +108,7 @@ impl Engine {
                 (true, true) => OutsideContent::Yes,
                 (true, false) => OutsideContent::No,
             };
+            let title = request.title.clone();
             let report = NewReport {
                 title: request.title,
                 summary: request.summary,
@@ -94,11 +117,46 @@ impl Engine {
                 outside,
                 source,
             };
-            blocking(move || store.save(&report)).await
+            let saved = blocking(move || store.save(&report)).await?;
+            if self.config.notifications.task_done && !tools.is_empty() {
+                self.done_notice(&title);
+            }
+            Ok(saved)
         }
         .await;
         self.record(session, "memory_save", None, None, &result, false, started);
         result
+    }
+
+    /// "Done: <title>" at the bottom right of the main screen for a few seconds, so the person
+    /// need not watch a long task. Best effort: nothing shows while a confirmation is open.
+    fn done_notice(&self, title: &str) {
+        let (Some(overlay), Some(capture)) = (self.overlay.as_deref(), self.capture.as_deref())
+        else {
+            return;
+        };
+        if self.ensure_no_confirmation_open().is_err() {
+            return;
+        }
+        let Some(work) = capture.monitors().ok().and_then(|m| {
+            m.iter()
+                .find(|m| m.primary)
+                .or(m.first())
+                .map(|m| m.work_area)
+        }) else {
+            return;
+        };
+        // A teal light in the corner, its label beside it.
+        let (x, y) = (work.right - 60, work.bottom - 60);
+        let _ = overlay.show(OverlayRequest {
+            rect: PhysicalRect::new(x - 10, y - 10, x + 10, y + 10),
+            style: OverlayStyle::ClickMarker,
+            label: Some(done_text(title)),
+            step: None,
+            steps: None,
+            color: DEFAULT_OVERLAY_COLOR,
+            duration_ms: Some(DONE_NOTICE_MS),
+        });
     }
 
     /// Recalls reports as one block of text labeled as data, oldest first.
@@ -163,6 +221,15 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_done_notice_is_one_short_line() {
+        assert_eq!(done_text("Sent the\nmessage  "), "Done: Sent the message");
+        let long = "x".repeat(200);
+        let text = done_text(&long);
+        assert_eq!(text.chars().count(), "Done: ".len() + DONE_TITLE_CHARS + 1);
+        assert!(text.ends_with('\u{2026}'));
+    }
 
     #[test]
     fn tools_are_counted_in_first_use_order() {
