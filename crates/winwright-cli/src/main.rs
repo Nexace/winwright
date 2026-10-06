@@ -412,6 +412,7 @@ fn lead(
                         reason: "You stopped Winwright. Resuming lets AI apps use this PC again."
                             .into(),
                         timeout_ms: 45_000,
+                        grant: None,
                     };
                     let confirmer = winwright_overlay::NativeConfirmer::new();
                     if matches!(confirmer.confirm(prompt).await, Ok(true)) {

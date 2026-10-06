@@ -938,6 +938,8 @@ impl Engine {
     /// The engine stays stopped until [`Engine::rearm`] is called from trusted local UI.
     pub fn emergency_stop(&self) {
         self.sessions.cancel_all();
+        // Every "allow for a while" ends with the stop.
+        self.grants.clear();
         // Background programs the AI started end too.
         if let Some(processes) = self.processes.as_deref() {
             processes.stop_all_sessions();

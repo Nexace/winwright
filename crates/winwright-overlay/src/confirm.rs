@@ -13,6 +13,8 @@
 //!   only use those cannot approve, by design: anything they can do, a program can fake.
 //! - A prompt that is not answered in time, or whose request is abandoned, is denied and the
 //!   window closes itself.
+//! - When the engine offers it, "Allow 10 min" also allows the same kind of action in that one
+//!   app for ten minutes. It arms and counts exactly like "Allow once".
 //!
 //! Every piece of text is an owner-drawn STATIC control, so screen readers read the prompt
 //! while it keeps the Winwright look.
@@ -55,7 +57,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::{HSTRING, PCWSTR, w};
 use winwright_contracts::WinwrightResult;
 use winwright_contracts::backend::{BackendFuture, WindowBackend};
-use winwright_contracts::security::{ConfirmationPrompt, Confirmer};
+use winwright_contracts::security::{Approval, ConfirmationPrompt, Confirmer};
 
 use winwright_win32::Win32Windows;
 
@@ -67,11 +69,14 @@ const TITLE: PCWSTR = w!("Winwright: confirm action");
 /// IDCANCEL, so Esc denies through IsDialogMessage.
 const ID_DENY: i32 = IDCANCEL.0;
 const ID_ALLOW: i32 = 100;
+const ID_ALLOW_WHILE: i32 = 101;
 const TIMER_TICK: usize = 1;
 const TIMER_ARM: usize = 2;
 const ARM_DELAY_MS: u32 = 800;
 const ARM_DELAY: Duration = Duration::from_millis(ARM_DELAY_MS as u64);
 const WIDTH: i32 = 460;
+/// With the third button.
+const WIDE: i32 = 600;
 const SS_OWNERDRAW: u32 = 0x0D;
 const SS_NOPREFIX: u32 = 0x80;
 const ODT_STATIC: u32 = 5;
@@ -112,6 +117,8 @@ struct Content {
     reason: String,
     hint: String,
     seconds: u64,
+    /// The app "Allow 10 min" covers, when offered.
+    grant: Option<String>,
 }
 
 /// Text from apps and the model (window titles, arguments) shown as it really is: control
@@ -149,8 +156,19 @@ impl Content {
             summary: printable(&prompt.summary),
             context: context.join("  \u{00B7}  "),
             reason: format!("Why you are asked: {}", printable(&prompt.reason)),
-            hint: "Deny is the default. Press Ctrl+Alt+Esc at any time to stop Winwright.".into(),
+            hint: match &prompt.grant {
+                Some(app) => format!(
+                    "Deny is the default. \u{201C}Allow 10 min\u{201D} also lets the AI click, type \
+                     and send in {} for 10 minutes without asking; deleting, programs and \
+                     commands still ask. Ctrl+Alt+Esc stops Winwright at any time.",
+                    printable(app)
+                ),
+                None => {
+                    "Deny is the default. Press Ctrl+Alt+Esc at any time to stop Winwright.".into()
+                }
+            },
             seconds: prompt.timeout_ms.max(1_000) / 1000,
+            grant: prompt.grant.as_deref().map(printable),
         }
     }
 
@@ -205,25 +223,30 @@ impl Drop for ForgetWindow<'_> {
     }
 }
 
-/// The dialog's answer: `false` on timeout or when the dialog thread ends without one. The
+/// The dialog's answer: denied on timeout or when the dialog thread ends without one. The
 /// guard is created by the caller and owned by the returned future (an `async fn` holds its
 /// arguments from the call), so dropping the future at any point, even before its first
 /// poll, denies and closes the dialog.
 async fn wait_for_answer(
     guard: DenyOnDrop,
-    rx: tokio::sync::oneshot::Receiver<bool>,
+    rx: tokio::sync::oneshot::Receiver<Approval>,
     timeout: Duration,
-) -> bool {
+) -> Approval {
     let _guard = guard;
     tokio::time::timeout(timeout, rx)
         .await
         .ok()
         .and_then(Result::ok)
-        .unwrap_or(false)
+        .unwrap_or(Approval::Denied)
 }
 
 impl Confirmer for NativeConfirmer {
     fn confirm<'a>(&'a self, prompt: ConfirmationPrompt) -> BackendFuture<'a, bool> {
+        let answer = self.approve(prompt);
+        Box::pin(async move { Ok(answer.await? != Approval::Denied) })
+    }
+
+    fn approve<'a>(&'a self, prompt: ConfirmationPrompt) -> BackendFuture<'a, Approval> {
         let timeout = Duration::from_millis(prompt.timeout_ms.max(1_000));
         let (tx, rx) = tokio::sync::oneshot::channel();
         let link = Arc::new(Link::default());
@@ -235,7 +258,7 @@ impl Confirmer for NativeConfirmer {
                     Ok(answer) => answer,
                     Err(err) => {
                         tracing::warn!(%err, "confirmation dialog unavailable; denying");
-                        false
+                        Approval::Denied
                     }
                 };
                 let _ = tx.send(answer);
@@ -243,7 +266,7 @@ impl Confirmer for NativeConfirmer {
         // Created now, not on the first poll: the dialog already exists.
         let answer = wait_for_answer(DenyOnDrop(link), rx, timeout);
         if spawned.is_err() {
-            return Box::pin(async { Ok(false) });
+            return Box::pin(async { Ok(Approval::Denied) });
         }
         Box::pin(async move { Ok(answer.await) })
     }
@@ -272,6 +295,7 @@ struct Block {
 struct Dialog {
     deny: HWND,
     allow: HWND,
+    allow_while: Option<HWND>,
     blocks: Vec<Block>,
     palette: Palette,
     fonts: Fonts,
@@ -280,7 +304,7 @@ struct Dialog {
     armed: bool,
     /// When the dialog last really became the active window (`None` while it is not).
     active_since: Option<Instant>,
-    answer: Option<bool>,
+    answer: Option<Approval>,
     link: Arc<Link>,
     focus: HWND,
     icons: Vec<HICON>,
@@ -458,7 +482,11 @@ impl Dialog {
         let dpi = self.fonts.dpi;
         let px = |v| theme::scale(v, dpi);
         let pad = px(24);
-        let width = px(WIDTH);
+        let width = px(if self.allow_while.is_some() {
+            WIDE
+        } else {
+            WIDTH
+        });
         let inner = width - pad * 2;
         // SAFETY: a screen DC borrowed for measuring only.
         let dc = unsafe { GetDC(None) };
@@ -520,7 +548,13 @@ impl Dialog {
         let button_y = y + (band_h - button_h) / 2;
         let allow_x = width - pad + px(2) - button_w;
         let deny_x = allow_x - px(6) - button_w;
-        let countdown_w = deny_x - pad - px(8);
+        let while_x = deny_x - px(6) - button_w;
+        let countdown_w = if self.allow_while.is_some() {
+            while_x
+        } else {
+            deny_x
+        } - pad
+            - px(8);
         rects.push((
             Look::Countdown,
             rect(pad, y + 1, countdown_w.max(0), band_h - 1),
@@ -567,6 +601,17 @@ impl Dialog {
                 button_h,
                 SWP_NOZORDER | SWP_NOACTIVATE,
             );
+            if let Some(allow_while) = self.allow_while {
+                let _ = SetWindowPos(
+                    allow_while,
+                    None,
+                    while_x,
+                    button_y,
+                    button_w,
+                    button_h,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+            }
         }
         (width, y + band_h)
     }
@@ -644,7 +689,13 @@ impl Dialog {
                 ButtonKind::Secondary
             },
             state,
-            if is_deny { "Deny" } else { "Allow once" },
+            if is_deny {
+                "Deny"
+            } else if Some(cd.hdr.hwndFrom) == self.allow_while {
+                "Allow 10 min"
+            } else {
+                "Allow once"
+            },
             None,
             &self.palette,
             &self.fonts,
@@ -727,12 +778,12 @@ fn set_icons(hwnd: HWND, dpi: u32) -> Vec<HICON> {
     icons
 }
 
-/// Shows the dialog on this thread and returns the answer (true only for "Allow once").
+/// Shows the dialog on this thread and returns the answer (denied unless an Allow button).
 fn run_dialog(
     link: &Arc<Link>,
     prompt: &ConfirmationPrompt,
     timeout: Duration,
-) -> WinwrightResult<bool> {
+) -> WinwrightResult<Approval> {
     // Sized from the monitor's real DPI, so the window must not be DPI-virtualized in hosts
     // without a Per-Monitor-V2 manifest.
     // SAFETY: affects only this dedicated dialog thread, before it creates any window.
@@ -796,12 +847,23 @@ fn run_dialog(
             BS_PUSHBUTTON as u32 | WS_TABSTOP.0,
             ID_ALLOW,
         )?;
+        let allow_while = match &content.grant {
+            Some(app) => Some(child(
+                hwnd,
+                w!("BUTTON"),
+                &format!("Allow in {app} for 10 minutes"),
+                BS_PUSHBUTTON as u32 | WS_TABSTOP.0,
+                ID_ALLOW_WHILE,
+            )?),
+            None => None,
+        };
         let palette = Palette::system();
         theme::style_window(hwnd, &palette);
         let icons = set_icons(hwnd, dpi);
         Ok(Dialog {
             deny,
             allow,
+            allow_while,
             blocks,
             palette,
             fonts: Fonts::new(dpi),
@@ -837,7 +899,7 @@ fn run_dialog(
                 let _ = unsafe { DestroyIcon(icon) };
             }
         }
-        return Ok(false);
+        return Ok(Approval::Denied);
     }
     let client = with_dialog(|d| {
         d.sync_text();
@@ -851,7 +913,9 @@ fn run_dialog(
     unsafe {
         let _ = SetWindowPos(hwnd, None, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
         with_dialog(|d| {
-            let _ = EnableWindow(d.allow, false);
+            for allow in d.allows() {
+                let _ = EnableWindow(allow, false);
+            }
         });
         let _ = ShowWindow(hwnd, SW_SHOWNORMAL);
         // Winwright runs in the background, where Windows refuses a plain SetForegroundWindow:
@@ -905,7 +969,10 @@ fn run_dialog(
         }
     }
     let dialog = DIALOG.with(|cell| cell.borrow_mut().take());
-    let answer = dialog.as_ref().and_then(|d| d.answer).unwrap_or(false);
+    let answer = dialog
+        .as_ref()
+        .and_then(|d| d.answer)
+        .unwrap_or(Approval::Denied);
     if let Some(d) = dialog {
         for icon in d.icons {
             // SAFETY: our icons; the window that used them is gone.
@@ -916,6 +983,13 @@ fn run_dialog(
 }
 
 impl Dialog {
+    /// The Allow buttons: they arm, disarm and count together.
+    fn allows(&self) -> Vec<HWND> {
+        std::iter::once(self.allow)
+            .chain(self.allow_while)
+            .collect()
+    }
+
     /// Pushes each block's text into its control (the accessible name) and fonts into the
     /// buttons.
     fn sync_text(&self) {
@@ -927,7 +1001,7 @@ impl Dialog {
                 let _ = InvalidateRect(Some(b.hwnd), None, false);
             }
         }
-        for button in [self.deny, self.allow] {
+        for button in std::iter::once(self.deny).chain(self.allows()) {
             // SAFETY: WM_SETFONT with a font that lives as long as the dialog.
             unsafe {
                 SendMessageW(
@@ -942,7 +1016,7 @@ impl Dialog {
 
     fn tick(&mut self) -> bool {
         if Instant::now() >= self.deadline || self.link.abandoned.load(Ordering::SeqCst) {
-            self.answer = Some(false);
+            self.answer = Some(Approval::Denied);
             return true;
         }
         if let Some(b) = self.blocks.iter().find(|b| b.look == Look::Countdown) {
@@ -957,7 +1031,7 @@ impl Dialog {
     }
 }
 
-fn finish(hwnd: HWND, answer: bool) {
+fn finish(hwnd: HWND, answer: Approval) {
     with_dialog(|d| {
         if d.answer.is_none() {
             d.answer = Some(answer);
@@ -1029,10 +1103,15 @@ unsafe extern "system" fn dialog_proc(
             WM_COMMAND => {
                 let code = ((wparam.0 >> 16) & 0xFFFF) as u32;
                 match (wparam.0 & 0xFFFF) as i32 {
-                    ID_DENY => finish(hwnd, false),
-                    ID_ALLOW
+                    ID_DENY => finish(hwnd, Approval::Denied),
+                    id @ (ID_ALLOW | ID_ALLOW_WHILE)
                         if with_dialog(|d| {
-                            let from_allow = lparam.0 == d.allow.0 as isize;
+                            let button = if id == ID_ALLOW {
+                                Some(d.allow)
+                            } else {
+                                d.allow_while
+                            };
+                            let from_allow = button.is_some_and(|b| lparam.0 == b.0 as isize);
                             // A click another thread sent (BM_CLICK, a forged WM_COMMAND) while a
                             // real input's modal loop runs (a title-bar drag) inherits its
                             // hardware origin; a real click is never inside another thread's send.
@@ -1042,7 +1121,14 @@ unsafe extern "system" fn dialog_proc(
                                 && allow_counts(d.armed, code, from_allow, KEYS.get(), ORIGIN.get())
                         }) == Some(true) =>
                     {
-                        finish(hwnd, true)
+                        finish(
+                            hwnd,
+                            if id == ID_ALLOW {
+                                Approval::Once
+                            } else {
+                                Approval::ForAWhile
+                            },
+                        )
                     }
                     _ => {}
                 }
@@ -1053,7 +1139,7 @@ unsafe extern "system" fn dialog_proc(
                 match wparam.0 {
                     TIMER_TICK => {
                         if with_dialog(Dialog::tick) == Some(true) {
-                            finish(hwnd, false);
+                            finish(hwnd, Approval::Denied);
                         } else {
                             // Stay above anything topmost that appeared since (overlays of
                             // another Winwright process, which cannot see this dialog).
@@ -1080,10 +1166,11 @@ unsafe extern "system" fn dialog_proc(
                         let since = with_dialog(|d| d.active_since).flatten();
                         match arming(since, foreground, Instant::now()) {
                             Arming::Arm => {
-                                if let Some(allow) = with_dialog(|d| {
+                                let allows = with_dialog(|d| {
                                     d.armed = true;
-                                    d.allow
-                                }) {
+                                    d.allows()
+                                });
+                                for allow in allows.unwrap_or_default() {
                                     // SAFETY: our own child window.
                                     let _ = unsafe { EnableWindow(allow, true) };
                                 }
@@ -1107,18 +1194,18 @@ unsafe extern "system" fn dialog_proc(
                 if (wparam.0 & 0xFFFF) as u32 == WA_INACTIVE {
                     // SAFETY: reads this thread's focus window.
                     let focused = unsafe { GetFocus() };
-                    let allow = with_dialog(|d| {
-                        if focused == d.deny || focused == d.allow {
+                    let allows = with_dialog(|d| {
+                        if focused == d.deny || d.allows().contains(&focused) {
                             d.focus = focused;
                         }
                         d.armed = false;
                         d.active_since = None;
-                        d.allow
+                        d.allows()
                     });
-                    // SAFETY: this window's own timer and child window.
+                    // SAFETY: this window's own timer and child windows.
                     unsafe {
                         let _ = KillTimer(Some(hwnd), TIMER_ARM);
-                        if let Some(allow) = allow {
+                        for allow in allows.unwrap_or_default() {
                             let _ = EnableWindow(allow, false);
                         }
                     }
@@ -1128,12 +1215,14 @@ unsafe extern "system" fn dialog_proc(
                     let parts = with_dialog(|d| {
                         d.armed = false;
                         d.active_since = Some(Instant::now());
-                        (d.allow, d.deny)
+                        (d.allows(), d.deny)
                     });
                     // SAFETY: our own child windows; (re)starts this window's own timer.
                     unsafe {
-                        if let Some((allow, deny)) = parts {
-                            let _ = EnableWindow(allow, false);
+                        if let Some((allows, deny)) = parts {
+                            for allow in allows {
+                                let _ = EnableWindow(allow, false);
+                            }
                             // A disabled "Allow once" cannot take focus.
                             let _ = SetFocus(Some(deny));
                         }
@@ -1170,7 +1259,7 @@ unsafe extern "system" fn dialog_proc(
                 Some(LRESULT(0))
             }
             WM_CLOSE => {
-                finish(hwnd, false);
+                finish(hwnd, Approval::Denied);
                 Some(LRESULT(0))
             }
             WM_DESTROY => {
@@ -1189,7 +1278,7 @@ unsafe extern "system" fn dialog_proc(
         }
         Err(_) => {
             tracing::error!("confirmation dialog procedure panicked; denying");
-            with_dialog(|d| d.answer = Some(false));
+            with_dialog(|d| d.answer = Some(Approval::Denied));
             // SAFETY: ends this thread's message loop so the prompt resolves as denied.
             unsafe { PostQuitMessage(0) };
             LRESULT(0)
@@ -1213,7 +1302,23 @@ mod tests {
             }),
             reason: "action may send, submit, delete, or spend".into(),
             timeout_ms: 60_000,
+            grant: None,
         }
+    }
+
+    #[test]
+    fn a_grant_names_its_app_and_what_still_asks() {
+        let mut p = prompt();
+        p.grant = Some("Discord.exe".into());
+        let c = Content::of(&p);
+        assert_eq!(c.grant.as_deref(), Some("Discord.exe"));
+        assert!(
+            c.hint.contains("in Discord.exe for 10 minutes"),
+            "{}",
+            c.hint
+        );
+        assert!(c.hint.contains("deleting, programs and commands still ask"));
+        assert!(Content::of(&prompt()).grant.is_none());
     }
 
     #[test]
@@ -1272,8 +1377,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn only_the_dialog_answer_true_allows() {
-        let answer = |sent: Option<bool>| async move {
+    async fn only_the_dialogs_allow_answers_allow() {
+        let answer = |sent: Option<Approval>| async move {
             let link = Arc::new(Link::default());
             let (tx, rx) = tokio::sync::oneshot::channel();
             match sent {
@@ -1288,16 +1393,18 @@ mod tests {
             );
             got
         };
-        assert!(answer(Some(true)).await);
-        assert!(!answer(Some(false)).await);
-        assert!(
-            !answer(None).await,
+        assert_eq!(answer(Some(Approval::Once)).await, Approval::Once);
+        assert_eq!(answer(Some(Approval::ForAWhile)).await, Approval::ForAWhile);
+        assert_eq!(answer(Some(Approval::Denied)).await, Approval::Denied);
+        assert_eq!(
+            answer(None).await,
+            Approval::Denied,
             "a dialog thread that ends without an answer denies"
         );
         let link = Arc::new(Link::default());
-        let (_tx, rx) = tokio::sync::oneshot::channel::<bool>();
+        let (_tx, rx) = tokio::sync::oneshot::channel::<Approval>();
         let late = wait_for_answer(DenyOnDrop(Arc::clone(&link)), rx, Duration::from_millis(20));
-        assert!(!late.await, "no answer in time denies");
+        assert_eq!(late.await, Approval::Denied, "no answer in time denies");
         assert!(abandoned(&link));
     }
 

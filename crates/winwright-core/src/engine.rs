@@ -20,8 +20,8 @@ use winwright_contracts::input::InputBackend;
 use winwright_contracts::memory::MemoryStore;
 use winwright_contracts::overlay::OverlayService;
 use winwright_contracts::security::{
-    ActionRisk, Capability, ConfirmationPrompt, Confirmer, PermissionDecision, ProposedAction,
-    TargetSummary,
+    ActionRisk, Approval, Capability, ConfirmationPrompt, Confirmer, PermissionDecision,
+    ProposedAction, TargetSummary,
 };
 use winwright_contracts::snapshot::{
     DesktopSnapshot, SnapshotRequest, SnapshotTarget, WindowSummary,
@@ -96,6 +96,54 @@ pub struct Engine {
     pub(crate) memory: Option<Arc<dyn MemoryStore>>,
     /// Tools run since the last memory report, for the next one.
     pub(crate) worked: Mutex<Vec<String>>,
+    pub(crate) grants: Grants,
+}
+
+/// How long "Allow 10 min" lasts.
+const GRANT_FOR: Duration = Duration::from_secs(600);
+
+/// Apps the person allowed for a while: lowercase process name and until when.
+#[derive(Debug, Default)]
+pub(crate) struct Grants(Mutex<Vec<(String, Instant)>>);
+
+impl Grants {
+    fn list(&self) -> std::sync::MutexGuard<'_, Vec<(String, Instant)>> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    pub(crate) fn add(&self, app: String, now: Instant) {
+        let mut list = self.list();
+        list.retain(|(a, _)| *a != app);
+        list.push((app, now + GRANT_FOR));
+    }
+
+    /// Whether `app` was allowed for a while that has not ended at `now`.
+    pub(crate) fn allows(&self, app: &str, now: Instant) -> bool {
+        let mut list = self.list();
+        list.retain(|(_, until)| *until > now);
+        list.iter().any(|(a, _)| a == app)
+    }
+
+    pub(crate) fn clear(&self) {
+        self.list().clear();
+    }
+}
+
+/// The app an "allow for a while" answer may cover: ordinary actions and sends on an app's own
+/// UI. Never deleting, spending, files, programs, windows or commands (those are other
+/// capabilities or risks), and no sends after the conversation read untrusted content.
+pub(crate) fn grant_scope(action: &ProposedAction, tainted: bool) -> Option<String> {
+    let risk = match action.risk {
+        ActionRisk::Normal => true,
+        ActionRisk::Sensitive => !tainted,
+        _ => false,
+    };
+    let ui = matches!(
+        action.capability,
+        Capability::Interact | Capability::PhysicalInput
+    );
+    let process = action.target.as_ref()?.process.as_deref()?.trim();
+    (risk && ui && !process.is_empty()).then(|| process.to_lowercase())
 }
 
 /// Whether the conversation has read untrusted content (a web or Notion page), which could
@@ -181,6 +229,7 @@ impl Engine {
             taint: Taint::default(),
             memory: None,
             worked: Mutex::new(Vec::new()),
+            grants: Grants::default(),
         }
     }
 
@@ -312,6 +361,18 @@ impl Engine {
                 reason: verdict.reason,
             }),
             PermissionDecision::Confirm => {
+                let scope = if self.config.security.allow_for_a_while {
+                    grant_scope(&action, self.taint.is_set())
+                } else {
+                    None
+                };
+                if scope
+                    .as_deref()
+                    .is_some_and(|app| self.grants.allows(app, Instant::now()))
+                {
+                    tracing::info!(tool = %action.tool, "allowed for a while");
+                    return Ok(false);
+                }
                 let Some(confirmer) = self.confirmer.as_deref() else {
                     return Err(WinwrightError::ConfirmationRequired {
                         reason: format!("{} ({summary})", verdict.reason),
@@ -320,6 +381,10 @@ impl Engine {
                 if lease.is_none() {
                     *lease = Some(self.lease.try_acquire(&session.id)?);
                 }
+                let grant = scope
+                    .as_ref()
+                    .and(action.target.as_ref())
+                    .and_then(|t| t.process.clone());
                 let prompt = ConfirmationPrompt {
                     summary: summary.clone(),
                     target: action.target,
@@ -330,6 +395,7 @@ impl Engine {
                         .confirmation_timeout_seconds
                         .clamp(5, 600)
                         * 1000,
+                    grant,
                 };
                 let cancel = session.operation(Duration::from_secs(600))?.cancel;
                 // Nothing may draw over the dialog or label it while the user decides.
@@ -339,11 +405,14 @@ impl Engine {
                 }
                 let timeout = Duration::from_millis(prompt.timeout_ms);
                 let asked = Instant::now();
-                let approved = tokio::select! {
-                    answer = confirmer.confirm(prompt) => answer?,
+                let answer = tokio::select! {
+                    answer = confirmer.approve(prompt) => answer?,
                     () = cancel.cancelled() => return Err(WinwrightError::Cancelled),
                 };
-                if approved {
+                if let (Approval::ForAWhile, Some(app)) = (answer, scope) {
+                    self.grants.add(app, Instant::now());
+                }
+                if answer != Approval::Denied {
                     // The summary can hold arguments (tokens, paths): never logged.
                     tracing::info!(tool = %action.tool, "user approved");
                     Ok(true)
@@ -831,5 +900,74 @@ impl Engine {
         };
         self.release(replaced.into_iter().collect()).await;
         (format_element_ref(number), window)
+    }
+}
+
+#[cfg(test)]
+mod grant_tests {
+    use super::*;
+
+    fn action(capability: Capability, risk: ActionRisk, process: Option<&str>) -> ProposedAction {
+        ProposedAction {
+            tool: "test".into(),
+            capability,
+            risk,
+            target: Some(TargetSummary {
+                process: process.map(str::to_owned),
+                ..Default::default()
+            }),
+        }
+    }
+
+    #[test]
+    fn grants_cover_ordinary_actions_and_sends_in_one_app() {
+        let ui = |risk| action(Capability::Interact, risk, Some("Discord.exe"));
+        assert_eq!(
+            grant_scope(&ui(ActionRisk::Normal), false).as_deref(),
+            Some("discord.exe")
+        );
+        assert!(grant_scope(&ui(ActionRisk::Sensitive), false).is_some());
+        let keys = action(Capability::PhysicalInput, ActionRisk::Normal, Some("a.exe"));
+        assert!(grant_scope(&keys, false).is_some());
+    }
+
+    #[test]
+    fn grants_never_cover_deleting_programs_files_or_untrusted_sends() {
+        let ui = |risk| action(Capability::Interact, risk, Some("Discord.exe"));
+        for risk in [ActionRisk::Destructive, ActionRisk::Privileged] {
+            assert!(grant_scope(&ui(risk), false).is_none(), "{risk:?}");
+        }
+        assert!(
+            grant_scope(&ui(ActionRisk::Sensitive), true).is_none(),
+            "no sends after the conversation read web content"
+        );
+        assert!(grant_scope(&ui(ActionRisk::Normal), true).is_some());
+        for capability in [
+            Capability::ProcessLaunch,
+            Capability::FileWrite,
+            Capability::Shell,
+            Capability::WindowControl,
+        ] {
+            let a = action(capability, ActionRisk::Normal, Some("Discord.exe"));
+            assert!(grant_scope(&a, false).is_none(), "{capability:?}");
+        }
+        let nameless = action(Capability::Interact, ActionRisk::Normal, None);
+        assert!(grant_scope(&nameless, false).is_none());
+    }
+
+    #[test]
+    fn grants_end_after_ten_minutes_or_when_cleared() {
+        let grants = Grants::default();
+        let t0 = Instant::now();
+        grants.add("discord.exe".into(), t0);
+        assert!(grants.allows("discord.exe", t0 + Duration::from_secs(599)));
+        assert!(!grants.allows("slack.exe", t0), "only the app allowed");
+        assert!(!grants.allows("discord.exe", t0 + GRANT_FOR));
+        grants.add("discord.exe".into(), t0);
+        grants.clear();
+        assert!(
+            !grants.allows("discord.exe", t0),
+            "the emergency stop ends it"
+        );
     }
 }

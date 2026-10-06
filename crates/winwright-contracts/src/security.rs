@@ -86,6 +86,17 @@ pub struct ConfirmationPrompt {
     pub reason: String,
     /// Unanswered prompts are denied after this long.
     pub timeout_ms: u64,
+    /// The app an "allow for a while" answer would cover; `None` offers only "Allow once".
+    pub grant: Option<String>,
+}
+
+/// How the person answered a confirmation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Approval {
+    Denied,
+    Once,
+    /// This action, and for a while the same kind of action in the prompt's `grant` app.
+    ForAWhile,
 }
 
 /// Trusted local approval (spec §66). Only the human at the machine can answer; a model can
@@ -93,4 +104,18 @@ pub struct ConfirmationPrompt {
 pub trait Confirmer: Send + Sync {
     fn confirm<'a>(&'a self, prompt: ConfirmationPrompt)
     -> crate::backend::BackendFuture<'a, bool>;
+
+    /// Like `confirm`, and may answer `ForAWhile` when the prompt offers a grant.
+    fn approve<'a>(
+        &'a self,
+        prompt: ConfirmationPrompt,
+    ) -> crate::backend::BackendFuture<'a, Approval> {
+        Box::pin(async move {
+            Ok(if self.confirm(prompt).await? {
+                Approval::Once
+            } else {
+                Approval::Denied
+            })
+        })
+    }
 }

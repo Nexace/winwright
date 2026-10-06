@@ -68,6 +68,7 @@ fn prompt(reason: &str, timeout_ms: u64) -> ConfirmationPrompt {
         target: None,
         reason: reason.into(),
         timeout_ms,
+        grant: None,
     }
 }
 
@@ -144,6 +145,7 @@ async fn manual_a_real_click_allows() {
             target: None,
             reason: "manual test that a real click still approves".into(),
             timeout_ms: 20_000,
+            grant: None,
         })
         .await
         .unwrap();

@@ -90,6 +90,9 @@ pub struct SecurityConfig {
     pub audit: bool,
     /// Seconds an unanswered confirmation dialog waits before denying.
     pub confirmation_timeout_seconds: u64,
+    /// The Allow dialog may offer "Allow 10 min": ordinary actions and sends in that one app
+    /// then go through without asking for ten minutes.
+    pub allow_for_a_while: bool,
 }
 
 impl Default for SecurityConfig {
@@ -104,6 +107,7 @@ impl Default for SecurityConfig {
             // Below the 60 s many AI apps allow a tool call, so a late answer cannot land after the
             // app has already told the model the call failed.
             confirmation_timeout_seconds: 45,
+            allow_for_a_while: true,
         }
     }
 }
